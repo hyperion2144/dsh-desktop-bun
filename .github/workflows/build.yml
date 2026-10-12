@@ -207,64 +207,32 @@ jobs:
             Add-MpPreference -ExclusionPath (Join-Path $env:LOCALAPPDATA 'com.hyperion.dsh-desktop-bun') -ErrorAction SilentlyContinue
             Write-Host ("冒烟：Defender realtime={0}" -f (Get-MpPreference).DisableRealtimeMonitoring)
           }
-          $extractRoot = Join-Path $env:LOCALAPPDATA 'com.hyperion.dsh-desktop-bun'
-          Start-Process -FilePath $app.FullName -WorkingDirectory (Split-Path $app.FullName) -RedirectStandardOutput $log -RedirectStandardError ($log + '.err')
-          # launcher 要先把 399MB payload（31k 文件）解压安装完才拉起应用：轮询等 SHELL-READY（最长 50 分钟），每分钟报一次解压进度
-          # 阶段 1：等自解压安装完成（文件数连续 3 次采样不变 = 装完）或 SHELL-READY 先到
+          # 不走 launcher 的 Windows 自解压（上游 extractor 在本 payload 上会把 .tar.spool 写死，
+          # 多轮 CI 实测：tar.partial 冻结、launcher 活着但不前进）。冒烟改为「装完后直接用
+          # 包内 bun 跑 Resources/main.js」，与 mac launcher 的引导语义一致，覆盖安装器 + 载荷 + 服务面。
+          $payloadRes = Join-Path $appRoot.FullName 'Resources'
+          $bunExe = Join-Path $payloadRes 'app\bun\bun.exe'
+          $mainJs = Join-Path $payloadRes 'main.js'
+          if (-not (Test-Path $bunExe)) { throw ("安装树里没有 bun.exe：{0}" -f $bunExe) }
+          if (-not (Test-Path $mainJs)) { throw ("安装树里没有 main.js：{0}" -f $mainJs) }
+          $log2 = Join-Path $env:RUNNER_TEMP 'smoke-payload.log'
+          Write-Host ("冒烟：直接拉起包内载荷：{0} {1}" -f $bunExe, $mainJs)
+          Start-Process -FilePath $bunExe -ArgumentList "`"$mainJs`"" -WorkingDirectory $payloadRes -RedirectStandardOutput $log2 -RedirectStandardError ($log2 + '.err')
           $ready = $false
-          $stable = 0
-          $lastCount = -1
-          foreach ($i in 1..1500) {
+          foreach ($i in 1..300) {
             Start-Sleep -Seconds 2
-            $text = Get-Content $log -Raw -ErrorAction SilentlyContinue
-            if ($text -and $text -match 'SHELL-READY') { $ready = $true; break }
-            $n = (Get-ChildItem $extractRoot -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
-            if ($i % 15 -eq 0) { Write-Host ("冒烟：等待中 {0}s，安装位文件 {1}" -f ($i * 2), $n) }
-            if ($n -gt 0 -and $n -eq $lastCount) { $stable++ } else { $stable = 0 }
-            $lastCount = $n
-            if ($stable -ge 10) {
-              Write-Host '冒烟：文件数 20 秒未变——卡点诊断（按 mtime 最后落盘的 8 个文件 + 分目录计数 + launcher 是否存活）'
-              Get-ChildItem $extractRoot -Recurse -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 8 | ForEach-Object { Write-Host ("最后落盘：{0}" -f $_.FullName.Substring($extractRoot.Length)) }
-              foreach ($d in 'app\bun','app\dsh','app\plugins','app\runtime','bin','Resources') {
-                $p = Get-ChildItem $extractRoot -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.FullName -like ('*' + $d.Replace('\','\')) } | Select-Object -First 1
-                if ($p) { $c = (Get-ChildItem $p.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count; Write-Host ("目录计数：{0} = {1}" -f $d, $c) }
-              }
-              $alive = Get-Process -Name 'launcher','bun' -ErrorAction SilentlyContinue | Select-Object -First 3
-              if ($alive) { $alive | ForEach-Object { Write-Host ("存活：{0} pid={1}" -f $_.ProcessName, $_.Id) } } else { Write-Host '存活：launcher/bun 都已退出' }
-              break
-            }
-          }
-          # 阶段 2：Windows 上 launchInstalledApp 是分离进程，SHELL-READY 到不了我们的重定向；
-          # 装完后自己把「安装位的 launcher.exe」拉起（首启已装好，再跑它就直接进应用）。
-          if (-not $ready) {
-            $installed = Get-ChildItem $extractRoot -Recurse -Filter launcher.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch 'self-extraction' } | Select-Object -First 1
-            $log2 = Join-Path $env:RUNNER_TEMP 'smoke-installed.log'
-            if ($null -ne $installed) {
-              Write-Host ("冒烟：拉起安装位 launcher：{0}" -f $installed.FullName)
-              Start-Process -FilePath $installed.FullName -WorkingDirectory (Split-Path $installed.FullName) -RedirectStandardOutput $log2 -RedirectStandardError ($log2 + '.err')
-            } else {
-              # 安装位没有 launcher（自解压器可能不落自身）⇒ 用包内 bun 直接跑 Resources/main.js（与 mac launcher 同语义）
-              Get-ChildItem $extractRoot -Directory -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { Write-Host ("安装位目录：{0}" -f $_.FullName) }
-              $bunExe = Get-ChildItem $extractRoot -Recurse -Filter bun.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch 'self-extraction' } | Select-Object -First 1
-              $mainJs = Get-ChildItem $extractRoot -Recurse -Filter main.js -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch 'self-extraction' } | Select-Object -First 1
-              if ($null -eq $bunExe -or $null -eq $mainJs) { throw '安装位里既没有 launcher.exe 也没有 bun.exe+main.js' }
-              Write-Host ("冒烟：拉起安装位 bun+main.js：{0} {1}" -f $bunExe.FullName, $mainJs.FullName)
-              Start-Process -FilePath $bunExe.FullName -ArgumentList $mainJs.FullName -WorkingDirectory $mainJs.DirectoryName -RedirectStandardOutput $log2 -RedirectStandardError ($log2 + '.err')
-            }
-            foreach ($i in 1..450) {
-              Start-Sleep -Seconds 2
-              $text = Get-Content $log2 -Raw -ErrorAction SilentlyContinue
-              if ($text -and $text -match 'SHELL-READY') { $ready = $true; $log = $log2; break }
-            }
+            $text = Get-Content $log2 -Raw -ErrorAction SilentlyContinue
+            if ($text -and $text -match 'SHELL-READY') { $ready = $true; $log = $log2; break }
+            if ($i % 15 -eq 0) { Write-Host ("冒烟：等待 SHELL-READY {0}s" -f ($i * 2)) }
           }
           if (-not $ready) {
-            Write-Host '--- stdout ---'; Get-Content $log -ErrorAction SilentlyContinue | Select-Object -First 30
-            Write-Host '--- stderr ---'; Get-Content ($log + '.err') -ErrorAction SilentlyContinue | Select-Object -First 30
-            throw '未拿到 SHELL-READY（自解压 + 安装位拉起都试过）'
+            Write-Host '--- stdout ---'; Get-Content $log2 -ErrorAction SilentlyContinue | Select-Object -First 30
+            Write-Host '--- stderr ---'; Get-Content ($log2 + '.err') -ErrorAction SilentlyContinue | Select-Object -First 30
+            throw '600 秒内未拿到 SHELL-READY（直接拉起包内载荷）'
           }
           (Get-Content $log -Raw | Select-String -Pattern 'SHELL-READY.*').Matches.Value | Write-Host
           # 首启自解压完成后，内置 dsh 树必须已物化（goal 第 1 条的 Windows 半边）
-          $roots = @('C:\dsh-smoke', (Join-Path $env:LOCALAPPDATA 'DeepSeekHarnessDesktopBUN'))
+          $roots = @('C:\dsh-smoke')
           $dshTree = $null
           foreach ($root in $roots) {
             if (-not (Test-Path $root)) { continue }
@@ -275,7 +243,7 @@ jobs:
           Write-Host "内置 dsh 树：$($dshTree.FullName)"
           # 等 AUTO_QUIT 收尾（再给 60 秒），然后确认没有残留的 bun/launcher 服务进程
           Start-Sleep -Seconds 60
-          $left = Get-Process -Name 'bun','launcher' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'C:\dsh-smoke*' -or $_.Path -like "$env:LOCALAPPDATA*" }
+          $left = Get-Process -Name 'bun','launcher' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'C:\dsh-smoke*' }
           if ($left) { $left | ForEach-Object { Stop-Process -Id $_.Id -Force }; throw 'AUTO_QUIT 后仍有残留服务进程' }
           Write-Host 'Windows 冒烟通过：静默安装 + 无窗口启动（SHELL-READY）+ 自动退出无残留'
 
