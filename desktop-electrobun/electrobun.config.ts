@@ -39,9 +39,9 @@ function pluginCopy(sourceDir: string, packageName: string, files: readonly stri
   return map
 }
 
-const desktopPluginDir = resolve(repoDir, '..', 'desktop-plugin')
+const desktopPluginDir = join(repoDir, 'desktop-plugin')
 const desktopPluginFiles = ['package.json', 'index.js', 'cordis.patch.yml', 'README.md', 'LICENSE', ...listFiles(desktopPluginDir, 'lib')]
-const mobileAccessDir = resolve(repoDir, '..', 'plugins', 'dsh-mobile-access')
+const mobileAccessDir = join(repoDir, 'plugins', 'dsh-mobile-access')
 const mobileAccessFiles = ['package.json', 'cordis.patch.yml', ...listFiles(mobileAccessDir, 'lib'), ...listFiles(mobileAccessDir, 'client')]
 
 export default {
