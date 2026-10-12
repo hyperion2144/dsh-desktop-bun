@@ -228,10 +228,19 @@ jobs:
           # 装完后自己把「安装位的 launcher.exe」拉起（首启已装好，再跑它就直接进应用）。
           if (-not $ready) {
             $installed = Get-ChildItem $extractRoot -Recurse -Filter launcher.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch 'self-extraction' } | Select-Object -First 1
-            if ($null -eq $installed) { throw '安装位里找不到 launcher.exe' }
-            Write-Host ("冒烟：拉起安装位 launcher：{0}" -f $installed.FullName)
             $log2 = Join-Path $env:RUNNER_TEMP 'smoke-installed.log'
-            Start-Process -FilePath $installed.FullName -WorkingDirectory (Split-Path $installed.FullName) -RedirectStandardOutput $log2 -RedirectStandardError ($log2 + '.err')
+            if ($null -ne $installed) {
+              Write-Host ("冒烟：拉起安装位 launcher：{0}" -f $installed.FullName)
+              Start-Process -FilePath $installed.FullName -WorkingDirectory (Split-Path $installed.FullName) -RedirectStandardOutput $log2 -RedirectStandardError ($log2 + '.err')
+            } else {
+              # 安装位没有 launcher（自解压器可能不落自身）⇒ 用包内 bun 直接跑 Resources/main.js（与 mac launcher 同语义）
+              Get-ChildItem $extractRoot -Directory -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { Write-Host ("安装位目录：{0}" -f $_.FullName) }
+              $bunExe = Get-ChildItem $extractRoot -Recurse -Filter bun.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch 'self-extraction' } | Select-Object -First 1
+              $mainJs = Get-ChildItem $extractRoot -Recurse -Filter main.js -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch 'self-extraction' } | Select-Object -First 1
+              if ($null -eq $bunExe -or $null -eq $mainJs) { throw '安装位里既没有 launcher.exe 也没有 bun.exe+main.js' }
+              Write-Host ("冒烟：拉起安装位 bun+main.js：{0} {1}" -f $bunExe.FullName, $mainJs.FullName)
+              Start-Process -FilePath $bunExe.FullName -ArgumentList $mainJs.FullName -WorkingDirectory $mainJs.DirectoryName -RedirectStandardOutput $log2 -RedirectStandardError ($log2 + '.err')
+            }
             foreach ($i in 1..450) {
               Start-Sleep -Seconds 2
               $text = Get-Content $log2 -Raw -ErrorAction SilentlyContinue
