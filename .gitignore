@@ -1,0 +1,9 @@
+node_modules/
+.DS_Store
+.builtin-stage/
+resources/builtin/
+desktop-electrobun/node_modules/
+desktop-electrobun/build/
+desktop-electrobun/artifacts/
+desktop-electrobun/builtin-runtime/
+desktop-electrobun/.hutch/

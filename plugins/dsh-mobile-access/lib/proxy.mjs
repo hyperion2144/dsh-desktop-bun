@@ -1,0 +1,676 @@
+// Host/Origin 改写反向代理（HTTP + WebSocket upgrade 透传）。
+// 行为对齐 dsh-pocket 的 lib/proxy.mjs（线上验证可用的实现）：
+//   - 入站 Host/Origin 改写成 upstream（loopback），使 dsh /api 信任栅栏看到 loopback；
+//   - HTML 注入到 <head> 之后并修正 Content-Length（不破坏页面）；
+//   - WebSocket upgrade 全头回传 + 首帧（head）先于 end() 写上游（mux 初始 RPC 不丢）；
+//   - WS 空闲保活：upgrade 后上游→客户端做帧感知泵，空闲时在帧边界注入 ping（pong 超时断开）；
+//   - 连接级跟踪：所有 socket 挂 error 静默（防 EPIPE 打崩 dsh 进程），close 时全销毁。
+// 额外保留：可选 auth 钩子（配对 cookie 门禁，dsh-mobile-access 自用）。
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { createGzip, createBrotliCompress, constants as zlibConstants } from 'node:zlib';
+
+/** 简易 access log 写到 $DSH_HOME/mobile-access.log（用户能 tail/f 看真实转发） */
+const LOG_PATH = path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'mobile-access.log');
+let logStream = null;
+try { logStream = fs.createWriteStream(LOG_PATH, { flags: 'a' }); } catch { /* noop */ }
+
+// ── 上游连接复用与 Nagle（#144 传输层）──
+// 原先每次 http.request 都 agent:false → **每请求新建 TCP**。手机上「打字」这类小请求高频场景
+// （每次输入/回显都是若干小 POST）会被连接建立 + Nagle 小包合并延迟放大；LAN 快不代表公网穿透快。
+// 故：① 上游走 keep-alive 池；② 两侧 socket 关 Nagle（setNoDelay）；③ 逐跳头不原样转发。
+const upstreamAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 15000, maxSockets: 64 });
+/** 关 Nagle：小包立即发出，不等 ACK 合并。 */
+function noDelay(sock) { try { sock?.setNoDelay?.(true); } catch { /* noop */ } }
+/** 逐跳头（RFC 9110）：不得在代理两侧原样转发——由本次连接自己决定。 */
+const HOP_BY_HOP = ['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'te', 'trailer', 'upgrade'];
+function stripHopByHop(headers) { for (const k of HOP_BY_HOP) delete headers[k]; return headers; }
+function accessLog(parts) {
+  const line = `[${new Date().toISOString()}] ${parts.join(' ')}\n`;
+  try { logStream?.write(line); } catch { /* noop */ }
+  try { process.stdout.write(line); } catch { /* noop */ }
+}
+
+export const POLYFILL = '<script data-dsh-mobile-polyfill="1">!function(){if(self.crypto&&!self.crypto.randomUUID){self.crypto.randomUUID=function(){var b=new Uint8Array(16);self.crypto.getRandomValues(b);b[6]=b[6]&15|64;b[8]=b[8]&63|128;var h="";for(var i=0;i<16;i++){var x=b[i].toString(16);h+=(x.length<2?"0":"")+x;if(i===3||i===5||i===7||i===9)h+="-";}return h;}}}();</script>';
+
+/**
+ * 远程端「页面拥有 Host」能力位（#145）：dsh 客户端把**非 loopback 页面**当远程浏览器，
+ * 特权面（服务端设置 RPC）不开放 → 插件设置、dsh 服务端设置、壳的手机访问信息一律拿不到。
+ * 判定原文（dsh-client-connection）：
+ *   isLoopback = transport?.ownsHost === true || 无 location || hostname ∈ loopback
+ * 浏览器禁止伪造 `location.hostname`（历史 LOOPBACK_HOSTNAME_PATCH 因此失效，已删除），
+ * 但官方留了能力位 `ClientTransportHooks.ownsHost`：声明页面拥有 Host，
+ * `ctx.connection.isLoopback` 即无视页面 authority 一律为真。只给该字段即可——客户端在没有
+ * rpc/fetch/openStream 时回落默认 HTTP + WebSocket 载体
+ * （`rpc ?? createWebConnectionRpc(fetch, openStream)`），请求仍全部经 lane 反代。
+ * 顺序：必须早于 dsh 客户端 bundle 执行（<head> 最前注入）。注入仅发生在已配对响应上
+ * （反代门禁先于注入）。
+ */
+export const OWNS_HOST_PATCH = '<script data-dsh-mobile-owns-host="1">!function(){try{var g=globalThis,t=g.__DSH_TRANSPORT__;if(t&&typeof t==="object"){t.ownsHost=true;}else{g.__DSH_TRANSPORT__={ownsHost:true};}}catch(e){}}();</script>';
+
+/**
+ * 远程端主题视觉同步：dsh 官方在非 loopback 客户端把 settingsScope 锁成 memory
+ * 模式（settings.describe 不发起），ui-theme preference 永远 "system" → body 无
+ * `data-ds-dark-theme` → 皮肤 CSS 走浅色背景（§2.2 主题透传）。本补丁从 lane 的
+ * 保留命名空间端点（`/__dsh-mobile/api/pair/info`，已配对即放行）读桌面端 ui-theme.preference，强制 body 属性，
+ * 并用 MutationObserver 守卫（ui-theme publish / React 重渲染可能清掉该属性）。
+ * 设置页选项值仍显示 system（官方 memory 模式限制，UI 显示层被锁死，无法注入改）。
+ */
+export const THEME_SYNC_PATCH = '<script data-dsh-mobile-theme-sync="1">!function(){var pref=null;function enforce(){try{var b=document.body;if(!b)return;var want=pref==="dark";var has=b.hasAttribute("data-ds-dark-theme");if(want!==has){if(want)b.setAttribute("data-ds-dark-theme","");else b.removeAttribute("data-ds-dark-theme");}}catch(e){}}function load(){fetch("/__dsh-mobile/api/pair/info",{headers:{"accept":"application/json"}}).then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error("HTTP "+r.status+" "+t)});return r.json()}).then(function(d){var v=d&&d.uiTheme;if(typeof v==="string"&&(v==="dark"||v==="light"||v==="system")){pref=v;enforce();}}).catch(function(){})}if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",load)}else{load()}try{var mo=new MutationObserver(function(){enforce()});if(document.body)mo.observe(document.body,{attributes:true,attributeFilter:["data-ds-dark-theme"],subtree:false});else{var mo2=new MutationObserver(function(){if(document.body){mo2.disconnect();mo.observe(document.body,{attributes:true,attributeFilter:["data-ds-dark-theme"],subtree:false});enforce();}});mo2.observe(document.documentElement,{childList:true});}}catch(e){}}();</script>';
+
+export function desktopEnvPatchScript(platform) {
+  const p = ['darwin','win32','linux'].includes(platform) ? platform : 'linux';
+  return '<script data-dsh-mobile-desktop-patch="1">!function(){try{var s=new URLSearchParams(location.search);if(!s.has("dsh-desktop-mode")||!s.has("dsh-desktop-platform")){s.set("dsh-desktop-mode","compatibility");s.set("dsh-desktop-platform","' + p + '");var u=new URL(location.href);u.search=s.toString();history.replaceState(null,"",u);}}catch(e){}}();</script>';
+}
+
+const INJECT_MARK = 'data-dsh-mobile-polyfill';
+
+/**
+ * #154：**回环端口映射**。远程页面里出现的 `http(s)://127.0.0.1:<port>/…` 与对应的 ws 地址，
+ * 由注入的改写层换成 lane 上的映射路径 `/_loopback/<port>/<rest>`，再由本代理转发到那个回环端口
+ * ——于是「其它插件访问本机其它端口」在远程/手机侧也能工作。前缀刻意**不在** lane 保留命名空间内：
+ * `LANE_PREFIX/*` 属于 lane 自有控制面（先于代发路由被接走），映射是**代理**能力，住在命名空间外。
+ *
+ * 安全边界：只允许 127.0.0.1、只接受 1..65535、**且请求必须已过配对门禁**（映射请求走同一条
+ * auth 门禁，未配对设备拿不到）；lane 不做任意主机的开放代理。
+ */
+export const LOOPBACK_PATH_PREFIX = '/_loopback/';
+
+/** 解析映射路径 → `{ host, port, path }`；非映射路径返回 null。 */
+export function loopbackTarget(rawUrl) {
+  const url = String(rawUrl ?? '');
+  if (!url.startsWith(LOOPBACK_PATH_PREFIX)) return null;
+  const rest = url.slice(LOOPBACK_PATH_PREFIX.length);
+  const slash = rest.indexOf('/');
+  const portStr = slash === -1 ? rest : rest.slice(0, slash);
+  if (!/^\d{1,5}$/.test(portStr)) return null;
+  const port = Number(portStr);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return { host: '127.0.0.1', port, path: slash === -1 ? '/' : rest.slice(slash) };
+}
+
+/**
+ * 注入到经 lane 的页面的 URL 改写层：把指向本机回环端口的绝对地址改成映射路径。
+ * 覆盖 WebSocket / fetch / XHR / EventSource / window.open（与壳侧 page_shim.js 同构，
+ * 但基准是 lane 自己的 origin）。相对路径不碰（同源直过）。
+ */
+export const LOOPBACK_URL_PATCH = '<script data-dsh-mobile-loopback="1">!function(){var P="/_loopback/";function H(u){try{var s=String(u);var m=/^(https?):\\/\\/(127\\.0\\.0\\.1|localhost|\\[::1\\])(?::(\\d+))?([\\s\\S]*)$/i.exec(s);if(m)return location.origin+P+(m[3]||"80")+(m[4]||"/");return s;}catch(e){return u;}}function W(u){try{var s=String(u);var m=/^wss?:\\/\\/(127\\.0\\.0\\.1|localhost|\\[::1\\])(?::(\\d+))?([\\s\\S]*)$/i.exec(s);if(m)return (location.protocol==="https:"?"wss://":"ws://")+location.host+P+(m[2]||"80")+(m[3]||"/");return s;}catch(e){return u;}}var NW=globalThis.WebSocket;function PW(u,p){var f=W(u);return p===undefined?new NW(f):new NW(f,p);}PW.prototype=NW.prototype;["CONNECTING","OPEN","CLOSING","CLOSED"].forEach(function(k){try{PW[k]=NW[k];}catch(e){}});globalThis.WebSocket=PW;var NF=globalThis.fetch;globalThis.fetch=function(i,x){try{if(typeof i==="string")i=H(i);else if(i&&i.url)i=H(i.url);}catch(e){}return NF.call(globalThis,i,x);};var NX=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){try{u=H(u);}catch(e){}return arguments.length>2?NX.call(this,m,u,arguments[2]):NX.call(this,m,u);};var NE=globalThis.EventSource;globalThis.EventSource=function(u,c){try{u=H(u);}catch(e){}return new NE(u,c);};var NO=globalThis.open;globalThis.open=function(u,n,f){try{if(u!=null)u=H(u);}catch(e){}return NO.call(globalThis,u,n,f);};}();<\/script>';
+
+/**
+ * 把浏览器可见的权威改写成 loopback 权威（Host 和 Origin 都改）。
+ * dsh 0.1.6+ 的 API 守卫（核心 isTrustedApiRequest 与 task-board/beauticode 等
+ * 插件守卫）要求「浏览器同源信号」：sec-fetch-site: same-origin 头，或
+ * Origin == Host。手机老内核 WebView 不发 Sec-Fetch-* 头、同源 GET 也不带
+ * Origin（#78），lane 作为受信反代在此补齐：无值注入 same-origin，已有值
+ * 保留（显式 cross-site 不覆盖——真正跨站请求仍由上游守卫拒绝，不引入新开放面）。
+ */
+function loopbackAuthority(headers, upstreamHost, upstreamPort) {
+  const authority = `${upstreamHost}:${upstreamPort}`;
+  headers.Host = authority;
+  if (headers.origin) headers.origin = `http://${authority}`;
+  if (headers.Origin) headers.Origin = `http://${authority}`;
+  if (headers['sec-fetch-site'] === undefined) headers['sec-fetch-site'] = 'same-origin';
+  return headers;
+}
+function isCompressed(headers) {
+  return /(^|,\s*)(gzip|br|deflate)(\s*,|$)/i.test(String(headers['content-encoding'] ?? ''));
+}
+
+/**
+ * Web-UI 系列插件兼容：dsh 前端/第三方插件在非 loopback 环境会请求 `/remote` 前缀
+ * （/remote/api/*、/remote/sidebar/*、/remote/api/events.*），上游 web-app 只实现
+ * `/api` 面。本代理即「远程通道」实现：剥离 `/remote` 前缀后转发上游，
+ * 使插件设置/会话/皮肤等数据在远程端可读（服务端设置本就在，通道通了即恢复）。
+ * 仅剥首段：/remote/api/x → /api/x；/remote → /。
+ */
+function normalizeRemotePath(url) {
+  const q = url.indexOf('?');
+  const path = q === -1 ? url : url.slice(0, q);
+  const query = q === -1 ? '' : url.slice(q);
+  if (path === '/remote' || path.startsWith('/remote/')) {
+    const rest = path.slice('/remote'.length) || '/';
+    return rest + query;
+  }
+  return url;
+}
+
+/** 请求是否期望 HTML（浏览器导航）。 */
+function isHtmlRequest(req) {
+  const accept = String(req.headers.accept ?? '');
+  return accept.includes('text/html') || req.url === '/' || /\.html?$/i.test(String(req.url));
+}
+
+/**
+ * WS 空闲保活（手机链路对策）：dsh 客户端对 /api/remote.mux 的复用 WebSocket 没有应用层
+ * 心跳，中间代理（cpolar/cloudflared 等）对静默连接的空闲超时会掐断长连接，手机端即表现
+ * 为「连接异常」重连循环。lane 在 upgrade 后的 上游→客户端 方向做帧感知泵：完整帧原样
+ * 转发，空闲时在帧边界注入 WS ping（服务器→客户端未掩码 2 字节；浏览器协议栈按 RFC 6455
+ * 自动回 pong，无需页面配合）；发出 ping 后 pongTimeoutMs 内客户端无任何入站字节即判定
+ * 链路死亡，主动断开让 dsh 客户端走指数退避快速重连，而不是挂在僵尸连接上。
+ */
+export const WS_PING_FRAME = Buffer.from([0x89, 0x00]);
+/** wsFrameLength 结果哨兵：-1 帧/头不完整；-2 帧头声明非法（超长），调用方回退 raw 透传。 */
+export const FRAME_INCOMPLETE = -1;
+export const FRAME_INVALID = -2;
+/** 单帧声明长度的安全上限（2GB-1）：防异常/恶意帧头把 lane 内存撑爆。 */
+const FRAME_LENGTH_CAP = 0x7fffffff;
+
+/**
+ * 计算 offset 处一个 WebSocket 帧的完整字节数（只解析信封，不解释 RSV/扩展——
+ * permessage-deflate 等扩展改变载荷语义，不改变信封长度；对「服务器帧带掩码」的非法
+ * 输入保持宽容，按存在掩码键解析，保证透传字节不变）。
+ * @returns 完整帧字节数；FRAME_INCOMPLETE；FRAME_INVALID。
+ */
+export function wsFrameLength(buf, offset) {
+  if (buf.length - offset < 2) return FRAME_INCOMPLETE;
+  const masked = (buf[offset + 1] & 0x80) !== 0;
+  const len7 = buf[offset + 1] & 0x7f;
+  let headerLen = 2 + (masked ? 4 : 0);
+  let payloadLen = len7;
+  if (len7 === 126) {
+    if (buf.length - offset < headerLen + 2) return FRAME_INCOMPLETE;
+    payloadLen = buf.readUInt16BE(offset + 2);
+    headerLen += 2;
+  } else if (len7 === 127) {
+    if (buf.length - offset < headerLen + 8) return FRAME_INCOMPLETE;
+    const hi = buf.readUInt32BE(offset + 2);
+    const lo = buf.readUInt32BE(offset + 6);
+    if (hi > 0 || lo > FRAME_LENGTH_CAP) return FRAME_INVALID;
+    payloadLen = lo;
+    headerLen += 8;
+  }
+  if (payloadLen > FRAME_LENGTH_CAP) return FRAME_INVALID;
+  return headerLen + payloadLen;
+}
+
+/**
+ * 解码一帧「客户端→服务器」方向的 WS 帧（带掩码）：供诊断与帧级处理使用。
+ * 返回 { opcode, fin, payload, total }；null = 帧/头不完整；undefined = 帧头非法。
+ */
+function decodeClientFrame(buf, offset) {
+  if (buf.length - offset < 2) return null;
+  const b0 = buf[offset];
+  const b1 = buf[offset + 1];
+  const masked = (b1 & 0x80) !== 0;
+  const len7 = b1 & 0x7f;
+  let headerLen = 2 + (masked ? 4 : 0);
+  let payloadLen = len7;
+  if (len7 === 126) {
+    if (buf.length - offset < headerLen + 2) return null;
+    payloadLen = buf.readUInt16BE(offset + 2);
+    headerLen += 2;
+  } else if (len7 === 127) {
+    if (buf.length - offset < headerLen + 8) return null;
+    const hi = buf.readUInt32BE(offset + 2);
+    if (hi > 0) return undefined;
+    payloadLen = buf.readUInt32BE(offset + 6);
+    headerLen += 8;
+  }
+  if (payloadLen > 0x7fffffff) return undefined;
+  if (buf.length - offset < headerLen + payloadLen) return null;
+  const payload = Buffer.from(buf.subarray(offset + headerLen, offset + headerLen + payloadLen));
+  if (masked) {
+    const mask = buf.subarray(offset + headerLen - 4, offset + headerLen);
+    for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
+  }
+  return { opcode: b0 & 0x0f, fin: (b0 & 0x80) !== 0, payload, total: headerLen + payloadLen };
+}
+
+/**
+ * 上游→客户端的帧感知泵。onData 收上游字节，按帧边界整帧转发（字节保真，含分片帧/
+ * 控制帧/压缩帧）；空闲 pingIntervalMs 且无半帧积压时注入 WS_PING_FRAME；发出 ping 后
+ * pongTimeoutMs 内 noteClientActivity 未被调用（客户端无任何入站字节）则回调 onPongTimeout。
+ * 帧头解析失败（FRAME_INVALID）一次性回退 raw 透传，保证未知协议扩展下字节不丢不乱。
+ */
+function createWsKeepalivePump({ target, pingIntervalMs, pongTimeoutMs, onPongTimeout, onFallbackRaw, onUpstreamFrame }) {
+  let buf = null;
+  let paused = false;
+  let rawMode = false;
+  let stopped = false;
+  let idleTimer = null;
+  let pongTimer = null;
+  const clearTimers = () => {
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+    if (pongTimer) { clearTimeout(pongTimer); pongTimer = null; }
+  };
+  const unref = (t) => { if (t && typeof t.unref === 'function') t.unref(); return t; };
+  // 空闲计时：上游静默超过 pingIntervalMs 且无半帧积压时注入 ping。创建即武装（上游可能
+  // 从头到尾静默）；每次上游有新字节都重置。计时器全部 unref，绝不拖住 dsh 进程退出。
+  const armIdle = () => {
+    if (stopped || rawMode || pingIntervalMs <= 0) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = unref(setTimeout(() => {
+      idleTimer = null;
+      if (stopped || rawMode || paused) return;
+      if (buf === null || buf.length === 0) {
+        try { target.write(WS_PING_FRAME); } catch { /* 断连由 teardown 清理 */ }
+        // pong 计时只在「首个未应答 ping」时武装：后续 ping 不重置 deadline（否则
+        // pingIntervalMs < pongTimeoutMs 时计时器被无限滑动，判死永不触发）。
+        // 客户端任意入站字节经 noteClientActivity 清除；清空后由下一个 ping 重新武装。
+        if (pongTimer === null) {
+          pongTimer = unref(setTimeout(() => { pongTimer = null; if (!stopped) onPongTimeout(); }, pongTimeoutMs));
+        }
+      }
+      armIdle();
+    }, pingIntervalMs));
+  };
+  // 创建即武装：上游可能从头到尾静默（纯事件监听连接），首个 ping 不应依赖 onData 触发。
+  armIdle();
+  return {
+    /** 上游新到字节：攒帧、按帧边界转发；上游活跃即重置空闲计时。 */
+    onData(chunk) {
+      if (stopped) return;
+      if (rawMode) { target.write(chunk); return; }
+      buf = buf === null ? chunk : Buffer.concat([buf, chunk]);
+      if (paused) return;
+      this.processBuf();
+      armIdle();
+    },
+    processBuf() {
+      if (stopped || paused || rawMode || buf === null || buf.length === 0) return;
+      let offset = 0;
+      while (true) {
+        const n = wsFrameLength(buf, offset);
+        if (n === FRAME_INVALID) {
+          // 异常帧头：一次性回退 raw 透传（先把积压原样写出去，后续 chunk 不再解析）。
+          if (onFallbackRaw) onFallbackRaw();
+          rawMode = true;
+          clearTimers();
+          if (!target.write(buf)) {
+            paused = true;
+            target.once('drain', () => { paused = false; });
+          }
+          buf = null;
+          return;
+        }
+        if (n === FRAME_INCOMPLETE) break;
+        if (onUpstreamFrame) {
+          const fStart = offset;
+          const len7 = buf[fStart + 1] & 0x7f;
+          const hLen = 2 + (len7 === 126 ? 2 : len7 === 127 ? 8 : 0);
+          try { onUpstreamFrame(buf[fStart] & 0x0f, buf.subarray(fStart + hLen, fStart + n)); } catch { /* 诊断回调不抛出 */ }
+        }
+        offset += n;
+      }
+      if (offset === 0) return;
+      const out = buf.subarray(0, offset);
+      buf = offset >= buf.length ? null : buf.subarray(offset);
+      if (!target.write(out)) {
+        paused = true;
+        target.once('drain', () => { paused = false; this.processBuf(); });
+      }
+    },
+    /** 客户端入站任意字节 = 存活（pong 或业务帧），清除 pong 超时判定。已知边角：客户端
+    * 单向喋喋不休而返程半死时不判死——但 ping 写不进对端时 TCP 重传/超时会兜底断开。 */
+    noteClientActivity() {
+      if (pongTimer) { clearTimeout(pongTimer); pongTimer = null; }
+    },
+    /** 上游 EOF：把残余字节转发完并传播 FIN（对齐原 pipe 的 end 行为）。 */
+    onUpstreamEnd() {
+      if (stopped) return;
+      if (buf !== null && buf.length > 0) { try { target.write(buf); } catch { /* noop */ } buf = null; }
+      try { target.end(); } catch { /* noop */ }
+    },
+    stop() { stopped = true; clearTimers(); },
+  };
+}
+
+/**
+ * 创建改写反代服务（对齐 dsh-pocket proxy.mjs 的转发行为）。
+ * @param opts { upstreamHost, upstreamPort, inject: string[], auth: (req) => {ok, setCookie} | null, onInjectSkip: fn }
+ * @returns {server, listen(port?), close()}
+ */
+export function createRewriteProxy(opts) {
+  const {
+    upstreamHost = '127.0.0.1',
+    upstreamPort = 3080,
+    inject = [],
+    auth = null,
+    // lane 自有路由分发器（配对入口 / 设备 / 隧道…）：**先于**配对门禁调用。
+    // lane 就是一个 dsh 带 token 地址，配对入口不能被门禁截胡（实机：裸 TCP 请求
+    // 拿到的是门禁的 {"error":"unpaired"}）。
+    laneRoutes = null,
+    onInjectSkip = null,
+    // dsh web 会话凭证持有者（dsh 0.1.2-rc.1+ 鉴权）：提供 applyTo/refresh/hasCredential；
+    // null = 无凭证模式（老版 dsh 无鉴权，行为同旧版）。
+    upstreamAuth = null,
+    // 401 重换重放的请求体缓存上限：chunked / 超限请求走流式直通（401 不重放，原样透传）。
+    replayBodyLimit = 8 * 1024 * 1024,
+    // WS 空闲保活（手机链路对策，见 createWsKeepalivePump）：空闲时在帧边界注入 ping，
+    // 防中间代理（cpolar 等）空闲超时掐断 dsh /api/remote.mux 复用长连接；0 = 关闭（raw pipe）。
+    wsPingIntervalMs = 15000,
+    // 发出 ping 后等待客户端入站字节（pong）的超时；超时判定链路死亡并主动断开。
+    wsPongTimeoutMs = 10000,
+  } = opts;
+  const upstream = upstreamHost + ':' + upstreamPort;
+
+  const server = http.createServer((req, res) => {
+    // lane 自有路由**先于**配对门禁：命中就交给 lane（命名空间与冻结别名都算），
+    // 否则才走门禁 → 透传。判定结果进访问日志，谁被谁接走一眼可判。
+    if (typeof laneRoutes === 'function' && laneRoutes(req, res) === true) {
+      return;
+    }
+    // 配对门禁（dsh-mobile-access 自用）
+    if (auth) {
+      const r = auth(req);
+      if (!r.ok) {
+        accessLog(['HTTP', req.method, req.headers.host ?? '-', '->', req.url, '= 401 UNPAIRED']);
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unpaired' }));
+        return;
+      }
+      if (r.setCookie) res.setHeader('set-cookie', r.setCookie);
+    }
+
+    /**
+     * 转发到上游。allowRetry=true 且持有 upstreamAuth 时：上游 401（dsh 鉴权失效）→
+     * 单次重换凭证并原样重放；仍 401 → 原样透传。bodyBuf：Buffer = 已缓存请求体（可重放）；
+     * null = 流式管道（不可重放，原始 req.pipe 路径）。
+     */
+    const forward = (bodyBuf, allowRetry) => {
+      // #154：远程页面对**本机其它回环端口**的引用走映射路径 `/__dsh-mobile/loopback/<port>/<rest>`。
+      // 只有已配对设备能走到这里（同一门禁），目标固定 127.0.0.1——lane 不做任意主机的开放代理。
+      const lb = loopbackTarget(req.url);
+      const upHost = lb ? lb.host : upstreamHost;
+      const upPort = lb ? lb.port : upstreamPort;
+      const buildHeaders = () => {
+        const h = loopbackAuthority({ ...req.headers }, upHost, upPort);
+        upstreamAuth?.applyTo(h);
+        stripHopByHop(h); // 连接语义由本代理与上游之间重新协商
+        return h;
+      };
+      const targetPath = lb ? lb.path : normalizeRemotePath(req.url);
+      const stripped = targetPath !== req.url ? ` (from ${req.url})` : '';
+      accessLog(['HTTP', req.method, req.headers.host ?? '-', '->', targetPath + stripped]);
+
+      const handleUpstreamResponse = (proxyRes) => {
+        const contentType = String(proxyRes.headers['content-type'] ?? '');
+        const htmlDoc = contentType.includes('text/html');
+        const shouldInject = !lb && htmlDoc && !isCompressed(proxyRes.headers) && inject.length > 0;
+        accessLog(['  <-', proxyRes.statusCode, contentType.split(';')[0] || '-', (shouldInject ? 'INJECT' : 'PASSTHROUGH')]);
+
+        if (shouldInject) {
+          // 收集完整 HTML，注入到 <head> 之后，修正 Content-Length（对齐 pocket）
+          const chunks = [];
+          proxyRes.on('data', (c) => chunks.push(c));
+          proxyRes.on('end', () => {
+            let html = Buffer.concat(chunks).toString('utf8');
+            if (!html.includes(INJECT_MARK)) {
+              html = html.replace(/<head[^>]*>/i, (m) => `${m}${inject.join('')}`);
+            }
+            const out = Buffer.from(html, 'utf8');
+            const outHeaders = stripHopByHop({ ...proxyRes.headers });
+            delete outHeaders['content-length'];
+            delete outHeaders['transfer-encoding'];
+            outHeaders['content-length'] = String(out.length);
+            res.writeHead(proxyRes.statusCode ?? 200, outHeaders);
+            res.end(out);
+          });
+          proxyRes.on('error', () => res.destroy());
+          return;
+        }
+
+        // 大 JSON/text 响应流式压缩（对齐 pocket：长会话 17MB→~1MB；跳过 SSE/压缩/HTML）
+        const acceptEncoding = String(req.headers['accept-encoding'] ?? '');
+        const canGzip = /\bgzip\b/.test(acceptEncoding);
+        const canBr = /\bbr\b/.test(acceptEncoding);
+        const isEventStream = contentType.includes('text/event-stream');
+        const knownLen = Number(proxyRes.headers['content-length'] || 0);
+        const shouldCompress = (canGzip || canBr)
+          && !isCompressed(proxyRes.headers)
+          && !htmlDoc
+          && !isEventStream
+          && (contentType.includes('application/json') || contentType.startsWith('text/'))
+          && (knownLen === 0 || knownLen >= 1024);
+
+        if (shouldCompress) {
+          const enc = canBr ? 'br' : 'gzip';
+          const outHeaders = stripHopByHop({ ...proxyRes.headers });
+          delete outHeaders['content-length'];
+          delete outHeaders['transfer-encoding'];
+          outHeaders['content-encoding'] = enc;
+          res.writeHead(proxyRes.statusCode ?? 200, outHeaders);
+          const z = enc === 'br'
+            ? createBrotliCompress({ params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 6 } })
+            : createGzip();
+          proxyRes.pipe(z).pipe(res);
+          res.on('close', () => { proxyRes.destroy(); z.destroy(); });
+          proxyRes.on('error', () => { z.destroy(); res.destroy(); });
+          proxyRes.on('aborted', () => { z.destroy(); res.destroy(); });
+          z.on('error', () => res.destroy());
+          return;
+        }
+
+        if (htmlDoc && isCompressed(proxyRes.headers) && inject.length > 0 && onInjectSkip) {
+          onInjectSkip(req.url.split('?')[0]);
+        }
+        res.writeHead(proxyRes.statusCode ?? 502, stripHopByHop({ ...proxyRes.headers }));
+        proxyRes.pipe(res);
+        // 任一端断开都要清理另一端
+        res.on('close', () => proxyRes.destroy());
+        proxyRes.on('error', () => res.destroy());
+        proxyRes.on('close', () => { if (!res.writableEnded) res.destroy(); });
+      };
+
+      const send = (isRetry) => {
+        const proxyReq = http.request(
+          { host: upHost, port: upPort, method: req.method, path: targetPath, headers: buildHeaders(), agent: upstreamAgent },
+          (proxyRes) => {
+            // dsh 401：凭证失效 → 单次重换（重新自取 token + 换新 cookie）并原样重放；仍 401 透传
+            if (!isRetry && allowRetry && upstreamAuth && proxyRes.statusCode === 401) {
+              proxyRes.pause();
+              void Promise.resolve()
+                .then(() => upstreamAuth.refresh())
+                .then((ok) => {
+                  if (ok) {
+                    accessLog(['  <-', 401, 'dsh-auth', '→ 凭证已重换，重放', targetPath]);
+                    try { proxyRes.destroy(); } catch { /* noop */ }
+                    send(true);
+                  } else {
+                    accessLog(['  <-', 401, 'dsh-auth', '→ 重换失败，透传', targetPath]);
+                    handleUpstreamResponse(proxyRes);
+                  }
+                })
+                .catch(() => {
+                  try { proxyRes.resume(); } catch { /* noop */ }
+                  handleUpstreamResponse(proxyRes);
+                });
+              return;
+            }
+            handleUpstreamResponse(proxyRes);
+          },
+        );
+        proxyReq.on('socket', noDelay); // 上游方向关 Nagle（小请求高频时差一个数量级）
+        proxyReq.on('error', (err) => {
+          accessLog(['HTTP', req.method, req.headers.host ?? '-', '->', targetPath, '= ERR', err.code ?? err.message]);
+          if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+          try { res.end(`dsh-mobile-access: 无法连接上游 ${upstream} | ${err.message}`); } catch { /* noop */ }
+        });
+        if (bodyBuf === null) req.pipe(proxyReq);
+        else proxyReq.end(bodyBuf);
+      };
+      send(false);
+    };
+
+    // 可重放通道判定：持有凭证持有者，且请求体有界可缓存（GET/HEAD 无体；有体需 content-length ≤ 上限）。
+    // chunked / 超限 / 无凭证 → 流式直通（401 不重放，行为同旧版）。
+    const declaredLen = Number(req.headers['content-length'] || 0);
+    const chunked = /chunked/i.test(String(req.headers['transfer-encoding'] ?? ''));
+    const bodiless = req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS';
+    if (!upstreamAuth || (!bodiless && (chunked || declaredLen > replayBodyLimit))) {
+      forward(null, false);
+      return;
+    }
+    const chunks = [];
+    let aborted = false;
+    req.on('data', (c) => chunks.push(c));
+    req.on('error', () => { aborted = true; try { res.destroy(); } catch { /* noop */ } });
+    req.on('end', () => { if (!aborted) forward(Buffer.concat(chunks), true); });
+  });
+
+  // WebSocket upgrade：全头回传 + 首帧先写（对齐 pocket）
+  server.on('upgrade', (req, socket, head) => {
+    if (auth) {
+      const r = auth(req);
+      if (!r.ok) {
+        accessLog(['WS', req.method, req.headers.host ?? '-', '->', req.url, '= 401 UNPAIRED']);
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        socket.end();
+        return;
+      }
+    }
+    // #154：ws 同样支持回环端口映射（映射请求已过上面的配对门禁）。
+    const lbWs = loopbackTarget(req.url);
+    const headers = loopbackAuthority({ ...req.headers }, lbWs ? lbWs.host : upstreamHost, lbWs ? lbWs.port : upstreamPort);
+    // WS upgrade 保留 connection/upgrade（握手必需），只清掉无关的逐跳头
+    delete headers['keep-alive'];
+    delete headers['proxy-connection'];
+    // dsh 会话凭证：upgrade 请求同样附带（401 不重放——客户端重连即拿新凭证）
+    upstreamAuth?.applyTo(headers);
+    const wsPath = lbWs ? lbWs.path : normalizeRemotePath(req.url);
+    accessLog(['WS', req.method, req.headers.host ?? '-', '->', wsPath]);
+    // 诊断（#35）：壳内 WS 异常仅在 App WebView 出现、浏览器环境无——记录 upgrade 请求的
+    // 凭证/来源头特征与上游应答码，定位 ArkWeb 握手与浏览器差异。
+    if (wsPath === '/api/remote.mux') {
+      accessLog(['  ..', 'diag', `cookie=${req.headers.cookie ? 'yes' : 'none'}`, `origin=${req.headers.origin ?? 'none'}`, `sfs=${req.headers['sec-fetch-site'] ?? 'none'}`, `ua=${req.headers['user-agent'] ? String(req.headers['user-agent']).slice(0, 20) : 'none'}`]);
+    }
+    const proxyReq = http.request({
+      host: lbWs ? lbWs.host : upstreamHost, port: lbWs ? lbWs.port : upstreamPort, method: req.method, path: wsPath, headers, agent: false,
+    });
+    proxyReq.on('socket', noDelay); // 握手与后续帧都不受 Nagle 影响
+    noDelay(socket); // 客户端→lane 方向同样关 Nagle
+    proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
+      socket.write('HTTP/1.1 101 Switching Protocols\r\n');
+      // 原样回传上游的 upgrade 头（Sec-WebSocket-Accept 等）
+      const raw = [];
+      for (const [k, v] of Object.entries(proxyRes.headers)) {
+        raw.push(`${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
+      }
+      socket.write(`${raw.join('\r\n')}\r\n\r\n`);
+      // 上游→客户端：帧感知泵（空闲 ping 保活 + pong 超时判死）；wsPingIntervalMs=0 时
+      // 保持原 raw pipe 行为。客户端→上游：原始管道不动（客户端帧带掩码；浏览器协议栈
+      // 对 ping 自动回 pong，无需页面配合）。
+      let pump = null;
+      // #35 帧级诊断：mux 连接的前几帧（双向）与关闭事件
+      const muxT0 = Date.now();
+      const muxSeq = (globalThis.__dshMuxDiagSeq = (globalThis.__dshMuxDiagSeq || 0) + 1);
+      const muxLog = (msg) => accessLog(['  ..', `mux#${muxSeq}`, `${((Date.now() - muxT0) / 1000).toFixed(1)}s`, msg]);
+      let muxClosed = false;
+      const muxClose = (who) => { if (!muxClosed) { muxClosed = true; muxLog(`关闭（先关闭侧=${who}）`); } };
+      let uFrames = 0;
+      if (wsPingIntervalMs > 0) {
+        pump = createWsKeepalivePump({
+          target: socket,
+          pingIntervalMs: wsPingIntervalMs,
+          pongTimeoutMs: wsPongTimeoutMs,
+          onPongTimeout: () => {
+            accessLog(['WS', req.headers.host ?? '-', '->', wsPath, '= pong 超时：判定手机链路死亡（中间代理空闲掐断），主动断开触发 dsh 客户端快速重连']);
+            teardown();
+          },
+          onFallbackRaw: () => accessLog(['WS', req.headers.host ?? '-', '->', wsPath, '= 帧信封解析失败，回退 raw 透传（字节保真不受影响）']),
+          onUpstreamFrame: (op, payload) => {
+            uFrames++;
+            if (uFrames <= 5) muxLog(`upstream帧#${uFrames} op=${op} len=${payload.length} :: ${payload.toString('utf8').slice(0, 140)}`);
+            // #144 诊断：上游主动关帧（op=8）——「服务端判死 vs 隧道断开」的判定依据。
+            // **只记一次**：帧解析异常时 op 可能是流中偶合字节，逐帧记录会刷屏（实测同一毫秒
+            // 数百行），而 dsh 的 stdout 由壳同步落盘——刷屏会堵住 dsh 主线程，页面卡到点不动。
+            if (op === 8 && !muxClosed) {
+              const code = payload.length >= 2 ? payload.readUInt16BE(0) : 0;
+              muxLog(`上游关闭帧 code=${code}（服务端主动关；0/1000=正常，1006 不会以帧出现）`);
+              muxClose('upstream');
+            }
+          },
+        });
+        proxySocket.on('data', (c) => pump.onData(c));
+        socket.on('data', () => pump.noteClientActivity());
+        let cFrames = 0, cAccum = null;
+        socket.on('data', (chunk) => {
+          pump.noteClientActivity();
+          if (cFrames >= 3) return;
+          try {
+          cAccum = cAccum === null ? chunk : Buffer.concat([cAccum, chunk]);
+          let off = 0;
+          for (;;) {
+            const f = decodeClientFrame(cAccum, off);
+            if (f === null) break;
+            if (f === undefined) { muxLog('client 帧信封非法，停止帧级记录'); cFrames = 99; break; }
+            cFrames++;
+            muxLog(`client帧#${cFrames} op=${f.opcode} len=${f.payload.length} :: ${f.payload.toString('utf8').slice(0, 140)}`);
+            if (f.opcode === 8) {
+              const code = f.payload.length >= 2 ? f.payload.readUInt16BE(0) : 0;
+              muxLog(`客户端关闭帧 code=${code}（页面侧主动关）`);
+              muxClose('client');
+            }
+            off += f.total;
+            if (cFrames >= 3) break;
+          }
+          cAccum = off > 0 ? (off >= cAccum.length ? null : cAccum.subarray(off)) : cAccum;
+          } catch (e) { muxLog(`client 帧解析异常：${String(e?.message ?? e)}`); cFrames = 99; }
+        });
+        proxySocket.on('end', () => pump.onUpstreamEnd());
+        // proxyHead 同样喂给泵（保持与后续 data 相同的帧边界语义）
+        if (proxyHead?.length) pump.onData(proxyHead);
+      } else {
+        proxySocket.pipe(socket);
+        if (proxyHead?.length) socket.write(proxyHead);
+      }
+      socket.pipe(proxySocket);
+      // 任一端断开都要清理另一端（避免上游残留僵尸连接占用 dsh 连接槽）
+      // 对上游用 end()（FIN 优雅关闭），客户端侧已断直接 destroy；
+      // 两个 socket 都挂常驻 error 静默（迟到的 EPIPE 不能冒泡崩进程）。
+      const quiet = () => {};
+      proxySocket.on('error', quiet);
+      socket.on('error', quiet);
+      const teardown = () => {
+        try { proxySocket.unpipe?.(); socket.unpipe?.(); } catch { /* noop */ }
+        pump?.stop();
+        try { proxySocket.end(); } catch { /* noop */ }
+        const force = setTimeout(() => { try { if (!proxySocket.destroyed) proxySocket.destroy(); } catch { /* noop */ } }, 2000);
+        if (force.unref) force.unref();
+        try { if (!socket.destroyed) socket.destroy(); } catch { /* noop */ }
+      };
+      // #144 诊断：谁先关（close 由哪侧先触发）——实机日志即可区分服务端判死与隧道断开
+      proxySocket.on('close', () => { muxClose('upstream'); teardown(); });
+      socket.on('close', () => { muxClose('client'); teardown(); });
+    });
+    // 上游返回普通 HTTP 响应（非 101）：把状态码/头回写后断开，别让客户端永久挂起
+    proxyReq.on('response', (proxyRes) => {
+      if (wsPath === '/api/remote.mux') accessLog(['  ..', 'diag', `上游应答（非101，将透传给客户端）: ${proxyRes.statusCode}`]);
+      if (proxyRes.statusCode === 101) return;
+      try {
+        const raw = [`HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage ?? ''}`.trim()];
+        for (const [k, v] of Object.entries(proxyRes.headers)) {
+          raw.push(`${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
+        }
+        socket.end(raw.join('\r\n') + '\r\n\r\n');
+        proxyRes.resume();
+      } catch { socket.destroy(); }
+    });
+    proxyReq.on('error', () => socket.destroy());
+    // 关键：首帧 head 必须先于 end() 写上游（mux 初始 RPC 不丢窗口）
+    if (head?.length) proxyReq.write(head);
+    proxyReq.end();
+    socket.on('error', () => socket.destroy());
+  });
+
+  // 跟踪所有 TCP 连接（含 upgrade 后的 socket；close 时全销毁，防挂起）
+  const clientSockets = new Set();
+  server.on('connection', (sock) => {
+    clientSockets.add(sock);
+    sock.on('close', () => clientSockets.delete(sock));
+    sock.on('error', () => {});
+  });
+
+  return {
+    server,
+    upstream,
+    rewriteHeaders: (h) => loopbackAuthority({ ...h }, upstreamHost, upstreamPort),
+    listen: (port = 0) => new Promise((res) => { server.listen(port, '0.0.0.0', () => res(server.address().port)); }),
+    close: () => new Promise((r) => {
+      for (const s of clientSockets) { try { s.destroy(); } catch { /* 忽略 */ } }
+      server.close(() => r());
+    }),
+  };
+}

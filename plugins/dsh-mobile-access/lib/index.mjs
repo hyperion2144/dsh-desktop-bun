@@ -1,0 +1,819 @@
+// 手机访问服务装配（host 半区）：改写反代 + 配对路由(JS 回调) + SSE + 隧道启动。
+// 纯 Node 可测；桌面壳集成时在 dsh 进程内作为 bundle 插件装载。
+import http from 'node:http';
+import os from 'node:os';
+import { spawn } from 'node:child_process';
+import { createRewriteProxy, POLYFILL, OWNS_HOST_PATCH, THEME_SYNC_PATCH, LOOPBACK_URL_PATCH } from './proxy.mjs';
+import { clientIp, entryKind } from './client-info.mjs';
+import { LANE_PREFIX, laneRoutePath } from './lane-routes.mjs';
+import { createDshUpstreamAuth } from './dshauth.mjs';
+import { PairingStore, createFileStorage } from './pairing.mjs';
+import { selectLanIPv4, buildPairLink, buildHttpPairLink, normalizeRemote } from './links.mjs';
+import { readSettingsString, writeSettingsKey, readTopLevelBlockKey, readShellSetting, writeShellSetting } from './settings.mjs';
+import { resolveCloudflared } from './cloudflared.mjs';
+
+/** 读取桌面端 ui-theme.preference（'dark' | 'light' | 'system' | null），供注入脚本同步远程视觉。 */
+function readUiThemePreference() {
+  try {
+    const raw = readTopLevelBlockKey('ui-theme', 'preference');
+    if (raw == null) return null;
+    const m = String(raw).match(/^"(.*)"$/s);
+    return (m ? JSON.parse(m[1]) : String(raw).trim()) || null;
+  } catch {
+    return null;
+  }
+}
+
+export function createMobileAccessService(opts = {}) {
+  const {
+    upstreamHost = '127.0.0.1',
+    upstreamPort = 3080,
+    platform = 'linux',
+    pairing = null,
+    // 默认文件持久化设备会话（$DSH_HOME 0600）；测试注入 pairing 时可传 createMemoryStorage()
+    storage = null,
+    warn = null,
+    fetchImpl = null,
+    authenticatedUrl = null,  // (origin) => 带 process token 的根 URL | null；生产由 apply 注入 ctx.connection.authenticatedUrl
+  } = opts;
+  const store = pairing ?? (storage
+    ? new PairingStore({ storage })
+    : new PairingStore({ storage: createFileStorage() }));
+  // dsh web 会话凭证（dsh 0.1.2-rc.1+ token 鉴权）：进程内自取 process token 换 cookie 存内存，
+  // 反代附带上游 + 上游 401 单次重换自愈。authenticatedUrl 未提供（老版 dsh / 独立运行）→ 无凭证模式，行为不变。
+  const dshAuth = createDshUpstreamAuth({
+    origin: `http://${upstreamHost}:${upstreamPort}`,
+    authenticatedUrl,
+    fetchImpl,
+    log: warn,
+  });
+
+  // WS 空闲保活间隔（ms）：见 proxy.mjs createWsKeepalivePump——手机链路中间代理（cpolar 等）
+  // 对静默连接的空闲超时会掐断 dsh /api/remote.mux 复用 WebSocket（dsh 客户端无应用层心跳），
+  // 手机端表现为「连接异常」重连循环；lane 空闲注入 ping 即可保活，pong 超时则主动断开触发
+  // 客户端快速重连。settings 键：ws_keepalive_ms = ping 注入间隔 ms（参数 wsPingIntervalMs）、
+  // ws_pong_timeout_ms = pong 判死超时 ms（参数 wsPongTimeoutMs）；优先级：opts（测试注入）>
+  // settings.yaml > proxy.mjs 缺省（15000/10000——默认值单一来源在 proxy 侧，此处不落地默认值）。
+  // ws_keepalive_ms 0 = 关闭保活。有意不提供 env 通道（调优参数，非部署参数，区别于 lane_port）。
+  // 改动需重启 lane（随 dsh 进程）生效。
+  let wsPingIntervalMs = opts.wsPingIntervalMs;
+  // 设置读写器：生产由 apply 注入 dsh settings 服务访问器（不直接读写 settings.yaml）；
+  // 未注入（测试/独立运行）时回退 legacy 行级读写。服务读返回原生类型（number/string），
+  // legacy 返回 JSON 标量字符串——两边的 null/undefined 语义已对齐（缺失 = null）。
+  const readSetting = opts.readSetting ?? readSettingsString;
+  const writeSettings = opts.writeSettings ?? (async (patch) => {
+    for (const [key, value] of Object.entries(patch)) writeSettingsKey(key, JSON.stringify(value));
+  });
+  if (wsPingIntervalMs === undefined) {
+    try {
+      // 键不存在时返 null：必须保持 undefined（用 proxy 缺省 15000），
+      // 不能把 null 当空串 Number 成 0——否则保活泵被默认关闭（曾致产线零 ping）。
+      const raw = readSetting('ws_keepalive_ms');
+      if (raw != null) {
+        const v = Number(raw);
+        if (Number.isFinite(v) && v >= 0) wsPingIntervalMs = v;
+      }
+    } catch { /* noop */ }
+  }
+  let wsPongTimeoutMs = opts.wsPongTimeoutMs;
+  if (wsPongTimeoutMs === undefined) {
+    try {
+      const rawPong = readSetting('ws_pong_timeout_ms');
+      if (rawPong != null) {
+        const v = Number(rawPong);
+        if (Number.isFinite(v) && v > 0) wsPongTimeoutMs = v;
+      }
+    } catch { /* noop */ }
+  }
+  const proxy = createRewriteProxy({
+    // lane 自有路由**接进反代本体**（不只靠 listen 后重接 request 监听器）：
+    // 配对入口在任何请求形态下都先于配对门禁被 lane 接走（实机：裸 TCP 换会话请求
+    // 曾拿到门禁的 {"error":"unpaired"}）。
+    laneRoutes: routePairing,
+    upstreamHost,
+    upstreamPort,
+    upstreamAuth: dshAuth,
+    ...(wsPingIntervalMs !== undefined ? { wsPingIntervalMs } : {}),
+    ...(wsPongTimeoutMs !== undefined ? { wsPongTimeoutMs } : {}),
+    // 注入顺序：能力位补丁先于 polyfill、先于 dsh scripts。
+    // OWNS_HOST_PATCH（#145）：远程端声明「页面拥有 Host」→ 解锁服务端设置 RPC（插件设置/
+    //   dsh 设置/壳的手机访问信息）；替代已失效的 hostname 伪装补丁（浏览器禁止伪造，已删除）。
+    // THEME_SYNC_PATCH：主题视觉兜底（从 lane 保留命名空间读桌面端 ui-theme.preference）。
+    // POLYFILL：老内核补 crypto.randomUUID。
+    // ⚠️ 不注入 desktopEnvPatchScript：对齐 pocket 行为——只在 DSH Desktop 壳内注入，
+    // 给远程浏览器强制补 dsh-desktop-mode=compatibility 会让 dsh-plugin-desktop 等
+    // 走「桌面分支」假设 Tauri IPC、皮肤 mount 时序，远程浏览器没 __TAURI__ 也没准备好
+    // 的 DOM → classList null / 皮肤不加载（§2.2）。POLYFILL 单独无害。
+
+    // LOOPBACK_URL_PATCH（#154）：远程页面上指向本机其它回环端口的绝对地址改写成映射路径
+    // `/__dsh-mobile/loopback/<port>/…`（http/ws 同构），由反代转发到那个端口——于是「其它
+    // 插件访问本机其它端口」在远程/手机侧也能工作（映射请求同样先过配对门禁）。
+    inject: [OWNS_HOST_PATCH, THEME_SYNC_PATCH, POLYFILL, LOOPBACK_URL_PATCH],
+    auth: (req) => {
+      // 配对门禁：所有到达反代本体的路径都必须是已配对设备（携带会话 cookie）。
+      // lane 自有控制面住在保留命名空间（LANE_PREFIX/*，含冻结别名 /pair、/api/pair/*），
+      // 由 routePairing 先于转发处理；打到这里的一律要求 cookie，杜绝「前缀豁免 +
+      // 上游路径归一化」绕过。命名空间外的一切路径（含 dsh 自有路由）原样透传，不做白名单。
+      const cookie = parseCookie(req.headers.cookie, 'dsh_mobile_session');
+      // 顺手把该设备的最新 UA/IP/接入路径刷新下来（#145 延伸）：
+      // ①已配对的老设备（早先只存了名字）不用重新配对就能被富化；
+      // ②同一台设备换入口（局域网↔隧道）时面板能跟上。
+      return {
+        ok: store.isDevice(cookie, {
+          ua: req.headers['user-agent'] ?? '',
+          ip: clientIp(req),
+          entry: entryKind(req),
+        }),
+      };
+    },
+    onInjectSkip: opts.warn
+      ? (p) => opts.warn('[dsh-mobile-access] 上游压缩 HTML，跳过注入（该页无 polyfill/桌面补丁）: ' + p)
+      : undefined,
+  });
+
+  // 本地属主判定：桌面壳（同一台机器）经 loopback 直连 lane 端口，且无隧道加插的
+  // X-Forwarded-For —— 视为属主控制台。公网/局域网设备一律经隧道（非 loopback Host
+  // 或带 XFF），只能凭设备 cookie 访问控制端点。
+  function isLocalOwner(req) {
+    const host = String(req.headers.host ?? '').split(':')[0];
+    const loopback = host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '';
+    return loopback && !req.headers['x-forwarded-for'];
+  }
+
+  // cloudflared 隧道控制器（服务级状态，可重启）：
+  //   bin    = cloudflared 可执行文件路径（'' / null = 未启用）
+  //   child  = 当前子进程（null = 未运行）
+  //   url    = 最近一次解析到的 trycloudflare 地址
+  //   startedAt / stopAt = 状态查询用时间戳
+  //   phase  = idle | resolving | downloading | starting | registering | ready | error
+  //           （pocket 风格的隧道生命周期阶段，cf 卡片 UI 轮询可见）
+  const tunnel = {
+    bin: '',
+    child: null,
+    url: null,
+    startedAt: 0,
+    stopping: false,
+    port: 3091,
+    phase: 'idle',
+    detail: '',
+    message: '',
+  };
+
+  // 第三方隧道地址（cpolar 等）内存态：POST /api/pair/tunnel 设置；
+  // 重启后从 settings.yaml tunnel_url 恢复（info 端点兜底读取）。
+  let customTunnel = '';
+
+  // 启动隧道（若已在运行则先停旧进程）。bin 为空 → 自动解析（PATH 优先，否则 $DSH_HOME/bin 缓存，
+  // 否则从 GitHub/ghproxy 等多镜像下载到缓存），全过程异步，phase 字段实时同步状态供 UI 轮询。
+  function startTunnel(bin, lanePort) {
+    stopTunnel();
+    tunnel.stopping = false;  // stopTunnel 保留 stopping=true 等子进程 exit，本轮启动需复位允许 tryParse
+    tunnel.phase = 'resolving'
+    tunnel.detail = bin ? `启动 ${bin}` : '正在解析 cloudflared…'
+    tunnel.message = ''
+    void (async () => {
+      try {
+        let actualBin = bin
+        if (!actualBin) {
+          const result = await resolveCloudflared({
+            onPhase: (phase, detail) => {
+              tunnel.phase = phase
+              if (detail) tunnel.detail = detail
+            },
+          })
+          actualBin = result.path
+          tunnel.bin = actualBin
+          tunnel.detail = `${result.source === 'PATH' ? 'PATH 已有' : result.source === 'cache' ? '使用缓存' : '已下载'}：${actualBin}`
+          // 自动解析成功后持久化解析结果：dsh 重启后 boot() 据此自动拉起隧道（常驻）
+          void writeSettings({ cloudflared_bin: actualBin }).catch(() => { /* noop */ })
+        } else {
+          tunnel.bin = actualBin
+        }
+        const targetPort = lanePort ?? tunnel.port
+        tunnel.phase = 'starting'
+        tunnel.detail = '启动 cloudflared 子进程…'
+        let child
+        try {
+          // 强制 HTTP/2（443）而非 QUIC（7844 UDP）：国内/企业网常屏蔽 UDP 7844 → tunnel error 1033，
+          // 走 TCP 443 更稳。--no-autoupdate 跳过版本检查（启动更快）。
+          child = spawn(actualBin, ['tunnel', '--no-autoupdate', '--protocol', 'http2', '--url', `http://127.0.0.1:${targetPort}`], { stdio: ['ignore', 'pipe', 'pipe'] })
+        } catch (e) {
+          tunnel.phase = 'error'
+          tunnel.message = String(e?.message ?? e)
+          store.emit('tunnel', { url: null, reason: 'spawn-failed', message: tunnel.message })
+          return
+        }
+        // 异步下载/解析期间用户可能已点停止 → 立即 kill 这个孤儿进程
+        if (tunnel.stopping) {
+          try { child.kill() } catch { /* noop */ }
+          return
+        }
+        tunnel.child = child
+        tunnel.startedAt = Date.now()
+        tunnel.url = null
+        tunnel.phase = 'registering'
+        tunnel.detail = '连接 Cloudflare 边缘（通常 5-30 秒）…'
+        let out = ''
+        const timer = setTimeout(() => {
+          child.emit('_cf_timeout')
+        }, 45000)
+        const tryParse = () => {
+          const m = out.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/)
+          if (m && !tunnel.stopping) {
+            tunnel.url = m[0]
+            tunnel.phase = 'ready'
+            tunnel.detail = '已连接 Cloudflare 边缘'
+            store.emit('tunnel', { url: tunnel.url })
+          }
+        }
+        child.stdout.on('data', (c) => {
+          out += c
+          tryParse()
+        })
+        child.stderr.on('data', (c) => {
+          out += c
+          // cloudflared 偶发把 URL 写到 stderr
+          tryParse()
+        })
+        child.on('error', (e) => {
+          clearTimeout(timer)
+          if (tunnel.child === child) tunnel.child = null
+          tunnel.url = null
+          tunnel.phase = 'error'
+          tunnel.message = String(e?.message ?? e)
+          store.emit('tunnel', { url: null, reason: 'spawn-failed', message: tunnel.message })
+        })
+        child.on('exit', () => {
+          clearTimeout(timer)
+          if (tunnel.child === child) tunnel.child = null
+          // 仅在「非用户主动 stop」时把 phase 复位到 idle；stop 路径下 stopTunnel 已立刻写 idle，
+          // 这里再写一次也无害（幂等），但跳过 error 状态（崩溃应保留 error 让 UI 显示诊断）
+          if (tunnel.phase !== 'error') tunnel.phase = 'idle'
+          if (tunnel.detail === '连接 Cloudflare 边缘（通常 5-30 秒）…') tunnel.detail = ''
+          // 子进程已退出，stopping 复位允许下次 start
+          tunnel.stopping = false
+        })
+        child.on('_cf_timeout', () => {
+          clearTimeout(timer)
+          if (!tunnel.url) {
+            tunnel.phase = 'error'
+            tunnel.message = 'cloudflared 45s 未上报 trycloudflare 地址'
+            store.emit('tunnel', { url: null, reason: 'timeout' })
+          }
+        })
+      } catch (e) {
+        tunnel.phase = 'error'
+        tunnel.message = String(e?.message ?? e)
+        tunnel.detail = e?.message ?? String(e)
+      }
+    })()
+    return tunnel
+  }
+
+  // 停止隧道（kill 子进程，保留 bin 配置）。
+  function stopTunnel() {
+    const ch = tunnel.child;
+    if (ch) {
+      tunnel.stopping = true;
+      tunnel.child = null;
+      try { ch.kill(); } catch { /* noop */ }
+      // SIGKILL 兜底：cloudflared 偶发不响应 SIGTERM（边缘网络残留），3s 后强杀
+      const hardKill = setTimeout(() => { try { ch.kill('SIGKILL') } catch { /* noop */ } }, 3000);
+      if (typeof hardKill.unref === 'function') hardKill.unref();
+    }
+    tunnel.startedAt = 0;
+    tunnel.url = null;
+    tunnel.phase = 'idle';        // 立即复位，UI 立刻不显示"运行中"
+    tunnel.detail = '';
+    tunnel.message = '';
+    // tunnel.stopping 保持 true，由 child.on('exit') 在实际退出时复位；
+    // 否则 kill→exit 之间 cloudflared 最后一帧 stdout 会触发 tryParse 把 url/phase 复活
+  }
+
+  // 配对/授权路由（先于上游转发）：
+  function routePairing(req, res) {
+    // 路径分类：只认 lane 保留命名空间与冻结别名；返回 null 即「不归 lane 管」——
+    // 包括 OPTIONS 预检与 dsh 自有路径，一律交还反代透传，lane 绝不代答（#145）。
+    const path = laneRoutePath(req.url.split('?')[0]);
+    if (path === null) return false;
+    const authed = store.isDevice(parseCookie(req.headers.cookie, 'dsh_mobile_session'));
+    const owner = isLocalOwner(req);
+    const canManage = owner || authed;
+    const unpaired401 = () => {
+      res.writeHead(401, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unpaired' }));
+    };
+    // 属主控制台（同机 loopback 设置页）跨域读取配对状态：CORS 仅放行回环源
+    const cors = {
+      'access-control-allow-origin': allowCorsOrigin(req.headers.origin, req.headers.host) ?? '*',
+      'access-control-allow-methods': 'GET,POST,OPTIONS',
+      'access-control-allow-headers': 'content-type',
+      'vary': 'Origin',
+    };
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, cors);
+      res.end();
+      return true;
+    }
+    const json = (status, body, extra = {}) => {
+      res.writeHead(status, { 'content-type': 'application/json', ...cors, ...extra });
+      res.end(JSON.stringify(body));
+    };
+    if (path === '/pair') {
+      const token = new URL(req.url, 'http://x').searchParams.get('token') ?? '';
+      // 浏览器配对：Accept 含 text/html → 自动接受 + 种 cookie + 302 进应用；
+      // API 探活 / 属主状态（无 token）→ 保持 JSON 状态。
+      const wantsHtml = String(req.headers.accept ?? '').includes('text/html');
+      if (token) {
+        const session = store.accept(token, {
+          ua: req.headers['user-agent'] ?? '',
+          ip: clientIp(req),
+          entry: entryKind(req),
+        });
+        if (session) {
+          res.writeHead(302, {
+            'location': '/',
+            'set-cookie': 'dsh_mobile_session=' + session.cookie + '; HttpOnly; Path=/; SameSite=Lax',
+          });
+          res.end();
+          return true;
+        }
+        // token 无效或已作废：API 返回 403 JSON；浏览器渲染简短提示页。
+        if (wantsHtml) {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+          res.end('<!doctype html><meta charset="utf-8"><title>配对失败</title><body style="font-family:sans-serif;padding:32px;background:#f5f5f7;color:#1d1d1f"><h2>配对失败</h2><p>链接无效或令牌已过期。请在桌面「远程访问」设置中重新铸造令牌。</p></body>');
+          return true;
+        }
+        json(403, { error: 'invalid-token' });
+        return true;
+      }
+      json(200, { ok: true, mode: store.token ? 'await-token' : 'no-token', tokenLen: 0 });
+      return true;
+    }
+    if (path === '/api/pair/info' && req.method === 'GET') {
+      // 属主 + 已配对设备：配对候选地址（二维码/链接用）；已配对设备需要 uiTheme
+      // 让注入脚本同步桌面主题偏好（视觉一致，§2.2）。
+      if (!canManage) { unpaired401(); return true; }
+      const lanIp = selectLanIPv4(os.networkInterfaces?.() ?? {});
+      let customTunnelUrl = customTunnel;
+      if (!customTunnelUrl) {
+        try { customTunnelUrl = readSetting('tunnel_url') ?? ''; } catch { /* noop */ }
+      }
+      json(200, {
+        lanePort: tunnel.port,
+        lanIp,
+        tunnelUrl: tunnel.url,
+        customTunnelUrl,
+        uiTheme: readUiThemePreference(),
+        dshAuth: dshAuth.hasCredential(),
+      });
+      return true;
+    }
+    if (path === '/api/pair/tunnel' && req.method === 'POST') {
+      // 保存第三方隧道地址（cpolar 等）用于生成配对二维码；空串清除。
+      // 作用域两级（#145）：已配对设备＝完整访问（管理动作不再限属主）；匿名/未配对 401。
+      if (!canManage) { unpaired401(); return true; }
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        try {
+          const { url } = JSON.parse(body || '{}');
+          if (typeof url !== 'string') { json(400, { error: 'bad-request' }); return; }
+          const trimmed = url.trim();
+          if (trimmed && !/^https?:\/\//.test(trimmed)) { json(400, { error: 'bad-request' }); return; }
+          customTunnel = trimmed; // 内存态立即生效（重启后从 settings.yaml 恢复）
+          void writeSettings({ tunnel_url: trimmed }).catch((e) => {
+            try { warn?.('[dsh-mobile-access] 隧道地址持久化失败: ' + e); } catch { /* noop */ }
+          })
+          json(200, { ok: true, url: trimmed });
+        } catch (e) {
+          json(400, { error: 'bad-request' });
+        }
+      });
+      return true;
+    }
+    if (path === '/api/pair/mint' && req.method === 'POST') {
+      // 铸造新令牌（旧令牌自动作废）
+      // 作用域两级（#145）：已配对设备也可铸造令牌（管理＝完整访问）。
+      if (!canManage) { unpaired401(); return true; }
+      const token = store.mint();
+      json(200, { ok: true, token, expiresAt: store.tokenExpiresAt });
+      return true;
+    }
+    if (path === '/api/pair/probe' && req.method === 'GET') {
+      // 校验第三方隧道地址（cpolar 等）：要求 http(s) URL，探测其配对入口路由
+      // 可达（改写反代放行）；loopback 与 tauri.localhost 拒绝。
+      // 作用域两级（#145）：已配对设备同样可探测隧道地址。
+      if (!canManage) { unpaired401(); return true; }
+      const raw = new URL(req.url, 'http://x').searchParams.get('url') ?? '';
+      void runProbe(raw, json);
+      return true;
+    }
+    if (path === '/api/pair/accept' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        try {
+          const { token, name } = JSON.parse(body || '{}');
+          const session = store.accept(token, {
+            name,
+            ua: req.headers['user-agent'] ?? '',
+            ip: clientIp(req),
+            entry: entryKind(req),
+          });
+          if (!session) {
+            json(403, { error: 'invalid-token' });
+            return;
+          }
+          json(200, { ok: true, deviceId: session.deviceId }, {
+            'set-cookie': 'dsh_mobile_session=' + session.cookie + '; HttpOnly; Path=/; SameSite=Lax',
+          });
+        } catch (e) {
+          json(400, { error: 'bad-request' });
+        }
+      });
+      return true;
+    }
+    if (path === '/api/pair/devices' && req.method === 'GET') {
+      if (!canManage) { unpaired401(); return true; }
+      json(200, { devices: store.snapshotDevices(), tokenRef: store.ref() });
+      return true;
+    }
+    if (path === '/api/pair/remove' && req.method === 'POST') {
+      // 移除单个设备配对（属主控制台与已配对设备同级，作用域两级，#145）。
+      if (!canManage) { unpaired401(); return true; }
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        try {
+          const { deviceId } = JSON.parse(body || '{}');
+          if (typeof deviceId !== 'string' || !store.removeDevice(deviceId)) {
+            json(404, { error: 'not-found' });
+            return;
+          }
+          json(200, { ok: true });
+        } catch (e) {
+          json(400, { error: 'bad-request' });
+        }
+      });
+      return true;
+    }
+    if (path === '/api/pair/stop' && req.method === 'POST') {
+      if (!canManage) { unpaired401(); return true; }
+      store.stopAll();
+      json(200, { ok: true });
+      return true;
+    }
+    if (path === '/api/pair/events') {
+      if (!canManage) { unpaired401(); return true; }
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        'connection': 'keep-alive',
+        ...cors,
+      });
+      res.write(':ok\n\n');
+      const off = store.on((event, data) => res.write(store.sse(event, data)));
+      req.on('close', off);
+      return true;
+    }
+    if (path === '/api/pair/cloudflared' && req.method === 'GET') {
+      // 查询隧道配置与运行状态（已配对设备可读，#145 完整访问）。
+      if (!canManage) { unpaired401(); return true; }
+      json(200, {
+        bin: tunnel.bin,
+        url: tunnel.url,
+        running: !!tunnel.child,
+        startedAt: tunnel.startedAt,
+      });
+      return true;
+    }
+    if (path === '/api/pair/cloudflared' && req.method === 'POST') {
+      // 设置 cloudflared 路径（应用并持久化）或停止隧道（已配对设备可管，#145）。
+      if (!canManage) { unpaired401(); return true; }
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', async () => {
+        try {
+          const { bin, action } = JSON.parse(body || '{}');
+          if (action === 'stop') {
+            stopTunnel();
+            json(200, { ok: true, running: false });
+            return;
+          }
+          if (typeof bin !== 'string') {
+            json(400, { error: 'bad-request' });
+            return;
+          }
+          const trimmed = bin.trim();
+          if (trimmed && !/^[^\0]+$/.test(trimmed)) {
+            json(400, { error: 'bad-request' });
+            return;
+          }
+          // 持久化经 dsh settings 服务；空串 = 进入 auto 模式（不固化路径）。
+          let saved = true;
+          if (trimmed) {
+            try {
+              await writeSettings({ cloudflared_bin: trimmed });
+              const persisted = readSetting('cloudflared_bin');
+              if (persisted !== trimmed) saved = false;
+            } catch (e) {
+              saved = false;
+              try { warn?.('[dsh-mobile-access] cloudflared 配置持久化失败: ' + e); } catch { /* noop */ }
+            }
+          } else {
+            try { await writeSettings({ cloudflared_bin: '' }); } catch { /* 忽略 */ }
+          }
+          startTunnel(trimmed || null, tunnel.port);
+          json(200, { ok: true, running: !!tunnel.child, bin: trimmed || null, phase: tunnel.phase, persisted: saved });
+        } catch (e) {
+          json(400, { error: 'bad-request' });
+        }
+      });
+      return true;
+    }
+    return false;
+  }
+
+  // 第三方隧道地址探测（异步；结果经 json 回调写出）。
+  async function runProbe(raw, json) {
+    const verdict = { ok: false, reason: 'invalid-url' };
+    const m = String(raw).match(/^(https?):\/\/([^/]+)(\/.*)?$/);
+    if (m) {
+      const scheme = m[1];
+      const host = m[2];
+      const isLoopback = /^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host) || /^\[::1\]/.test(host);
+      const isTuna = /tauri\.localhost$/i.test(host);
+      if (!isLoopback && !isTuna) {
+        try {
+          const doFetch = fetchImpl ?? ((u, o) => fetch(u, o));
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 5000);
+          const r = await doFetch(scheme + '://' + host + '/pair', { signal: ctrl.signal, headers: { Connection: 'close' } });
+          clearTimeout(timer);
+          verdict.ok = r.ok || r.status === 404;
+          verdict.status = r.status;
+          verdict.reason = verdict.ok ? 'reachable' : 'http-' + r.status;
+        } catch {
+          verdict.reason = 'unreachable';
+        }
+      } else {
+        verdict.reason = 'loopback-or-tuna-not-allowed';
+      }
+    }
+    json(200, verdict);
+  }
+
+  // 包裹 server 的 request 处理：优先路由，其次反代。
+  const originalHandler = proxy.server.listeners('request')[0];
+  proxy.server.removeAllListeners('request');
+  proxy.server.on('request', (req, res) => {
+    if (routePairing(req, res)) return;
+    originalHandler(req, res);
+  });
+
+  return {
+    store,
+    proxy,
+    dshAuth,
+    routePairing,
+    selectLanIPv4,
+    buildPairLink,
+    buildHttpPairLink,
+    normalizeRemote,
+    tunnel,
+    startTunnel,
+    stopTunnel,
+    probe: runProbe, // #167：插件入口 apply 的 RPC 分支需要探测入口（私有函数跨作用域不可见）
+    listen: (port = 0) => new Promise((res) => {
+      // 0.0.0.0：局域网设备直连（配对门禁保护未配对路径；宿主 dsh 仍只面 loopback）。
+      proxy.server.listen(port, '0.0.0.0', () => {
+        const addr = proxy.server.address();
+        if (addr && typeof addr === 'object') tunnel.port = addr.port;
+        res(proxy.server.address().port);
+      });
+    }),
+    close: () => new Promise((res) => proxy.server.close(() => res())),
+  };
+}
+
+export function parseCookie(header, name) {
+  if (!header) return '';
+  for (const part of header.split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    if (part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+  }
+  return '';
+}
+
+// CORS 源白名单：仅放行来自回环（本机 dsh 设置页）与壳协议页（#154）的跨域读取；其它 Origin 一律不回显。
+// #154：桌面壳页面 origin 是壳自己的协议（dshapp://localhost / http://dshapp.localhost），
+// 设置面板的 lane 请求从那个页面上发出，白名单同步放行（仍是本机，非远程源）。
+export function allowCorsOrigin(origin, hostHeader) {
+  if (!origin) return null;
+  const o = String(origin);
+  if (/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(o)) return o;
+  if (/^dshapp:\/\/localhost$/.test(o)) return o;
+  if (/^https?:\/\/dshapp\.localhost$/.test(o)) return o;
+  return null;
+}
+
+/**
+ * dsh bundle 插件 host 半区入口：随 dsh web 进程装载时启动 lane 改写反代与配对服务。
+ * 配置走环境变量（桌面壳 spawn 时注入）：
+ *   DSH_MOBILE_ENABLED        = '0' 关闭（默认开）
+ *   DSH_MOBILE_LANE_PORT      = lane 端口（默认 3091）
+ *   DSH_DESKTOP_PORT          = 上游 dsh web 端口（默认 3080）
+ *   DSH_CLOUDFLARED_BIN       = cloudflared 可执行文件路径（设置后自动起隧道）
+ * 生命周期：ctx dispose 时关闭 lane 并回收 cloudflared 子进程。
+ * 注：桌面壳插件的 host 半区若无需启动服务（如 dsh-desktop-tauriapp 仅技能）可留空 apply。
+ *
+ * 硬依赖：connection（ctx.connection.rpc.handle）—— 同源 RPC 通道是 client/host 通讯的
+ * 唯一途径，无 connection 即无法响应桌面壳 WebView 的端点请求，必须声明 inject。
+ * settings（ctx.settings）—— 手机访问设置项（cloudflared_bin/tunnel_url/ws_*）经
+ * dsh settings 服务持久化（namespace: dsh-desktop-tauriapp，与桌面壳共用，透传型 schema
+ * 由桌面壳插件或本插件兜底注册），不再直接读写 settings.yaml。
+ * Cordis 的 Guard 会拒绝任何未声明的 ctx.<service> 访问并让整个 plugin tree 装载失败
+ * （下游所有插件如 dsh-session-log-export 也会被级联报 "failed to load"）。
+ */
+export const inject = ['connection', 'settings'];
+
+// 设置访问器：优先 dsh settings 服务（namespace 注册由桌面壳插件或本插件兜底），
+// 服务不可用时回退 legacy 行级读写（独立运行/老版 dsh）。
+const NS = 'dsh-desktop-tauriapp';
+
+function apply(ctx) {
+  const platform = typeof process !== 'undefined' ? process.platform : '';
+  if (!platform || !ctx || typeof ctx.on !== 'function') return;
+  if (process.env.DSH_MOBILE_ENABLED === '0') return;
+  const lanePort = Number(process.env.DSH_MOBILE_LANE_PORT || 3091);
+  const upstreamPort = Number(process.env.DSH_DESKTOP_PORT || 3080);
+  // 设置访问器：优先 dsh settings 服务（不直接读写 settings.yaml），服务不可用时回退 legacy 行级读写。
+  const settingsSvc = ctx.settings ?? null;
+  // 兜底注册（桌面壳插件缺失时）：与 dsh-settings 契约对齐的最小 schema——
+  // 可调用归一 + toJSON 序列化（缺 toJSON 会让 describe() 报错，连带其它命名空间读链路）。
+  if (settingsSvc) {
+    try {
+      const passthrough = (raw) => (raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? { ...raw } : {})
+      passthrough.type = 'object'
+      passthrough.dict = {}
+      passthrough.toJSON = () => ({ type: 'object', dict: {} })
+      settingsSvc.register(NS, passthrough)
+    } catch { /* 已注册（桌面壳插件先注册） */ }
+  }
+  // #116：壳专属键（tunnel_url/cloudflared_bin/ws_*）的权威落点是壳的
+  // $DSH_HOME/desktop-settings.json（#95 后 dsh settings 插件命名空间与 settings.yaml 均已废除，
+  // 经它们保存只会“看似成功”而无处落盘）；旧通道仅作历史数据读取兜底。
+  const readSetting = (key) => {
+    const shell = readShellSetting(key)
+    if (shell !== null && shell !== undefined) {
+      return typeof shell === 'string' ? shell : JSON.stringify(shell)
+    }
+    if (settingsSvc) {
+      const v = settingsSvc.get(NS)?.[key];
+      if (v !== undefined && v !== null) return v;
+    }
+    return readSettingsString(key);
+  };
+  const writeSettings = async (patch) => {
+    // #116：只写壳设置 JSON；不再 mutate dsh settings 命名空间（已废除，勿回改）
+    for (const [key, value] of Object.entries(patch)) writeShellSetting(key, value);
+  };
+  const svc = createMobileAccessService({
+    upstreamHost: '127.0.0.1',
+    upstreamPort,
+    platform,
+    readSetting,
+    writeSettings,
+    warn: (m) => { try { ctx?.logger?.warn?.(m); } catch { /* noop */ } },
+    // dsh 进程内自取 process token 的通道（connection 服务公开方法；缺失则 lane 无凭证运行）
+    authenticatedUrl: (origin) => {
+      try { return ctx?.connection?.authenticatedUrl?.(origin) ?? null; } catch { return null; }
+    },
+  });
+
+  // 同源 RPC handler（与 client 共享通道名 /dsh-mobile-access）：
+  // 桌面壳 WebView 跨域 fetch 被浏览器拦截，必须走 dsh 同源 connection RPC。
+  if (ctx?.connection?.rpc?.handle) {
+    const ch = '/dsh-mobile-access';
+    const ok = (v) => ({ ok: true, value: v });
+    const errRpc = (msg) => ({ ok: false, error: { code: 'bad-request', message: msg, details: { issues: [{ message: msg }] } } });
+    try { ctx?.logger?.info?.('dsh-mobile-access: 注册同源 RPC 通道 ' + ch); } catch {}
+    ctx.connection.rpc.handle(ch, async (endpoint, payload = {}, signal) => {
+      try {
+        switch (endpoint) {
+          case 'devices.list':
+            return ok({ devices: svc.store.snapshotDevices(), tokenRef: svc.store.ref() });
+          case 'devices.remove': {
+            const id = String(payload?.deviceId ?? '');
+            if (!id || !svc.store.removeDevice(id)) return errRpc('not-found');
+            return ok(true);
+          }
+          case 'token.mint': {
+            const t = svc.store.mint();
+            return ok({ token: t, expiresAt: svc.store.tokenExpiresAt });
+          }
+          case 'token.ref':
+            return ok({ ref: svc.store.ref() });
+          case 'info': {
+            const lanIp = selectLanIPv4(os.networkInterfaces?.() ?? {});
+            let customTunnelUrl = svc.tunnel && svc.tunnel._customUrl ? svc.tunnel._customUrl : '';
+            if (!customTunnelUrl) {
+              try { customTunnelUrl = readSetting('tunnel_url') ?? ''; } catch {}
+            }
+            return ok({
+              lanePort: svc.tunnel?.port ?? 3091,
+              lanIp,
+              tunnelUrl: svc.tunnel?.url ?? null,
+              customTunnelUrl,
+              dshAuth: svc.dshAuth?.hasCredential() ?? false,
+            });
+          }
+          case 'tunnel.probe': {
+            const url = String(payload?.url ?? '');
+            if (!url) return errRpc('bad-url');
+            // 同源调用方已信任（仅属主 + 同源 channel），直接调内部 probe
+            const verdict = await new Promise((resolve) => {
+              const json = (status, body) => resolve({ _status: status, ...body });
+              svc.probe(url, json); // #167：runProbe 是 service 私有函数，须经 svc 调用
+            });
+            return ok(verdict);
+          }
+          case 'tunnel.save': {
+            const url = String(payload?.url ?? '').trim();
+            if (url && !/^https?:\/\//.test(url)) return errRpc('bad-url');
+            try { await writeSettings({ tunnel_url: url }); } catch {}
+            if (svc.tunnel) svc.tunnel._customUrl = url;
+            return ok({ url });
+          }
+          case 'cloudflared.get':
+            return ok({
+              bin: svc.tunnel?.bin ?? '',
+              url: svc.tunnel?.url ?? null,
+              running: !!svc.tunnel?.child,
+              reason: svc.tunnel?.reason ?? null,
+              phase: svc.tunnel?.phase ?? 'idle',
+              detail: svc.tunnel?.detail ?? '',
+              message: svc.tunnel?.message ?? '',
+            });
+          case 'cloudflared.apply': {
+            // 空 bin = 自动解析（PATH 优先 → ~/.dsh/bin 缓存 → 多镜像下载），适合"一键启动"。
+            // 解析/下载是 async，phase 字段会从 'resolving' → 'downloading' → 'starting' → 'ready' 演进。
+            const bin = String(payload?.bin ?? '').trim();
+            const t = svc.startTunnel(bin || null, svc.tunnel?.port ?? 3091);
+            // 仅在用户显式给了 bin 时持久化（auto 模式每次启动自动解析，不要把缓存路径写死）。
+            if (bin) { try { await writeSettings({ cloudflared_bin: bin }); } catch {} }
+            return ok({ bin: t.bin || null, running: !!t.child, phase: t.phase ?? 'resolving' });
+          }
+          case 'cloudflared.stop':
+            // 显式停止 = 同时清掉持久化 bin：重启后不再自动拉起（保留「停止」的语义）
+            try { await writeSettings({ cloudflared_bin: '' }); } catch { /* noop */ }
+            svc.stopTunnel();
+          default:
+            return errRpc('unknown-endpoint');
+        }
+      } catch (e) {
+        return errRpc(String(e?.message ?? e));
+      }
+    }, { authority: 'loopback' });
+  } else {
+    try { ctx?.logger?.warn?.('dsh-mobile-access: connection.rpc 不可用，client 端将无法与 host 通信'); } catch {}
+  }
+  let closed = false;
+  const boot = async () => {
+    try {
+      await svc.listen(lanePort);
+    } catch (e) {
+      try { ctx?.logger?.error?.(`dsh-mobile-access: lane ${lanePort} 启动失败: ${e}`); } catch { /* noop */ }
+      return;
+    }
+    // 启动横幅：报出上游与自有控制面的保留命名空间——命名空间外的一切路径原样透传（#145）。
+    try { ctx?.logger?.info?.(`dsh-mobile-access: lane 改写反代已监听 127.0.0.1:${lanePort} → ${svc.proxy.upstream}（控制面 ${LANE_PREFIX}/，其余全量透传）`); } catch { /* noop */ }
+    // 预热 dsh 会话凭证（异步，失败不阻塞：首个上游 401 会触发自动重换）
+    void svc.dshAuth?.ensure?.();
+    // 启动时按 env（桌面壳 spawn 注入）优先，其次 settings.yaml 持久化值；
+    // 运行期变更走 POST /api/pair/cloudflared（立即生效 + 持久化）。
+    let bin = process.env.DSH_CLOUDFLARED_BIN || '';
+    if (!bin) {
+      try { bin = readSetting('cloudflared_bin') ?? ''; } catch { bin = ''; }
+    }
+    if (bin) {
+      svc.startTunnel(bin, lanePort);
+      try {
+        if (closed) return;
+        if (svc.tunnel.url) ctx?.logger?.info?.(`dsh-mobile-access: cloudflared 隧道 ${svc.tunnel.url}`);
+        else ctx?.logger?.info?.('dsh-mobile-access: cloudflared 已启动，等待隧道地址');
+      } catch { /* noop */ }
+    }
+  };
+  void boot();
+  ctx.on('dispose', () => {
+    closed = true;
+    svc.stopTunnel();
+    void svc.close();
+  });
+}
+
+/** dsh bundle 插件入口：cordis-plugin-loader 会同时读取 apply + inject。 */
+export { apply };
