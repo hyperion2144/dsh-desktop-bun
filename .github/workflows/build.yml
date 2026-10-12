@@ -222,7 +222,17 @@ jobs:
             if ($i % 15 -eq 0) { Write-Host ("冒烟：等待中 {0}s，安装位文件 {1}" -f ($i * 2), $n) }
             if ($n -gt 0 -and $n -eq $lastCount) { $stable++ } else { $stable = 0 }
             $lastCount = $n
-            if ($stable -ge 3) { break }
+            if ($stable -ge 10) {
+              Write-Host '冒烟：文件数 20 秒未变——卡点诊断（按 mtime 最后落盘的 8 个文件 + 分目录计数 + launcher 是否存活）'
+              Get-ChildItem $extractRoot -Recurse -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 8 | ForEach-Object { Write-Host ("最后落盘：{0}" -f $_.FullName.Substring($extractRoot.Length)) }
+              foreach ($d in 'app\bun','app\dsh','app\plugins','app\runtime','bin','Resources') {
+                $p = Get-ChildItem $extractRoot -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.FullName -like ('*' + $d.Replace('\','\')) } | Select-Object -First 1
+                if ($p) { $c = (Get-ChildItem $p.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count; Write-Host ("目录计数：{0} = {1}" -f $d, $c) }
+              }
+              $alive = Get-Process -Name 'launcher','bun' -ErrorAction SilentlyContinue | Select-Object -First 3
+              if ($alive) { $alive | ForEach-Object { Write-Host ("存活：{0} pid={1}" -f $_.ProcessName, $_.Id) } } else { Write-Host '存活：launcher/bun 都已退出' }
+              break
+            }
           }
           # 阶段 2：Windows 上 launchInstalledApp 是分离进程，SHELL-READY 到不了我们的重定向；
           # 装完后自己把「安装位的 launcher.exe」拉起（首启已装好，再跑它就直接进应用）。
