@@ -16,6 +16,7 @@
 - 远程 dsh：接入远程地址（token 换会话 cookie），托盘一键切回本地。
 - 运行时管理：内置/已下载/外部 CLI 三种来源的发现与切换；下载走 npm/GitHub 目录；卸载进回收站。
 - 应用内更新检查（Electrobun 更新器，基址为本仓 Releases）。
+- CI 每日定时全量兜底（#8）：build.yml 新增 schedule（UTC 18:30 = 北京 02:30）；main 打包链（三平台打包 / NSIS / 断言 / 冒烟）由每日自动验证，防 hutch 与 runner 镜像漂移导致的静默腐坏。
 
 ### Changed
 - CI 触发策略分流（#7）：push/PR 只跑检查（typecheck + test，新增 Check workflow）；完整构建（三平台 + 断言 + 冒烟 + 上传）仅由 workflow_dispatch 与 tag push 触发。

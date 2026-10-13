@@ -4,8 +4,8 @@ name: Check
 #
 # 触发策略（方案 A，与 build.yml 分工）：
 #   - 本文件：push(main) 与 pull_request —— 每轮迭代的快速反馈
-#   - build.yml：workflow_dispatch 与 tag push —— 完整构建 + 断言 + 冒烟 + 上传
-# main 打包链的持续验证靠手动 dispatch（定时兜底另票处理）。
+#   - build.yml：workflow_dispatch / tag push / 每日 schedule（#8）—— 完整构建 + 断言 + 冒烟 + 上传
+# main 打包链的持续验证：每日 schedule 兜底（#8，UTC 18:30）+ 手动 dispatch。
 on:
   push:
     branches: [main]

@@ -18,11 +18,15 @@ on:
     tags:
       # 全部 tag 都触发（AC 原文「tag push 触发全量流水线」，未限定前缀；'**' 连含斜杠的 tag 名也匹配）
       - '**'
+  schedule:
+    # 每日全量兜底（#8）：UTC 18:30 = 北京 02:30，避开迭代高峰；偏移整点躲开调度拥堵。
+    # schedule 事件只在默认分支触发（官方语义），无需 ref 守卫；与 dispatch/tag 共用同一条流水线。
+    - cron: '30 18 * * *'
 #
-# 触发策略（#7，方案 A）：push(main) 与 pull_request 一律只跑检查（见 check.yml）——
+# 触发策略（#7 方案 A + #8 定时兜底）：push(main) 与 pull_request 一律只跑检查（见 check.yml）——
 # 每次全量约 40 runner-分钟（三平台 CEF 打包 + NSIS + 冒烟），不该发生在每一轮
-# 迭代上。完整构建只留给手动 dispatch 与 tag push；main 打包链的持续验证靠手动
-# dispatch（定时兜底另票处理）。
+# 迭代上。完整构建只留给手动 dispatch、tag push 与每日定时兜底（schedule，见 on:）；
+# main 打包链由兜底持续验证，hutch/NSIS/runner 镜像漂移最迟次日暴露。
 # 注：这里只做「构建 + 断言 + 存 CI 产物」。真正的发布（把安装包与 `<platformPrefix>-update.json` +
 # `<platformPrefix>-*.app.tar.zst` 作为 Release 资产传上去）还没接——自动更新的清单就是靠这两个资产名稳定地
 # 指到最新一版，缺了它们更新永远不可用。等允许打 tag 时再加一个 release job。
