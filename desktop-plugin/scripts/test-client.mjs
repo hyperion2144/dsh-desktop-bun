@@ -187,21 +187,24 @@ assert.equal(kb.applyShortcutEdit(edited.document, { type: 'set', id: 'a', bindi
 assert.equal(kb.applyShortcutEdit(edited.document, { type: 'set', id: 'a', binding: null }, 'desktop:macos').ok, false, '非对象绑定拒绝')
 assert.equal(kb.applyShortcutEdit(edited.document, { type: 'nope' }, 'desktop:macos').ok, false, '未知编辑类型拒绝')
 
-// ── Rust 注入的 dshDesktop 载体脚本（#187）：在最小 DOM 桩里真跑一遍 ──
-// 这段 JS 只在真机窗口里执行，语法错/占位符漏替只在运行时暴露；这里从 Rust 源取出
-// 原文、替掉两个占位符、放进 node:vm 的最小 DOM 桩里跑，锁住它的对外形状。
-const carrierSource = readFileSync(join(root, 'desktop/src-tauri/src/ui/browser_guests/mod.rs'), 'utf8')
-const carrierRaw = carrierSource.match(/const DESKTOP_CARRIER_INIT_SCRIPT: &str = r#"([\s\S]*?)"#;/)?.[1]
-assert.ok(carrierRaw, '能从 Rust 源里取出载体脚本原文')
-assert.ok(carrierRaw.includes('__DSH_PLATFORM_NAME__'), '载体里保留平台名占位符')
-assert.ok(carrierRaw.includes('__DSH_SHELL_ORIGIN_TEST__'), '载体里保留 origin 判定占位符')
+// ── 壳 preload 注入的 dshDesktop 载体脚本（desktop-electrobun/src/bun/carrier.ts，
+// 旧壳 Rust 版 DESKTOP_CARRIER_INIT_SCRIPT 的等价物）：esbuild 转译后在最小 DOM 桩里
+// 真跑一遍，锁住对外形状（幂等安装 / 惰性转发 / 轮询等待 / 平台标记）。
+await build({
+  entryPoints: [join(root, '../desktop-electrobun/src/bun/carrier.ts')],
+  outfile: join(tmp, 'carrier.mjs'),
+  format: 'esm',
+  platform: 'node',
+  target: 'node20',
+  logLevel: 'silent',
+})
 
-function runCarrier({ origin, impl, timers = 'never' }) {
-  const script = carrierRaw
-    .replace('__DSH_SHELL_ORIGIN_TEST__', "function (o) { return o === 'dshapp://localhost' }")
-    .replace('__DSH_PLATFORM_NAME__', 'macos')
+const { carrierScript } = await import(join(tmp, 'carrier.mjs'))
+const carrierRaw = carrierScript('macos')
+assert.ok(carrierRaw.includes('protocolVersion: 1'), '载体脚本带协议版本')
+
+function runCarrier({ impl, timers = 'never' } = {}) {
   const sandbox = {
-    location: { origin },
     document: { documentElement: { dataset: {} } },
     // 默认给一个「永不触发」的 setTimeout：桩里的轮询是一直等到实现出现为止的，
     // 测试不需要它真的推进（用真实定时器会让 node 空转 30s 才退出）。
@@ -212,12 +215,12 @@ function runCarrier({ origin, impl, timers = 'never' }) {
     __dshShellBridgeImpl: impl?.browser,
   }
   createContext(sandbox)
-  runInContext(script, sandbox, { filename: 'desktop-carrier.js' })
+  runInContext(carrierRaw, sandbox, { filename: 'desktop-carrier.js' })
   return sandbox
 }
 
-const carrier = runCarrier({ origin: 'dshapp://localhost' })
-assert.equal(carrier.dshDesktop?.protocolVersion, 1, '壳内 origin 上安装 dshDesktop')
+const carrier = runCarrier()
+assert.equal(carrier.dshDesktop?.protocolVersion, 1, '壳内窗口安装 dshDesktop')
 assert.equal(carrier.document.documentElement.dataset.platform, 'macos', '写入平台名标记（不是 darwin，不触碰 dsh 的 Electron 几何）')
 for (const method of ['subscribe', 'closeWindow']) {
   assert.equal(typeof carrier.dshDesktop.keyboard[method], 'function', `暴露 DesktopKeyboardApi.${method}`)
@@ -225,7 +228,14 @@ for (const method of ['subscribe', 'closeWindow']) {
 for (const method of ['get', 'edit', 'subscribe', 'recording']) {
   assert.equal(typeof carrier.dshDesktop.shortcuts[method], 'function', `暴露 DesktopShortcutsApi.${method}`)
 }
-assert.equal(typeof carrier.dshDesktop.browser.acquire, 'function', '原有 browser.acquire 未被破坏')
+assert.equal(typeof carrier.dshDesktop.browser.acquire, 'function', 'browser.acquire 惰性转发')
+assert.equal(typeof carrier.dshDesktop.browser.onOpenRequested('lease', () => {}), 'function', 'bridge 未就绪时 onOpenRequested 回 no-op')
+
+// 幂等：已有载体的页面重复执行脚本不覆盖
+const twice = runCarrier()
+const firstCarrier = twice.dshDesktop
+runInContext(carrierRaw, twice, { filename: 'desktop-carrier.js' })
+assert.equal(twice.dshDesktop, firstCarrier, '重复执行不覆盖已有载体')
 
 // 实现未就绪（client 插件还没装）：一切同步可调、不炸，get 仍返回 Promise
 const earlyDisposer = carrier.dshDesktop.keyboard.subscribe(() => {})
@@ -237,7 +247,6 @@ earlyDisposer()
 // 实现就绪（client 插件已装）：订阅挂到实现上、调用逐项转发
 const seen = []
 const ready = runCarrier({
-  origin: 'dshapp://localhost',
   impl: {
     keyboard: {
       subscribeInput: (listener) => {
@@ -269,7 +278,7 @@ forwardDisposer()
 assert.ok(seen.includes('off'), 'disposer 透传到实现的退订')
 
 // 实现晚到（真实定时器）：轮询等到实现出现后把订阅补上
-const late = runCarrier({ origin: 'dshapp://localhost', timers: 'live' })
+const late = runCarrier({ timers: 'live' })
 const lateSeen = []
 late.dshDesktop.keyboard.subscribe((input) => lateSeen.push(input.code))
 await new Promise((resolve) => setTimeout(resolve, 250))
@@ -284,9 +293,6 @@ await new Promise((resolve) => setTimeout(resolve, 250))
 assert.ok(lateSeen.includes('attached'), '实现晚到时订阅自动补上（惰性轮询）')
 late.__push({ code: 'KeyK' })
 assert.ok(lateSeen.includes('KeyK'), '晚到的实现同样能把输入送进监听器')
-
-// 非壳内页面：完全不安装载体（回落 web 档）
-assert.equal(runCarrier({ origin: 'https://example.com' }).dshDesktop, undefined, '非壳内 origin 不装载体')
 
 // ── composer-input-guard（#188）：控制字符判定与取证串 ──
 await build({

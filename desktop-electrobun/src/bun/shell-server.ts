@@ -59,10 +59,6 @@ export interface ShellServerOptions {
   /** F12：页面内确认弹窗的回填（旧壳 ui_input_confirm） */
   onInputConfirm?: (flow: string, value: string) => void
   onProfileOp?: (request: ProfileOpRequest) => Promise<ProfileOpResult>
-  /** 兼容/高级模式弹框状态（旧壳 get_mode_prompt_needed） */
-  getModePrompt?: () => { needed: boolean; profile: string; port: number }
-  /** 选模式（旧壳 choose_desktop_mode） */
-  chooseMode?: (mode: string, tokenUrl?: string) => Promise<{ ok: true; needsToken: boolean }>
   /** 壳 ↔ 页面 RPC（`/__shell__/rpc`）：调用方给命令表与错误语义，这里只管 HTTP */
   /**
    * 每视图授权（#220 决策 12）：页面桥带 `x-dsh-shell-view` 回来，这里查表拿视图种类。
@@ -203,28 +199,6 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
       if (decision.kind === 'shell') {
         if (decision.rel === 'health') {
           return Response.json(health())
-        }
-        // 兼容/高级模式弹框（旧壳 get_mode_prompt_needed + choose_desktop_mode 的自答端点）
-        if (decision.rel === 'mode-prompt') {
-          return Response.json(
-            options.getModePrompt?.() ?? { needed: false, profile: '', port: 0 },
-            { headers: { 'cache-control': 'no-store' } },
-          )
-        }
-        if (decision.rel === 'mode') {
-          if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
-          if (options.chooseMode === undefined) return new Response('mode chooser not ready', { status: 501 })
-          let body: { mode?: unknown; tokenUrl?: unknown } = {}
-          try {
-            body = (await request.json()) as { mode?: unknown; tokenUrl?: unknown }
-          } catch {}
-          const mode = typeof body.mode === 'string' ? body.mode : ''
-          const tokenUrl = typeof body.tokenUrl === 'string' ? body.tokenUrl : undefined
-          try {
-            return Response.json(await options.chooseMode(mode, tokenUrl))
-          } catch (error) {
-            return Response.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, { status: 400 })
-          }
         }
         if (decision.rel === 'boot') {
           const bootAuth = authorize(request, null)

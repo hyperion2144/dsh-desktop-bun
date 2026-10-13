@@ -6,7 +6,7 @@ import { remoteDisplay } from '../shared/remote.ts'
 // 而 `Tray` 类只是把它交给原生层。分开之后无显示器/无 CEF 也能测。
 //
 // 旧 Tauri 壳的托盘能力（`docs/research/shell-capability-inventory.md` 第 6 节）在这里逐项对齐：
-// 显示/隐藏窗口、profile 切换、重启 dsh 服务、运行时来源切换（内置 / 外部 dsh / 已装版本 /
+// 显示/隐藏窗口、profile 切换、重启 dsh 服务、运行时来源切换（内置 / 已装版本 /
 // 目录里点一下就下载并切换）、退出。
 // 还没做的项不摆假入口——宁可菜单短，也不要点了没反应的项。
 
@@ -32,7 +32,6 @@ export const TRAY_MENU_ACTIONS = {
   remoteAddrPrefix: 'tray:remote:addr:',
   windowPrefix: 'tray:window:',
   runtimeBuiltin: 'tray:runtime:builtin',
-  runtimeExternal: 'tray:runtime:external',
   runtimeVersionPrefix: 'tray:runtime:version:',
   runtimeFetchPrefix: 'tray:runtime:fetch:',
   registerCli: 'tray:register-cli',
@@ -57,9 +56,7 @@ export interface TrayAction {
   kind: TrayActionKind
   /** kind === 'open-window' 时是目标 profile */
   profile?: string
-  /** kind === 'switch-runtime'：'builtin' 是内置树，'external' 是系统装的 dsh CLI；
-   *  已下载版本用同样的 kind 加 version 表示 */
-  mode?: 'builtin' | 'external'
+  /** kind === 'switch-runtime'：不带 version = 切回内置树；带 version = 切到该已下载版本 */
   /** kind === 'switch-runtime'（目标版本）或 'download-runtime'（要下的版本） */
   version?: string
   /** kind === 'remote-source'：选中的远程地址在 remoteList 里的下标；undefined = 切回本地 */
@@ -82,11 +79,9 @@ export interface TrayState {
   hostRunning: boolean
   /** 运行时来源的人类可读标签，例如 `内置 0.2.1-alpha.2` */
   runtimeLabel: string
-  /** dsh 来源：内置树 / 系统装的 dsh CLI */
-  mode: 'builtin' | 'external'
   /** 随包内置树的版本（拿不到时 null，菜单文案会退成「版本未知」） */
   builtinVersion: string | null
-  /** 当前真正在跑的运行时版本（内置 / 本地 override / 已下载都算；外部 dsh 模式下是外部那版的版本） */
+  /** 当前真正在跑的运行时版本（内置 / 本地 override / 已下载都算） */
   runningVersion: string | null
   /** 当前选中的已下载版本；null = 用内置树 */
   selected: string | null
@@ -94,8 +89,6 @@ export interface TrayState {
   installed: readonly string[]
   /** 版本目录里还没装的项（托盘最多列 5 条，带渠道标签） */
   catalog: readonly TrayCatalogItem[]
-  /** 系统里能找到外部 dsh（DSH_BIN / PATH）才列那一项 */
-  externalAvailable: boolean
   /** 正在下载的版本；非 null 时那条标「（下载中…）」 */
   downloading: string | null
   /** 「dsh 服务地址」：当前生效的远程地址（null = 本地）与可选远程列表（旧壳 #136） */
@@ -139,8 +132,7 @@ export function parseTrayAction(action: string | undefined | null): TrayAction |
   }
   if (action === TRAY_MENU_ACTIONS.registerCli) return { kind: 'register-cli' }
   if (action === TRAY_MENU_ACTIONS.restartService) return { kind: 'restart-service' }
-  if (action === TRAY_MENU_ACTIONS.runtimeBuiltin) return { kind: 'switch-runtime', mode: 'builtin' }
-  if (action === TRAY_MENU_ACTIONS.runtimeExternal) return { kind: 'switch-runtime', mode: 'external' }
+  if (action === TRAY_MENU_ACTIONS.runtimeBuiltin) return { kind: 'switch-runtime' }
   if (action.startsWith(TRAY_MENU_ACTIONS.runtimeVersionPrefix)) {
     const version = action.slice(TRAY_MENU_ACTIONS.runtimeVersionPrefix.length)
     if (version === '') return null
@@ -183,22 +175,19 @@ function channelSuffix(channel: string): string {
 
 /**
  * 运行时版本子菜单（旧壳 `runtime_menu_items` 的等价物）。
- * 内置 / 外部 dsh / 某个已下载版本三者互斥，勾选状态交给原生 checkmark 画；
+ * 内置 / 某个已下载版本二者互斥，勾选状态交给原生 checkmark 画；
  * 目录里还没装的版本列成「↓ 下载并切换」（至多 5 条）——点了先下再切，旧壳同一套。
  */
 export function runtimeMenuItems(state: TrayState): TrayMenuItem[] {
-  const externalOn = state.mode === 'external'
   // 内置树的版本：优先 `builtinVersion`；拿不到时（dev 下用 DSH_SHELL_RUNTIME_DIR 指了本地树）
   // 退成「正在跑的版本」——否则菜单既勾不出内置，又把自己正跑的那版列成「可下载切换」。
-  const builtinLabel = state.builtinVersion ?? (externalOn ? null : state.runningVersion)
-  const builtinOn =
-    !externalOn && (state.selected === null || state.selected === state.builtinVersion)
+  const builtinLabel = state.builtinVersion ?? state.runningVersion
+  const builtinOn = state.selected === null || state.selected === state.builtinVersion
   /** 版本号与正在跑的一致、但那一行没打勾时标一下（打勾本身已经说明「就是它」） */
   const runningTag = (version: string | null, checked: boolean): string =>
     !checked && version !== null && version === state.runningVersion ? '（当前运行）' : ''
-  // 外部 dsh 模式下「正在跑」的是外部那版，不该标到内置行上
   const builtinSuffix =
-    runningTag(builtinLabel, builtinOn || externalOn) === '' ? '' : ' · 当前运行'
+    runningTag(builtinLabel, builtinOn) === '' ? '' : ' · 当前运行'
   const items: TrayMenuItem[] = [
     {
       type: 'normal',
@@ -210,14 +199,6 @@ export function runtimeMenuItems(state: TrayState): TrayMenuItem[] {
       checked: builtinOn,
     },
   ]
-  if (state.externalAvailable) {
-    items.push({
-      type: 'normal',
-      label: '外部 dsh（DSH_BIN / PATH）',
-      action: TRAY_MENU_ACTIONS.runtimeExternal,
-      checked: externalOn,
-    })
-  }
   const installing = state.downloading
   // 下载中但还没进已装列表的版本也得有一行，否则点完菜单看不到任何反馈
   const installed = sortRuntimeVersionsDesc(
@@ -231,9 +212,9 @@ export function runtimeMenuItems(state: TrayState): TrayMenuItem[] {
       label:
         installing === version
           ? `${version}（下载中…）`
-          : `${version}${runningTag(version, !externalOn && state.selected === version)}`,
+          : `${version}${runningTag(version, state.selected === version)}`,
       action: `${TRAY_MENU_ACTIONS.runtimeVersionPrefix}${version}`,
-      checked: !externalOn && state.selected === version,
+      checked: state.selected === version,
       enabled: installing !== version,
     })
   }
@@ -241,8 +222,7 @@ export function runtimeMenuItems(state: TrayState): TrayMenuItem[] {
     .filter(
       (entry) =>
         !installed.includes(entry.version) &&
-        entry.version !== builtinLabel &&
-        !(externalOn && entry.version === state.runningVersion)
+        entry.version !== builtinLabel
     )
     .slice(0, TRAY_RUNTIME_FETCH_LIMIT)
   if (pending.length > 0) items.push({ type: 'divider' })

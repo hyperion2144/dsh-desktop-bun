@@ -50,13 +50,11 @@ const baseState = (overrides: Partial<TrayState> = {}): TrayState => ({
   openWindows: [],
   hostRunning: true,
   runtimeLabel: '内置 0.2.1-alpha.2',
-  mode: 'builtin',
   builtinVersion: '0.2.1-alpha.2',
   runningVersion: '0.2.1-alpha.2',
   selected: null,
   installed: [],
   catalog: [],
-  externalAvailable: false,
   downloading: null,
   remoteAddr: null,
   remoteList: [],
@@ -153,18 +151,11 @@ describe('trayMenu', () => {
 })
 
 describe('parseTrayAction', () => {
-  test('解析三条动作', () => {
+  test('解析动作表', () => {
     expect(parseTrayAction(TRAY_MENU_ACTIONS.toggleWindow)).toEqual({ kind: 'toggle-window' })
     expect(parseTrayAction(TRAY_MENU_ACTIONS.quit)).toEqual({ kind: 'quit' })
     expect(parseTrayAction(TRAY_MENU_ACTIONS.restartService)).toEqual({ kind: 'restart-service' })
-    expect(parseTrayAction(TRAY_MENU_ACTIONS.runtimeBuiltin)).toEqual({
-      kind: 'switch-runtime',
-      mode: 'builtin',
-    })
-    expect(parseTrayAction(TRAY_MENU_ACTIONS.runtimeExternal)).toEqual({
-      kind: 'switch-runtime',
-      mode: 'external',
-    })
+    expect(parseTrayAction(TRAY_MENU_ACTIONS.runtimeBuiltin)).toEqual({ kind: 'switch-runtime' })
     expect(parseTrayAction(`${TRAY_MENU_ACTIONS.runtimeVersionPrefix}0.2.1-alpha.1`)).toEqual({
       kind: 'switch-runtime',
       version: '0.2.1-alpha.1',
@@ -230,7 +221,7 @@ describe('orderedProfiles', () => {
 })
 
 describe('runtimeMenuItems（托盘里的运行时来源切换）', () => {
-  test('默认只用内置树：内置打勾，不列外部也不列已装版本', () => {
+  test('默认只用内置树：内置打勾，不列已装版本', () => {
     expect(labels(runtimeMenuItems(baseState()))).toEqual(['✓ 内置 0.2.1-alpha.2（随安装包）'])
   })
 
@@ -262,17 +253,6 @@ describe('runtimeMenuItems（托盘里的运行时来源切换）', () => {
     expect(labels(items)).toContain('0.2.1-alpha.1（当前运行）')
   })
 
-  test('外部 dsh 只在系统里真能找到时才列', () => {
-    expect(findItem(runtimeMenuItems(baseState()), '外部 dsh（DSH_BIN / PATH）')).toBeUndefined()
-    const items = runtimeMenuItems(baseState({ externalAvailable: true }))
-    expect(findItem(items, '外部 dsh（DSH_BIN / PATH）')?.action).toBe(TRAY_MENU_ACTIONS.runtimeExternal)
-  })
-
-  test('mode=external 时外部打勾、内置不打勾', () => {
-    const items = runtimeMenuItems(baseState({ mode: 'external', externalAvailable: true }))
-    expect(findItem(items, '外部 dsh（DSH_BIN / PATH）')?.checked).toBe(true)
-    expect(findItem(items, '内置 0.2.1-alpha.2（随安装包）')?.checked).toBe(false)
-  })
 
   test('已下载版本按版本号倒序，且跳过与内置同号的', () => {
     const items = runtimeMenuItems(
