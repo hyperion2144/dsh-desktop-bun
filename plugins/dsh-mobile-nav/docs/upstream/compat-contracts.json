@@ -1,0 +1,243 @@
+{
+  "$comment": "上游契约机读清单（upgrade-runbook §2 的数据版）。消费方：node scripts/cdp-compat-contracts.mjs——在真实页面扫描 DOM class 与全部 CSSRule 文本，按 needle 判 HIT/MISS/SKIP。lazy=true 表示该哈希属状态门控/懒加载资源（miss 记 SKIP 并提示手动步骤，不计退出码）；lazy=false 的 MISS 计退出码。宿主升级后跑一次即可知道漂了哪几个，不用等布局坏了再排雷。",
+  "contracts": [
+    {
+      "id": "sidebar-right-panel",
+      "kind": "marker",
+      "needle": "[data-sidebar-right-panel]",
+      "owner": "dsh-client-ui-sidebar-right",
+      "lazy": true,
+      "state": "打开文件列表面板（Files）后复扫",
+      "note": "面板 safe-area padding 落点；须为 position:fixed; inset:0 全屏形态且自绘背景（files-panel-safe-area-probe 守）"
+    },
+    {
+      "id": "dshmarket-installed-row",
+      "kind": "hash",
+      "needle": "eGUBIq_",
+      "owner": "dshmarket",
+      "lazy": true,
+      "state": "打开设置→插件市场后复扫",
+      "note": "outer-row :not 排除 irowActions/irowTrailing + 标题行 wrap + Tasks 弹卡"
+    },
+    {
+      "id": "agent-preset-menu",
+      "kind": "hash",
+      "needle": "cubgiG_",
+      "owner": "dsh-client-ui-agent-preset",
+      "lazy": false,
+      "note": "模式选择菜单底部弹层 :has(cubgiG_item)"
+    },
+    {
+      "id": "subagent-hover-gen",
+      "kind": "hash",
+      "needle": "ZKlsPq_",
+      "owner": "dsh-client-ui-subagent",
+      "lazy": false,
+      "note": "hover 代：count 触摸兼容/lineage 钉宽/尾随空格坑"
+    },
+    {
+      "id": "subagent-onclick-gen",
+      "kind": "hash",
+      "needle": "h8S2Va_",
+      "owner": "dsh-client-ui-subagent",
+      "lazy": true,
+      "state": "两代互斥，另一代在场时 miss 属正常",
+      "note": "0.1.0-rc.6~8 onClick 代"
+    },
+    {
+      "id": "contextmeter",
+      "kind": "hash",
+      "needle": "JObwrW_",
+      "owner": "dsh-client-ui-conversation",
+      "lazy": false,
+      "note": "trigger 无 aria-haspopup=menu，右簇钉住依赖"
+    },
+    {
+      "id": "composer-card",
+      "kind": "hash",
+      "needle": "uV2eYG_",
+      "owner": "dsh-client-ui-conversation",
+      "lazy": false,
+      "note": "hero/tools/scroll；Lexical <p> 命中 _scroll 的排除"
+    },
+    {
+      "id": "frame-class",
+      "kind": "hash",
+      "needle": "pI_x6G_",
+      "owner": "dsh-web-frontend",
+      "lazy": false,
+      "note": "box-sizing/safe-area 规则落点"
+    },
+    {
+      "id": "hero-header-actions",
+      "kind": "hash",
+      "needle": "wSkVaW_headerActions",
+      "owner": "dsh-client-ui-conversation",
+      "lazy": false,
+      "note": "hero 自有 headerActions 与 slot 容器的区分对象；0.1.5-rc.2 起由 qDHVXG_ 改名（2026-09-18 普查：旧针全盘 0 命中）"
+    },
+    {
+      "id": "settings-close",
+      "kind": "hash",
+      "needle": "VOzbGW_",
+      "owner": "settings-dialog",
+      "lazy": true,
+      "state": "打开设置对话框后复扫",
+      "note": "唯一叉号，dshmarket 反制 nav 的关闭路径"
+    },
+    {
+      "id": "user-bubble",
+      "kind": "hash",
+      "needle": "Sixlwa_bubble",
+      "owner": "dsh-client-ui-chat",
+      "lazy": false,
+      "note": "tooltip 压制规则的反断言元素；气泡已迁到 dsh-client-ui-chat（旧 gdEzaW_ 属 conversation，0 命中）"
+    },
+    {
+      "id": "goal-bubble",
+      "kind": "hash",
+      "needle": "oRe1gG_",
+      "owner": "dsh-client-ui-goal",
+      "lazy": false,
+      "note": "goal 气泡反断言元素"
+    },
+    {
+      "id": "thirdparty-search-13px",
+      "kind": "hash",
+      "needle": "-NprXq_",
+      "owner": "third-party",
+      "lazy": true,
+      "state": "打开对应搜索 UI 后复扫",
+      "note": "iOS 16px 下限覆盖对象"
+    },
+    {
+      "id": "hero-composer-stack",
+      "kind": "hash",
+      "needle": "wSkVaW_",
+      "owner": "dsh-client-ui-conversation",
+      "lazy": false,
+      "note": "多 token class 子串匹配实证样例"
+    },
+    {
+      "id": "host-modal-portal-root",
+      "kind": "marker",
+      "needle": "body > div:has(> [role=\"dialog\"][aria-modal=\"true\"])",
+      "owner": "dsh-web-frontend",
+      "lazy": true,
+      "state": "打开任意宿主模态（如工作区重命名）后复扫",
+      "note": "本插件只按结构化锚点提升 z-index（body > div:has(> [role=dialog][aria-modal])），旧哈希 _dialog_w1urq_22/_root_w1urq_2 在 0.1.7-alpha.1 与 alpha.2 上均已消失（2026-09-23 静态对账）⇒ 由死哈希改成结构化 marker"
+    },
+    {
+      "id": "official-plugins-card",
+      "kind": "hash",
+      "needle": "YyYd_a_",
+      "owner": "dsh-web-frontend",
+      "lazy": true,
+      "state": "打开设置→Plugins 后复扫",
+      "note": "官方 Plugins 配置卡头；0.1.6-alpha.2 删除 PluginCard.tsx 该族全灭（新卡头族 pbvGtq_/UYsYFG_/uedTFq_），卡头复活时改认领新族"
+    },
+    {
+      "id": "group-card-1",
+      "kind": "hash",
+      "needle": "Kwoi6G_",
+      "owner": "dsh-web-ui-all",
+      "lazy": false,
+      "note": "该哈希现只在 dsh-web-all 的**样式表选择器**里（HIT 来自 cssText，不代表有元素渲染：2026-09-18 实测该页零卡头）；0.1.5-rc.2 + dsh-web-all 0.3.20 实测 Web Plugins 页零 [class*=_header] 渲染（全 modal 62 节点，只有工具栏）——该页形态已不存在，卡头复活时复扫并认领新哈希"
+    },
+    {
+      "id": "group-card-2",
+      "kind": "hash",
+      "needle": "bpnj3G_",
+      "owner": "dsh-web-ui-all",
+      "lazy": true,
+      "state": "0.1.5-rc.2 + dsh-web-all 0.3.20 实测 Web Plugins 页零 [class*=_header] 渲染（全 modal 62 节点，只有工具栏）——该页形态已不存在，卡头复活时复扫并认领新哈希"
+    },
+    {
+      "id": "group-card-3",
+      "kind": "hash",
+      "needle": "Jh0q7G_",
+      "owner": "dsh-web-ui-all",
+      "lazy": false,
+      "note": "同 group-card-1：HIT 来自样式表选择器而非渲染"
+    },
+    {
+      "id": "group-card-4",
+      "kind": "hash",
+      "needle": "jmhvDG_",
+      "owner": "dsh-web-ui-all",
+      "lazy": true,
+      "state": "0.1.5-rc.2 + dsh-web-all 0.3.20 实测 Web Plugins 页零 [class*=_header] 渲染（全 modal 62 节点，只有工具栏）——该页形态已不存在，卡头复活时复扫并认领新哈希"
+    },
+    {
+      "id": "group-card-5",
+      "kind": "hash",
+      "needle": "rUBhvW_",
+      "owner": "dsh-web-ui-all",
+      "lazy": false,
+      "note": "同 group-card-1：HIT 来自样式表选择器而非渲染"
+    },
+    {
+      "id": "workspace-session-row",
+      "kind": "hash",
+      "needle": "_sessionRow",
+      "owner": "dsh-client-ui-workspace",
+      "lazy": true,
+      "state": "桌面宽度（≥1024px）工作区面板渲染后复扫；rc.2 抽屉是 rail 变体不渲染行",
+      "note": "会话删除菜单注入的行锚点（session-menu.ts），YDXeBa_sessionRow 子串命中"
+    },
+    {
+      "id": "workspace-menu-item",
+      "kind": "hash",
+      "needle": "_itemLabel",
+      "owner": "dsh-client-ui-workspace",
+      "lazy": true,
+      "state": "桌面点会话行 ⋯ 菜单后复扫",
+      "note": "菜单克隆模板（_itemIcon/_itemLabel 配对）；签名=恰 3 项 rename/fork/archive"
+    },
+    {
+      "id": "workspace-group-section",
+      "kind": "hash",
+      "needle": "_groupSection",
+      "owner": "dsh-client-ui-workspace",
+      "lazy": true,
+      "state": "桌面宽度工作区面板渲染后复扫",
+      "note": "重名标题组内位置消歧（resolveSessionId）；子串命中，归属哈希两代均为 bhn1Oq_groupSection（旧记 qDHVXG_ 有误，全树 0 命中，2026-09-19 修正）"
+    },
+    {
+      "id": "marker-lexical-composer",
+      "kind": "marker",
+      "needle": "[data-composer-input]",
+      "owner": "dsh-client-ui-conversation",
+      "lazy": true,
+      "state": "0.1.2-rc.1+ 才存在；0.1.1-rc.2 缺席属正常",
+      "note": "Lexical composer 编辑面 marker"
+    },
+    {
+      "id": "marker-conversation-overlay",
+      "kind": "marker",
+      "needle": "[data-conversation-composer-overlay]",
+      "owner": "dsh-client-ui-trajectory/conversation",
+      "lazy": true,
+      "state": "活跃 conversation.view（含轨迹 tab）",
+      "note": "通用 overlay 属性，非 file-viewer 专属"
+    },
+    {
+      "id": "creative-mode-chip",
+      "kind": "hash",
+      "needle": "SVAs4q_",
+      "owner": "dsh-client-ui-conversation",
+      "lazy": true,
+      "state": "根会话顶栏（创造模式 chip）在场时复扫；hero 相位缺席属正常",
+      "note": "创造模式 chip label；模式 label 全字断言锚（task-3 T1b，2026-09-19）"
+    },
+    {
+      "id": "agent-team-chip",
+      "kind": "marker",
+      "needle": "[data-team-action]",
+      "owner": "@deepseek-ai/dsh-experimental-client-ui-agent-team",
+      "lazy": true,
+      "state": "Agent Teams 会话在场时复扫",
+      "note": "团队 chip root；pin order:2/max-width:156/min-width:44 与可缩断言锚（task-3 T1b，2026-09-19）"
+    }
+  ]
+}

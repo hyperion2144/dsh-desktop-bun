@@ -43,6 +43,8 @@ const desktopPluginDir = join(repoDir, 'desktop-plugin')
 const desktopPluginFiles = ['package.json', 'index.js', 'cordis.patch.yml', 'README.md', 'LICENSE', ...listFiles(desktopPluginDir, 'lib')]
 const mobileAccessDir = join(repoDir, 'plugins', 'dsh-mobile-access')
 const mobileAccessFiles = ['package.json', 'cordis.patch.yml', ...listFiles(mobileAccessDir, 'lib'), ...listFiles(mobileAccessDir, 'client')]
+const mobileLayoutDir = join(repoDir, 'plugins', 'dsh-mobile-nav')
+const mobileLayoutFiles = ['package.json', 'cordis.patch.yml', 'README.md', ...listFiles(mobileLayoutDir, 'lib'), ...listFiles(mobileLayoutDir, 'assets')]
 
 export default {
   app: {
@@ -83,6 +85,7 @@ export default {
       // 壳插件与手机访问插件：装到 `<app>/Contents/Resources/app/plugins/`，运行时再挂进 profile 池。
       ...pluginCopy(desktopPluginDir, 'dsh-desktop-bun', desktopPluginFiles),
       ...pluginCopy(mobileAccessDir, 'dsh-mobile-access', mobileAccessFiles),
+      ...pluginCopy(mobileLayoutDir, 'dsh-web-mobile', mobileLayoutFiles),
       // 内置 dsh 运行时（随包发出，item 1）：prepare:bundle 把一棵可用的运行时树物化到
       // builtin-runtime/（来源：仓内 Tauri 树 / 已下载运行时 / DSH_SHELL_BUILTIN_SOURCE）。
       // 只在真的物化成功时声明：Electrobun 的 copy 不会「源缺就跳过」，写死会 CopySourceMissing。

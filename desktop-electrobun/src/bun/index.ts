@@ -491,7 +491,9 @@ function createProfileWindow(profile: string, svc: ShellService): BrowserWindow 
     url: svc.state.pageUrl,
     renderer: 'cef',
     preload: bootPreloadScript(locale, platform, svc.state.origin, views.issue('shell', profile, windowKey(profile)).token),
-    titleBarStyle: platform === 'darwin' ? 'hiddenInset' : 'hidden',
+    // Windows 语义：hiddenInset = WS_CAPTION|WS_THICKFRAME（系统圆角边框、无标题栏文字/按钮）；
+    // hidden = 纯无边框方框（实机报的「方形无边框」）。mac 两态都以 hiddenInset 出红绿灯。
+    titleBarStyle: 'hiddenInset',
     frame,
   })
   windows.set(profile, { profile, window: win, ready: false })
@@ -747,7 +749,7 @@ function openProfileOpDialog(kind: ProfileOpDialogKind): void {
     title: kind === 'create' ? '新建 Profile' : '迁移 Profile',
     html: profileDialogHtml(kind, listProfiles(dshHome(), instanceProfile)),
     renderer: 'cef',
-    titleBarStyle: 'hidden',
+    titleBarStyle: 'hiddenInset',
     frame: { width: 460, height: kind === 'create' ? 240 : 330 },
   })
   dialog.on('closed', () => void refreshTray())
@@ -847,7 +849,7 @@ if (!noWindow) {
     title: APP_NAME,
     html: splashHtml(),
     renderer: 'cef',
-    titleBarStyle: 'hidden',
+    titleBarStyle: 'hiddenInset',
     frame: { width: SPLASH_WIDTH, height: SPLASH_HEIGHT },
   })
   // 页面还没加载完时推阶段会被丢掉：dom-ready 之后再补推一次（也是浏览器对象可用的信号）

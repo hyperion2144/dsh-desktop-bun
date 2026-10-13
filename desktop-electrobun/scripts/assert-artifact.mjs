@@ -132,7 +132,16 @@ function findLauncherDirs(root) {
     if (depth > 4) return
     let entries = []
     try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
-    if (entries.some((entry) => entry.name === 'launcher.exe')) { out.push(dir); return }
+    if (entries.some((entry) => entry.name === 'launcher.exe')) {
+      // launcher 住在 bin/ 下（mac 版式 Contents/MacOS 的对应物）；应用根 = 有 Resources 的那一层
+      const withResources = existsSync(join(dir, 'Resources'))
+        ? dir
+        : existsSync(join(dirname(dir), 'Resources'))
+          ? dirname(dir)
+          : dir
+      out.push(withResources)
+      return
+    }
     for (const entry of entries) if (entry.isDirectory()) walk(join(dir, entry.name), depth + 1)
   }
   walk(root, 0)

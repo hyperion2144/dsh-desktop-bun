@@ -145,14 +145,6 @@ jobs:
             bun run sign:app
           fi
 
-      - name: 产物断言（CEF 运行时 + version.json）
-        working-directory: desktop-electrobun
-        run: bun run assert:artifact
-
-      # Windows 交付物 = 可直接执行的安装程序（A2）+ 可选安装目录（A4）。Electrobun 自身只出
-      # 构建目录 + payload 归档，这里用 NSIS 包一层：每用户安装、目录选择页、开始菜单快捷方式、
-      # 卸载器；图标用与 win.icon 同源的 resources/app-icon.ico。GitHub windows-latest 镜像自带
-      # NSIS，万一镜像瘦身没了再 choco 兜底。
       - name: Windows 安装器（NSIS）
         if: runner.os == 'Windows'
         working-directory: desktop-electrobun
@@ -161,6 +153,14 @@ jobs:
           if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) { choco install nsis -y --no-progress }
           bun run build:installer
 
+      - name: 产物断言（CEF 运行时 + version.json）
+        working-directory: desktop-electrobun
+        run: bun run assert:artifact
+
+      # Windows 交付物 = 可直接执行的安装程序（A2）+ 可选安装目录（A4）。Electrobun 自身只出
+      # 构建目录 + payload 归档，这里用 NSIS 包一层：每用户安装、目录选择页、开始菜单快捷方式、
+      # 卸载器；图标用与 win.icon 同源的 resources/app-icon.ico。GitHub windows-latest 镜像自带
+      # NSIS，万一镜像瘦身没了再 choco 兜底。
       - name: 静默安装（NSIS /S，装到固定目录）
         if: runner.os == 'Windows'
         shell: pwsh

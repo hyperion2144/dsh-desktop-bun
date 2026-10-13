@@ -11,7 +11,8 @@
 // 与旧壳的一处**有意差异**：注入行只写「真的物化成功的包」。旧壳固定写三行，缺包时交给 dsh
 // 报解析失败；新壳在缺包时干脆不写那一行并留日志（worktree 里 `mobile/` 子模块没拉时也能起）。
 
-import { existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createDirLink, readDirLink } from '../shared/dir-link.ts'
 import { dirname, join, resolve } from 'node:path'
 
 import { injectYml, insertRows, type InsertRow } from '../shared/inject-yml.ts'
@@ -83,13 +84,11 @@ export function materializePoolPackage(pool: string, linkName: string, dir: stri
   const parent = dirname(link)
   mkdirSync(parent, { recursive: true })
   const target = resolve(dir)
-  try {
-    if (resolve(readlinkSync(link)) === target) return
-  } catch {
-    // 不是链接（可能不存在，也可能是旧复制体）
-  }
+  const existing = readDirLink(link)
+  if (existing !== null && resolve(existing) === target) return
+  // 不是链接（可能不存在，也可能是旧复制体）
   if (existsSync(link)) rmSync(link, { recursive: true, force: true })
-  symlinkSync(target, link, 'dir')
+  createDirLink(target, link)
 }
 
 /**
@@ -187,7 +186,8 @@ export function cleanupStagedPlugins(
   for (const entry of staged) {
     let target = ''
     try {
-      target = readlinkSync(entry.link)
+      target = readDirLink(entry.link) ?? ''
+      if (target === '') throw new Error('not-a-link')
     } catch {
       // 不是链接（复制体、或已经被删）：不碰
       kept.push(entry.link)

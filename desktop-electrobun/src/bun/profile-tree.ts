@@ -9,7 +9,8 @@
 // 结论来自 #209 调研：NODE_PATH 只能兜住「包根」这一层，子路径必须有一棵真树。
 // 碰撞策略：只收运行时自己的包（`@deepseek-ai/*`）；第三方包以 profile 里已有的为准。
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, symlinkSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
+import { createDirLink, readDirLink } from '../shared/dir-link.ts'
 import { dirname, join, resolve } from 'node:path'
 
 export interface ReconcileInput {
@@ -60,16 +61,17 @@ export function reconcileProfileTree(input: ReconcileInput): ReconcileResult {
     try {
       if (!existsSync(dest)) {
         mkdirSync(dirname(dest), { recursive: true })
-        symlinkSync(source, dest, 'dir')
+        createDirLink(source, dest)
         result.linked += 1
         continue
       }
       const stat = lstatSync(dest)
       if (stat.isSymbolicLink()) {
-        const pointsTo = resolve(dirname(dest), readlinkSync(dest))
+        const raw = readDirLink(dest)
+        const pointsTo = raw === null ? null : resolve(dirname(dest), raw)
         if (pointsTo !== source && runtimeOwned) {
           rmSync(dest, { recursive: true, force: true })
-          symlinkSync(source, dest, 'dir')
+          createDirLink(source, dest)
           result.repointed += 1
         } else {
           result.kept += 1

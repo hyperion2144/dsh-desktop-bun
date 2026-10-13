@@ -11,7 +11,8 @@
  *   · `node_modules` 与 `.dsh-module-fallback` 不复制，依赖用 pnpm 重建；
  *   · 副本 `package.json` 的 `name` 改成 `dsh-profile-<dest>`（不再带源名）。
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createDirLink } from '../shared/dir-link.ts'
 import type { Dirent } from 'node:fs'
 import { basename, delimiter, dirname, join, relative, sep } from 'node:path'
 import {
@@ -262,7 +263,7 @@ export function copyProfileTree(
       }
       try {
         rmSync(target, { force: true, recursive: false })
-        symlinkSync(link, target)
+        createDirLink(link, target)
         stats.links += 1
       } catch {
         stats.skipped += 1
