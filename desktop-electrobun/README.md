@@ -38,8 +38,34 @@ bun run assert:artifact                       # 产物断言（CI）
 | `DSH_SHELL_NO_WINDOW=1` | 只起服务面不建窗（无显示器/CI） |
 | `DSH_SHELL_OPEN_PROFILES=a,b` | 启动时顺带打开其他 profile 窗口 |
 | `DSH_SHELL_RESOLVE_ONLY=1` | 干跑：只打印运行时选择结果就退出 |
-| `DSH_DESKTOP_NO_SINGLETON=1` | 跳过单实例互斥（并行探针用） |
+| `DSH_DESKTOP_NO_SINGLETON=1` | 只跳过壳层单实例锁（shell-instance.json）；CEF 层 ProcessSingleton 不归它管，并行双窗还要配 `DSH_SHELL_DEV_IDENTIFIER`（见下与「并行双实例」节） |
+| `DSH_SHELL_DEV_IDENTIFIER=<id>` | dev 构建期换 bundle id——CEF 数据目录随 id 独立，才能并行开两个带窗实例；正式构建勿设 |
 | `DSH_DESKTOP_AUTO_QUIT[=ms]` | 服务面就绪后延迟自动退出（探针收尾） |
+
+## 并行双实例（带窗 dev 探针，#38）
+
+CEF 层的 Chromium ProcessSingleton 按 `<identifier>/<channel>/CEF` 数据目录加锁，两个实例要并存必须在**构建期**就换 id（运行期环境变量救不了 CEF 层）：
+
+```bash
+bun run prepare:bundle                                                # 一次即可（物化内置运行时）
+~/.hutch/bin/hutch electrobun build --env=dev                          # 实例 A：默认 id
+cp -R "build/dev-macos-arm64/DeepSeek Harness Desktop BUN-dev.app" build/A-default.app   # 产物目录名不含 id，先拷走 A 再构建 B（否则被覆盖）
+DSH_SHELL_DEV_IDENTIFIER=com.hyperion.dsh-desktop-bun.dev2 \
+  ~/.hutch/bin/hutch electrobun build --env=dev                        # 实例 B：换 id
+```
+
+启动时两侧各自错开运行期状态（示例 B 侧；A 侧同理换目录/端口）：
+
+```bash
+DSH_HOME=/tmp/dsh38/b DSH_SHELL_APP_SUPPORT=/tmp/dsh38/appsupport \
+DSH_SHELL_PAGE_PORT=3111 DSH_DESKTOP_PORT=3211 DSH_MOBILE_LANE_PORT=3311 \
+DSH_DESKTOP_NO_SINGLETON=1 DSH_SHELL_BUILTIN_DIR=<worktree>/desktop-electrobun/builtin-runtime \
+"<B.app>/Contents/MacOS/<二进制名>"
+```
+
+验收要点：两窗并存、各自 `DSH_DESKTOP_PORT` 的 `/__shell__/health` 就绪、后启实例日志无 `Opening in existing browser session.`；`$DSH_SHELL_APP_SUPPORT/<identifier>/dev/CEF` 按 id 分家、无交叉写入。
+
+副作用（已接受的取舍）：换 id 的实例在 macOS 是独立 bundle——TCC 权限需重新授权、日志/缓存独立，仅用于测试实例；正式构建勿设 `DSH_SHELL_DEV_IDENTIFIER`。
 
 ## 结构（谁管什么）
 
