@@ -227,8 +227,10 @@ jobs:
           tar -xf (Join-Path $env:RUNNER_TEMP 'payload.tar') -C 'C:\dsh-smoke'
           if ($LASTEXITCODE -ne 0) { throw 'tar 解包载荷失败' }
           Write-Host '冒烟：载荷已解到 C:\dsh-smoke'
-          $bunExe = Get-ChildItem $payloadRes -Recurse -Filter bun.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          # bun 可执行文件在载荷 bin\ 下（mac 版式 Contents/MacOS/bun 的 Windows 对应物）
+          $bunExe = Get-ChildItem $appRoot.FullName -Recurse -Filter bun.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\.installer' } | Select-Object -First 1
           if ($null -eq $bunExe) {
+            Get-ChildItem $appRoot.FullName -Directory -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 24 | ForEach-Object { Write-Host ("应用树目录：{0}" -f $_.FullName) }
             Get-ChildItem (Join-Path $payloadRes 'app') -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 24 | ForEach-Object { Write-Host ("app 内：{0}" -f $_.FullName.Substring($payloadRes.Length)) }
             throw "载荷里找不到 bun.exe"
           }
