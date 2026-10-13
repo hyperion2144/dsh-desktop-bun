@@ -15,7 +15,13 @@ import { createGzip, createBrotliCompress, constants as zlibConstants } from 'no
 /** 简易 access log 写到 $DSH_HOME/mobile-access.log（用户能 tail/f 看真实转发） */
 const LOG_PATH = path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'mobile-access.log');
 let logStream = null;
-try { logStream = fs.createWriteStream(LOG_PATH, { flags: 'a' }); } catch { /* noop */ }
+try {
+  // open 是异步的，try/catch 拟不住 ENOENT；先建目录（与 pairing.mjs 存储同策略），
+  // 再给 error 事件挼一个监听——日志尽力而为，绝不因磁盘/权限问题打崩服务进程。
+  fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
+  logStream = fs.createWriteStream(LOG_PATH, { flags: 'a' });
+  logStream.once('error', () => {});
+} catch { /* noop */ }
 
 // ── 上游连接复用与 Nagle（#144 传输层）──
 // 原先每次 http.request 都 agent:false → **每请求新建 TCP**。手机上「打字」这类小请求高频场景
