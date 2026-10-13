@@ -130,7 +130,10 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
               const payload = JSON.parse(line.slice(READY_PREFIX.length)) as HostReady
               clearTimeout(timer)
               resolvePromise(payload)
-              return
+              // 不能 return：终止 for-await 会取消子进程 stdout 的读取端，
+              // 此后宿主任何 stdout 写（如 mobile-access accessLog）都 EPIPE → 宿主 fatal（#41）。
+              // 继续 drain 到流尾（宿主退出）；ready 二次 resolve 本就是 no-op。
+              continue
             }
             if (line.trim() !== '') onLog(`[host] ${line}`)
             at = buffer.indexOf('\n')
