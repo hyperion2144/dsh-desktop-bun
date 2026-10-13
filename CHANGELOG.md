@@ -28,6 +28,7 @@
 
 ### Fixed
 
+- 手机布局插件未进 dev 与打包（#20）：mobile/dsh-mobile-nav 子模块未拉取时插件池缺 dsh-web-mobile，staging 只在汇总行尾部带一句「缺包跳过」纯静默——新增独立警告通道（缺包时单独一行点名缺的包与 `git submodule update --init` 补救命令，经壳 `console.warn` 输出）；assert-artifact 把 `plugins/dsh-web-mobile/package.json` 列入必带清单（漏拉子模块的构建硬失败）；README 两处补子模块拉取步骤；CI Checkout 已带 `submodules: recursive`（44f2c53）。
 - Windows 安装版启动失败（#1）：DSH_HOME 缺省改走 `dshHome()`（Windows 无 HOME 时旧写法退化成相对路径 `.dsh`，日志/设置落进安装目录）；profile 依赖摊平改用 `lstatSync` 判存在——悬空链接不再撞 EEXIST，被旧版本真实目录占住的运行时包就地替换；指错方向的链接（含旧壳残留，不分公司）一律删掉重指到当前运行时树。
 - profile 依赖摊平落点改共享池（#13）：reconcile 不再把运行时树链进各 profile 自己的 `node_modules`，改链到共享池 `profiles/node_modules`（对齐旧壳不变量「共享包在父级 node_modules，Node 向上解析」），多 profile 只维护一份链接、切运行时全 profile 一致重指（设置面板切运行时立即重指，不等下次启动）；启动与切运行时都会幂等清掉壳此前写进 per-profile 池的运行时链接（防近者优遮蔽共享层造成跨 profile 版本错配），pnpm 自有链接（含 store 暂时悬空）与用户资产不动。
 - 内置 dsh 运行时按声明供给（#16）：新增 `desktop-electrobun/builtin-runtime.json` 声明 dsh 与 pnpm 的固定版本；prepare:bundle 按声明物化内置树（已就绪复用 / npm 下载 / `DSH_SHELL_BUILTIN_SOURCE` 显式逃生口），落盘版本与声明不符直接失败；assert-artifact 对产物里的内置 dsh 版本与声明再对一遍；退役 build.yml 备树步骤与本机运行时拾取链。

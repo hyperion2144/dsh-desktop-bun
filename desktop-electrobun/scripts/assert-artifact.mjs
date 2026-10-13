@@ -215,6 +215,9 @@ const REQUIRED_PAYLOAD_FILES = [
   'plugins/dsh-desktop-bun/package.json',
   'plugins/dsh-desktop-bun/lib/client.js',
   'plugins/dsh-mobile-access/package.json',
+  // 手机布局插件（#20）：来自 mobile/dsh-mobile-nav 子模块，漏拉子模块时打包不得静默缺包。
+  'plugins/dsh-web-mobile/package.json',
+  'plugins/dsh-web-mobile/lib/client.js',
   // 内置 dsh 运行时树（goal 第 1 条）：缺了它，干净机器首启直接「找不到可用的 dsh 运行时」。
   // 本地构建曾静默漏带（worktree 没装内置树 + 回退链查不到）⇒ 在门槛里拦住，不再靠肉眼。
   'dsh/node_modules/@deepseek-ai/dsh/package.json',

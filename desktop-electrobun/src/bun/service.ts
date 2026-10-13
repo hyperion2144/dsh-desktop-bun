@@ -489,6 +489,10 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     desktopLayoutOnPhones: settings.desktopLayoutOnPhones,
     env,
     log,
+    warn: (line) => {
+      console.warn(`[shell] ${line}`)
+      log(line)
+    },
   })
   let patchFiles = [staged.injectFile]
   let host: Awaited<ReturnType<typeof startHost>> | undefined
