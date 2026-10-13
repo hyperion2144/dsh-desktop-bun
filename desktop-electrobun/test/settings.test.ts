@@ -60,7 +60,7 @@ describe('normalizeSettings', () => {
   test('枚举只认白名单', () => {
     expect(normalizeSettings({ proxy_mode: 'manual' }).proxyMode).toBe('manual')
     expect(normalizeSettings({ proxy_mode: 'socks' }).proxyMode).toBe('off')
-    expect(normalizeSettings({ dsh_mode: 'external' }).dshMode).toBe('external')
+    expect(normalizeSettings({ dsh_mode: 'external' }).dshMode).toBe('builtin') // 外部已移除：白名单外静默回退
     expect(normalizeSettings({ runtime_source: 'npm' }).runtimeSource).toBe('npm')
     expect(normalizeSettings({ runtime_source: 'ftp' }).runtimeSource).toBe('github')
   })

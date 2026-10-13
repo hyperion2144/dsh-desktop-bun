@@ -22,7 +22,9 @@ export const MUX_HEARTBEAT_MAX = 600_000
 export const PROXY_MODES = ['off', 'system', 'manual'] as const
 export type ProxyMode = (typeof PROXY_MODES)[number]
 
-export const DSH_MODES = ['builtin', 'external'] as const
+
+/** dsh 来源只认 builtin；残留 external 由 oneOf 白名单静默回退（键保留，向前兼容旧配置文件）。 */
+export const DSH_MODES = ['builtin'] as const
 export type DshMode = (typeof DSH_MODES)[number]
 
 export const RUNTIME_SOURCES = ['github', 'npm'] as const
@@ -164,7 +166,7 @@ export const NOTIFICATION_GROUPS: ReadonlyArray<readonly [string, string]> = [
 /** 14 个通知场景（旧壳 `notify_policy::SCENARIOS` 的唯一事实源，逐条对齐）。 */
 export const NOTIFICATION_SCENARIOS: readonly ScenarioMeta[] = [
   { id: 'startup.error', group: 'g-run', name: '启动受阻', desc: 'spawn 失败 · 自愈封顶', defaultOn: true },
-  { id: 'runtime.switch', group: 'g-run', name: '运行时切换', desc: '内置 / 外部 dsh 切换结果', defaultOn: true },
+  { id: 'runtime.switch', group: 'g-run', name: '运行时切换', desc: '内置 / 已下载版本切换结果', defaultOn: true },
   { id: 'runtime.download', group: 'g-run', name: '运行时下载', desc: '运行时下载开始 / 失败', defaultOn: true },
   { id: 'service.health', group: 'g-run', name: '服务健康', desc: '不可达 · 自动重启', defaultOn: true },
   { id: 'window.lifecycle', group: 'g-win', name: '窗口生命周期', desc: '窗口恢复 / 异常', defaultOn: false },

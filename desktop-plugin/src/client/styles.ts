@@ -5,7 +5,6 @@
  * - 自绘 caption 条与窗口按钮。
  */
 const ADVANCED_STYLES = `
-body[data-dsh-desktop-tauriapp-mode="advanced"] { margin: 0; }
 .dshDesktopChromeHost { position: fixed; inset: 0; z-index: 45; pointer-events: none; }
 .dshDesktopChromeStrip { position: absolute; display: flex; align-items: stretch; pointer-events: auto; }
 /* 拖拽条背景：按平台匹配所覆盖区域的主题背景（macOS 覆盖侧边栏、Win/Linux 覆盖中间区）。

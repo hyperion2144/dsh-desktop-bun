@@ -10,17 +10,12 @@ import { installAdvancedStyles } from './styles.ts'
  * Win/Linux 中间 header 顶部拖拽条 + 自绘窗口按钮，内容用 padding 顶下）。
  */
 export function applyAdvancedShell(ctx: ClientContext, environment: DesktopClientEnvironment): void {
-  if (environment.mode !== 'advanced') {
-    throw new Error(`dsh-desktop-tauriapp: advanced shell received mode ${JSON.stringify(environment.mode)}`)
-  }
 
   ctx.effect(() => {
-    document.body.dataset.dshDesktopMode = 'advanced'
     document.body.dataset.dshDesktopPlatform = environment.platform
     const removeStyles = installAdvancedStyles()
     return () => {
       removeStyles()
-      delete document.body.dataset.dshDesktopMode
       delete document.body.dataset.dshDesktopPlatform
     }
   }, 'desktop: advanced shell styles')

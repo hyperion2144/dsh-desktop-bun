@@ -1,11 +1,11 @@
-// 运行时目录与选中：纯逻辑（版本比较 / 目录载荷解析 / 清单）+ IO（扫描 / 回收站 / 外部定位）。
+// 运行时目录与选中：纯逻辑（版本比较 / 目录载荷解析 / 清单）+ IO（扫描 / 回收站）。
 //
 // 对应旧壳 desktop/src-tauri/src/runtime/registry.rs 与 builtin.rs 的测试面：
 // 版本号大小（alpha.10 > alpha.2）、渠道标注、坏 JSON 不炸、目录扫描只认有效树、
-// 卸载先入回收站、外部 dsh 的三级查找。
+// 卸载先入回收站、显式覆盖（root / 包根两种布局）。
 
 import { afterEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -24,8 +24,6 @@ import {
   type InstalledRuntime,
 } from '../src/shared/runtime-catalog.ts'
 import {
-  externalPackageRoot,
-  externalVersion,
   fetchRuntimeCatalog,
   installedManifestPath,
   isRuntimeTreeValid,
@@ -34,7 +32,6 @@ import {
   readInstalledManifest,
   readRuntimeVersion,
   recordInstalledRuntime,
-  resolveExternalDsh,
   runtimeDirOf,
   runtimeTrashDir,
   scanInstalledVersions,
@@ -240,42 +237,6 @@ describe('运行时目录 IO', () => {
   })
 })
 
-describe('外部 dsh 定位', () => {
-  test('DSH_BIN 优先；不存在时落到 PATH；都没有回 null', () => {
-    const root = tempDir()
-    const binDir = join(root, 'bin')
-    mkdirSync(binDir, { recursive: true })
-    const bin = join(binDir, 'dsh')
-    writeFileSync(bin, '#!/usr/bin/env node\n')
-    expect(resolveExternalDsh({ DSH_BIN: bin })).toBe(bin)
-    expect(resolveExternalDsh({ DSH_BIN: join(root, 'missing'), PATH: binDir })).toBe(bin)
-    // 生产环境的「常见安装位置」第三层在这台机器上有 /opt/homebrew/bin/dsh，会掩盖断言；
-    // 用 commonCandidates 把它换掉（同时跳过 nvm / npx 扫描）才能测「都找不到」。
-    expect(resolveExternalDsh({ PATH: join(root, 'empty'), HOME: root }, { commonCandidates: [] })).toBeNull()
-  })
-
-  test('包根解析：bin 是软链时按真实路径往上找 @deepseek-ai/dsh', () => {
-    const root = tempDir()
-    const pkg = join(root, 'lib', 'node_modules', '@deepseek-ai', 'dsh')
-    mkdirSync(join(pkg, 'lib'), { recursive: true })
-    writeFileSync(join(pkg, 'lib', 'bin.js'), '// stub\n')
-    writeFileSync(join(pkg, 'package.json'), '{"version":"0.1.7-rc.2"}\n')
-    mkdirSync(join(root, 'bin'), { recursive: true })
-    const link = join(root, 'bin', 'dsh')
-    symlinkSync(join(pkg, 'lib', 'bin.js'), link)
-    expect(externalPackageRoot(link)).toBe(pkg)
-    expect(externalVersion(pkg)).toBe('0.1.7-rc.2')
-  })
-
-  test('包根解析：直接跑在包内的 bin（不是软链）', () => {
-    const root = tempDir()
-    const pkg = join(root, 'node_modules', '@deepseek-ai', 'dsh')
-    mkdirSync(join(pkg, 'lib'), { recursive: true })
-    writeFileSync(join(pkg, 'lib', 'bin.js'), '// stub\n')
-    writeFileSync(join(pkg, 'package.json'), '{"version":"0.2.0"}\n')
-    expect(externalPackageRoot(join(pkg, 'lib', 'bin.js'))).toBe(pkg)
-  })
-})
 
 describe('版本目录抓取', () => {
   const okResponse = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200 })
@@ -328,34 +289,17 @@ describe('运行时选中', () => {
     expect(runtimePathsOf(root).dshLibDir).toBe(join(root, 'node_modules', '@deepseek-ai', 'dsh', 'lib'))
   })
 
-  test('external 模式用外部包根，找不到则回退并带 note', () => {
+  test('显式覆盖指到包根布局（DSH_SHELL_RUNTIME_DIR 指包根）也能认', () => {
     const appSupport = tempDir()
-    makeRuntimeTree(runtimeDirOf(appSupport, '0.2.0'), '0.2.0')
     const pkg = join(tempDir(), 'lib', 'node_modules', '@deepseek-ai', 'dsh')
     mkdirSync(join(pkg, 'lib'), { recursive: true })
     writeFileSync(join(pkg, 'lib', 'bin.js'), '// stub\n')
-    writeFileSync(join(pkg, 'package.json'), '{"version":"0.1.7-rc.2"}\n')
-    const external = resolveRuntimeSelection({ env: {}, mode: 'external', externalBin: join(pkg, 'lib', 'bin.js'), appSupport })
-    expect(external.kind).toBe('external')
-    expect(external.root).toBe(pkg)
-    expect(external.version).toBe('0.1.7-rc.2')
-    // 0.1.7-rc.2 < 0.2.0：同一 profile 的插件树是 0.2.x 的（实测「1 required plugin did not activate」）
-    // ⇒ 选中照旧，但必须带一条 note，日志与面板要能说清为什么起不来
-    expect(external.note).toContain('低于 0.2.0')
+    writeFileSync(join(pkg, 'package.json'), '{"version":"0.2.1-alpha.2"}\n')
+    const selection = resolveRuntimeSelection({ env: {}, overrideDir: pkg, appSupport, installed: [] })
+    expect(selection.kind).toBe('override')
+    expect(selection.layout).toBe('package')
+    expect(selection.version).toBe('0.2.1-alpha.2')
     expect(runtimePathsOf(pkg, 'package').dshLibDir).toBe(join(pkg, 'lib'))
-
-    // 0.2.x 的外部树不该有这条提示
-    const modern = join(tempDir(), 'lib', 'node_modules', '@deepseek-ai', 'dsh')
-    mkdirSync(join(modern, 'lib'), { recursive: true })
-    writeFileSync(join(modern, 'lib', 'bin.js'), '// stub\n')
-    writeFileSync(join(modern, 'package.json'), '{"version":"0.2.1-alpha.2"}\n')
-    const fresh = resolveRuntimeSelection({ env: {}, mode: 'external', externalBin: join(modern, 'lib', 'bin.js'), appSupport })
-    expect(fresh.kind).toBe('external')
-    expect(fresh.note).toBeNull()
-
-    const fallback = resolveRuntimeSelection({ env: {}, mode: 'external', externalBin: null, appSupport })
-    expect(fallback.kind).toBe('installed')
-    expect(fallback.note).toContain('未找到外部 dsh')
   })
 
   test('已下载版本：偏好 > 最高；没有已装就回内置树', () => {

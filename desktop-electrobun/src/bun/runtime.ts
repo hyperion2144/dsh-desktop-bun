@@ -1,9 +1,9 @@
-// 运行时定位：三种来源（随包内置 / 已下载运行时 / 外部 dsh CLI）的发现与选中，
+// 运行时定位：显式覆盖 / 已下载运行时 / 随包内置三种来源的发现与选中，
 // 布局计算（dsh lib、前端 dist、Bun 兼容层、宿主脚本）都在这里。
 //
 // 与旧壳 desktop/src-tauri/src/runtime/builtin.rs + registry.rs 对齐：选中顺序为
-// 显式覆盖 > 外部 CLI（mode=external）> 偏好/最高已下载版本 > 随包内置；两套目录布局
-// 都要认（appSupport/runtimes 是 root 布局，外部 CLI 是包根布局）。
+// 显式覆盖 > 偏好/最高已下载版本 > 随包内置；两套目录布局
+// 都要认（appSupport/runtimes 是 root 布局，override 指到 dsh 包根时是 package 布局）。
 
 import { profileDirOf } from './profile-scaffold.ts'
 import { existsSync } from 'node:fs'
@@ -11,16 +11,13 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import {
-  externalPackageRoot,
   externalVersion,
   readRuntimeVersion,
-  resolveExternalRuntime,
   runtimesDir,
   runtimeDirOf,
   scanInstalledVersions,
 } from './runtime-store.ts'
 import { isRuntimeVersion, selectRuntimeVersion } from '../shared/runtime-catalog.ts'
-import type { DshMode } from '../shared/settings.ts'
 
 export const APP_SUPPORT = 'Library/Application Support/com.hyperion.dsh-desktop-bun'
 
@@ -32,13 +29,13 @@ export interface ShellLayout {
   profileDir: string
   /** 应用支持目录（运行时树所在） */
   appSupport: string
-  /** 运行时来源：override=env 指定 / external=外部 dsh CLI 树 / installed=已下载 / builtin=随包 */
+  /** 运行时来源：override=env 指定 / installed=已下载 / builtin=随包 */
   runtimeKind: RuntimeKind
-  /** 运行时根：root 布局的树根，或外部 dsh 的包根 */
+  /** 运行时根：root 布局的树根，或 override 指到 dsh 包根时的包根 */
   runtimeDir: string
   /** 运行时真实版本号（读 dsh/package.json；读不到为 null） */
   runtimeVersion: string | null
-  /** 选中过程中的回退说明（选了外部但没有等），供日志与面板展示 */
+  /** 选中过程中的回退说明（外部 CLI 移除后当前恒 null，保留给日志与面板） */
   runtimeNote: string | null
   /** dsh 包的 lib 目录（宿主脚本的入参） */
   dshLibDir: string
@@ -60,8 +57,6 @@ export interface LayoutInput {
   runtimeDir?: string
   /** 覆盖 profile（设置里选了别的 profile 时给；缺省按 DSH_PROFILE > default） */
   profile?: string
-  /** dsh 来源（builtin=随包内置树 / external=外部 CLI；缺省按 env DSH_MODE 再退回 readSettings） */
-  mode?: DshMode
   /** 偏好的已下载运行时版本（settings.dshRuntime；失效则退回最高版本） */
   preferred?: string | null
   /** 随包内置树目录（缺省按打包态 resources/dsh、开发态仓根 resources/builtin 找） */
@@ -109,9 +104,9 @@ export function trayImagePath(env: Record<string, string | undefined> = process.
   return null
 }
 
-export type RuntimeKind = 'override' | 'external' | 'installed' | 'builtin'
+export type RuntimeKind = 'override' | 'installed' | 'builtin'
 
-/** 两套目录布局：root = 树根下有 node_modules（随包内置 / 已下载）；package = 外部 CLI 的 dsh 包根 */
+/** 两套目录布局：root = 树根下有 node_modules（随包内置 / 已下载）；package = dsh 包根（override 指到包根布局的树） */
 export type RuntimeLayout = 'root' | 'package'
 
 export interface RuntimeSelection {
@@ -119,13 +114,11 @@ export interface RuntimeSelection {
   root: string
   layout: RuntimeLayout
   version: string | null
-  /** 外部模式的 dsh 可执行文件（诊断用） */
-  bin: string | null
-  /** 选中过程中的回退说明（选了外部但没找到等） */
+  /** 选中过程中的回退说明（外部 CLI 移除后当前恒 null） */
   note: string | null
 }
 
-/** 一套运行时树的 dsh lib 与前端 dist：root 布局与外部 CLI 包根布局都认。 */
+/** 一套运行时树的 dsh lib 与前端 dist：root 布局与 dsh 包根布局都认。 */
 export function runtimePathsOf(root: string, layout: RuntimeLayout = 'root'): { dshLibDir: string; distDir: string } {
   const dshLibDir = layout === 'package' ? join(root, 'lib') : join(root, 'node_modules', '@deepseek-ai', 'dsh', 'lib')
   const candidates =
@@ -165,13 +158,10 @@ export interface RuntimeSelectionInput {
   /** 显式覆盖（LayoutInput.runtimeDir / DSH_SHELL_RUNTIME_DIR） */
   overrideDir?: string
   appSupport?: string
-  mode?: DshMode
   preferred?: string | null
   builtinDir?: string | null
-  /** 测试注入：外部 dsh 可执行文件 / 已装版本列表 */
-  externalBin?: string | null
+  /** 测试注入：已装版本列表（跳过磁盘扫描） */
   installed?: readonly string[]
-  log?: (line: string) => void
 }
 
 function versionOf(root: string, layout: RuntimeLayout): string | null {
@@ -179,87 +169,28 @@ function versionOf(root: string, layout: RuntimeLayout): string | null {
 }
 
 /**
- * 外部 dsh 版本提示：0.2.0 以下与当前 profile 的插件树（按新版运行时摊平过）不同代，
- * 实测 0.1.7-rc.2 会因为 `dsh-agent-preset` 的 peer 约束挂掉（「1 required plugin did not activate」）。
- * 不拦（用户可能就是想试）——但要写进日志与面板，别让人猜。
- */
-function externalVersionNote(version: string | null): string | null {
-  if (version === null) return null
-  const core = (version.split('-')[0] ?? '').split('.').map((part) => Number.parseInt(part, 10))
-  const major = core[0] ?? 0
-  const minor = core[1] ?? 0
-  if (major === 0 && minor < 2) {
-    return `外部 dsh ${version} 低于 0.2.0：同一 profile 的插件树是更新的，可能起不来（需独立 profile）`
-  }
-  return null
-}
-
-/**
  * 生效运行时（旧壳 builtin.rs 的选中顺序）：
- * 显式覆盖 > 外部 CLI（mode=external，找不到则回退并记 note）> 已下载版本（偏好 > 最高）> 随包内置。
+ * 显式覆盖 > 已下载版本（偏好 > 最高）> 随包内置。外部 dsh CLI 支持已移除（#3）。
  */
 export function resolveRuntimeSelection(input: RuntimeSelectionInput = {}): RuntimeSelection {
   const env = input.env ?? process.env
-  const log = input.log
   const override = input.overrideDir !== undefined && input.overrideDir !== '' ? input.overrideDir : env.DSH_SHELL_RUNTIME_DIR
   if (override !== undefined && override !== '') {
     const root = resolve(override)
     const layout: RuntimeLayout = existsSync(join(root, 'lib', 'bin.js')) ? 'package' : 'root'
-    return { kind: 'override', root, layout, version: versionOf(root, layout), bin: null, note: null }
-  }
-  const envMode = env.DSH_MODE === 'external' ? 'external' : env.DSH_MODE === 'builtin' ? 'builtin' : undefined
-  const mode: DshMode = input.mode ?? envMode ?? 'builtin'
-  let note: string | null = null
-  if (mode === 'external') {
-    if (input.externalBin !== undefined) {
-      // 测试/显式注入：直接拿这个 bin 定位包根
-      const bin = input.externalBin
-      if (bin !== null && bin !== '') {
-        const root = externalPackageRoot(bin)
-        if (root !== null) {
-          return {
-            kind: 'external',
-            root,
-            layout: 'package',
-            version: externalVersion(root),
-            bin,
-            note: externalVersionNote(externalVersion(root)),
-          }
-        }
-        note = `外部 dsh 找到了可执行文件但定位不到包根：${bin}`
-      } else {
-        note = '未找到外部 dsh（DSH_BIN / PATH / npm 全局）'
-      }
-    } else {
-      // 真实路径：沿候选链找第一个能定位到包根的（PATH 上可能先撞到壳自己的垫片脚本）
-      const resolved = resolveExternalRuntime(env, { home: env.HOME, log })
-      if (resolved !== null) {
-        for (const skipped of resolved.skipped) log?.(`[runtime] 外部 dsh 候选不可用：${skipped}`)
-        const version = resolved.version
-        return {
-          kind: 'external',
-          root: resolved.packageRoot,
-          layout: 'package',
-          version,
-          bin: resolved.bin,
-          note: externalVersionNote(version),
-        }
-      }
-      note = '未找到外部 dsh（DSH_BIN / PATH / npm 全局）'
-    }
-    log?.(`[runtime] ${note}，回退到已下载/内置运行时`)
+    return { kind: 'override', root, layout, version: versionOf(root, layout), note: null }
   }
   const appSupport = input.appSupport ?? appSupportDir(env)
   const installed = input.installed !== undefined ? input.installed : scanInstalledVersions(appSupport)
   const picked = selectRuntimeVersion({ installed, preferred: input.preferred ?? null })
   if (picked !== null && isRuntimeVersion(picked)) {
     const root = runtimeDirOf(appSupport, picked)
-    return { kind: 'installed', root, layout: 'root', version: readRuntimeVersion(root) ?? picked, bin: null, note }
+    return { kind: 'installed', root, layout: 'root', version: readRuntimeVersion(root) ?? picked, note: null }
   }
   const builtin = input.builtinDir ?? null
   if (builtin !== null && builtin !== '') {
     const root = resolve(builtin)
-    return { kind: 'builtin', root, layout: 'root', version: readRuntimeVersion(root), bin: null, note }
+    return { kind: 'builtin', root, layout: 'root', version: readRuntimeVersion(root), note: null }
   }
   throw new Error(
     `找不到可用的 dsh 运行时：已下载目录 ${runtimesDir(appSupport)} 为空，也没找到随包内置树（可用 DSH_SHELL_RUNTIME_DIR / DSH_SHELL_BUILTIN_DIR 指定）`
@@ -268,7 +199,7 @@ export function resolveRuntimeSelection(input: RuntimeSelectionInput = {}): Runt
 
 /** 兼容旧签名：只关心运行时根的地方用它。 */
 export function resolveRuntimeDir(input: LayoutInput = {}): string {
-  return resolveRuntimeSelection({ env: input.env, overrideDir: input.runtimeDir, mode: input.mode, preferred: input.preferred, builtinDir: input.builtinDir }).root
+  return resolveRuntimeSelection({ env: input.env, overrideDir: input.runtimeDir, preferred: input.preferred, builtinDir: input.builtinDir }).root
 }
 
 /** 从某目录往上找带 `runtime/dsh-host.mjs` + `package.json` 的项目根（最多 8 层）。 */
@@ -315,12 +246,11 @@ export function layout(input: LayoutInput = {}): ShellLayout {
   const projectRoot = env.DSH_SHELL_PROJECT ?? findProjectRoot(import.meta.dir) ?? packagedRoot(import.meta.dir) ?? resolve(import.meta.dir, '..', '..')
   const repoRoot = resolve(projectRoot, '..')
   const resourcesDir = env.DSH_SHELL_RESOURCES ?? packagedResources(import.meta.dir)
-  // 运行时选中：显式覆盖 > 外部 CLI > 已下载（偏好 > 最高）> 随包内置
+  // 运行时选中：显式覆盖 > 已下载（偏好 > 最高）> 随包内置
   const selection = resolveRuntimeSelection({
     env,
     overrideDir: input.runtimeDir,
     appSupport: appSupportDir(env),
-    mode: input.mode,
     preferred: input.preferred,
     builtinDir: resolveBuiltinRuntimeDir(env, { repoRoot, resourcesDir }),
   })

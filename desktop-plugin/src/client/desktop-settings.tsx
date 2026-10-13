@@ -66,7 +66,6 @@ interface DesktopData {
 interface DshSourceState {
   mode: string
   builtin: { dsh_version: string } | null
-  external: { dsh_version: string; path: string } | null
   running: { mode: string; origin: string; port: number; version?: string } | null
 }
 
@@ -84,9 +83,8 @@ interface RuntimeCatalog {
   installed: { version: string }[]
   catalog: { version: string; channel: string }[]
   /** #107：目录拉取失败时的降级标记（此时 catalog 为空、installed 为本地全部已装） */
-   mode?: 'builtin' | 'external'
   error?: string
-  /** 当前真正在跑的那棵树（override | external | installed | builtin）：标记「运行中」并禁掉它的下载/卸载 */
+  /** 当前真正在跑的那棵树（override | installed | builtin）：标记「运行中」并禁掉它的下载/卸载 */
   running?: { kind: string; version: string | null; dir: string | null } | null
 }
 
@@ -338,7 +336,7 @@ function DesktopSettingsPanel(): React.ReactElement {
     }
   }, [msg])
 
-  // dsh 来源（内置 / 外部）
+  // dsh 来源状态（get_dsh_source）
   const [sourceState, setSourceState] = useState<DshSourceState | null>(null)
   const [sourceError, setSourceError] = useState<string | null>(null)
 
@@ -689,18 +687,6 @@ function DesktopSettingsPanel(): React.ReactElement {
   }, [migrationRunning])
 
   // ── 行为回调 ──
-  // ThemeSelect 值回调（非原生事件：曾误用 e.target.value 导致切换无效，#95 实测）
-  const handleSourceModeChange = (value: string): void => {
-    void nsSave({ dsh_mode: value })
-      .then(() => invoke('restart_dsh_service'))
-      .then(() =>
-        setMsg({ ok: true, text: `dsh 来源已切换为 ${value === 'builtin' ? '内置' : '外部'}，正在重启…` }),
-      )
-      .catch((err) => {
-        console.error('[desktop-settings] set_dsh_source/restart 失败：', err)
-        setMsg({ ok: false, text: `切换失败：${String(err)}` })
-      })
-  }
 
   const handleSelectRemote = (addr: string | null): void => {
     void (async () => {
@@ -976,7 +962,7 @@ function DesktopSettingsPanel(): React.ReactElement {
   }, [refreshRuntimes])
 
   const handleSwitchRuntime = (version: string): void => {
-    // 运行时切换 = 内置树换版本：必须同时钉回 builtin（否则 mode=external 时切了也仍走外部 CLI）
+    // 运行时切换 = 内置树换版本：同时钉回 builtin（dsh_mode 只认 builtin，写回是自愈旧配置）
     // #113：内置版本 = 回内置兜底 → dsh_runtime 置 null（存版本号会让顶部误显示「当前使用：运行时 xxx」）
     const isBuiltin = runtimeCatalog?.builtin === version
     void nsSave({ dsh_runtime: isBuiltin ? null : version, dsh_mode: 'builtin' })
@@ -1012,30 +998,19 @@ function DesktopSettingsPanel(): React.ReactElement {
   }, [])
 
   // ── 派生展示 ──
-  const sourceModeValue: string = sourceState
-    ? sourceState.running
-      ? sourceState.running.mode
-      : sourceState.mode
-    : 'builtin'
-
   const sourceInfoText = ((): string => {
     if (!sourceState) return ''
     const parts: string[] = []
     if (sourceState.running) {
-      const runVer =
-        sourceState.running.version ||
-        (sourceState.running.mode === 'builtin'
-          ? (sourceState.builtin?.dsh_version ?? '')
-          : (sourceState.external?.dsh_version ?? ''))
+      const runVer = sourceState.running.version || (sourceState.builtin?.dsh_version ?? '')
       const origin = sourceState.running.origin === 'shell' ? '本壳 spawn' : '复用接入'
       parts.push(
-        `当前运行：${sourceState.running.mode === 'builtin' ? '内置' : '外部'} dsh ${runVer}（${origin} · port ${sourceState.running.port}）`,
+        `当前运行：内置 dsh ${runVer}（${origin} · port ${sourceState.running.port}）`,
       )
     } else {
-      parts.push('当前无运行中的 dsh 实例；下次启动将使用下方所选来源')
+      parts.push('当前无运行中的 dsh 实例；下次启动将使用内置树')
     }
     if (sourceState.builtin) parts.push(`内置可用：dsh ${sourceState.builtin.dsh_version}`)
-    if (sourceState.external) parts.push(`外部可用：dsh ${sourceState.external.dsh_version}（${sourceState.external.path}）`)
     return parts.join(' · ')
   })()
 
@@ -1106,17 +1081,8 @@ function DesktopSettingsPanel(): React.ReactElement {
             )}
           </div>
         )}
-      {/* ── dsh 来源（#90，置顶：切换内置/外部）── */}
-      <SectionBox title="dsh 来源（内置 / 外部）">
-        <ThemeSelect
-          style={{ marginBottom: 8 }}
-          value={sourceModeValue}
-          onChange={handleSourceModeChange}
-          options={[
-            { value: 'builtin', label: '内置（随应用分发，推荐）' },
-            { value: 'external', label: '外部（DSH_BIN → PATH → npm 全局）' },
-          ]}
-        />
+      {/* ── dsh 来源（#90）── */}
+      <SectionBox title="dsh 来源">
         {sourceState ? (
           <div style={NOTE_STYLE}>{sourceInfoText}</div>
         ) : sourceError ? (
@@ -1128,7 +1094,7 @@ function DesktopSettingsPanel(): React.ReactElement {
           <PfBtn variant="ghost" onClick={() => void refreshSource()}>重新检测</PfBtn>
         </div>
         <div style={NOTE_STYLE}>
-          内置：随应用分发的 dsh 依赖树 + Node，直调内部启动接口（不依赖系统环境）。外部：使用系统安装的 dsh CLI。切换后立即重启 dsh。
+          内置：随应用分发的 dsh 依赖树 + Node，直调内部启动接口（不依赖系统环境）。
         </div>
       </SectionBox>
 
@@ -1430,21 +1396,15 @@ function DesktopSettingsPanel(): React.ReactElement {
           {runtimeCatalog && (
             <>
               <div style={{ marginBottom: 6 }}>
-                {runtimeCatalog.mode === 'external'
-                  ? `当前使用：外部 dsh ${
-                      sourceState?.running?.version ||
-                      sourceState?.external?.dsh_version ||
-                      '（版本未知）'
-                    }（运行时版本偏好仅保留，不生效）`
-                  : runtimeCatalog.selected
-                    ? `当前使用：运行时 ${runtimeCatalog.selected}${
-                        runtimeCatalog.builtin ? '（内置兜底 ' + runtimeCatalog.builtin + '）' : ''
-                      }`
-                    : runtimeCatalog.builtin
-                      ? `当前使用：内置 dsh ${runtimeCatalog.builtin}（兜底）`
-                      : runtimeCatalog.running?.version
-                        ? `当前使用：运行时 ${runtimeCatalog.running.version}（${runtimeCatalog.running.kind}）`
-                        : '当前无可用 dsh'}
+                {runtimeCatalog.selected
+                  ? `当前使用：运行时 ${runtimeCatalog.selected}${
+                      runtimeCatalog.builtin ? '（内置兜底 ' + runtimeCatalog.builtin + '）' : ''
+                    }`
+                  : runtimeCatalog.builtin
+                    ? `当前使用：内置 dsh ${runtimeCatalog.builtin}（兜底）`
+                    : runtimeCatalog.running?.version
+                      ? `当前使用：运行时 ${runtimeCatalog.running.version}（${runtimeCatalog.running.kind}）`
+                      : '当前无可用 dsh'}
               </div>
               {(() => {
                 // 折叠（#95）：默认只显示各渠道头版 + 已下载版本，其余收进「展开全部」
@@ -1487,20 +1447,15 @@ function DesktopSettingsPanel(): React.ReactElement {
                       // 运行中的那棵树（多为 dev 用 DSH_SHELL_RUNTIME_DIR 指着的树）：它不是「可下载」的东西，
                       // 也不该显示下载按钮（用户报：内置正在用的版本还能下载）
                       const isRunning =
-                        runtimeCatalog.mode !== 'external' &&
                         runtimeCatalog.running?.version !== null &&
                         runtimeCatalog.running?.version !== undefined &&
                         runtimeCatalog.running.version === c.version
                       const available = installed || isBuiltin || isRunning
                       // 当前使用：selected 有值按号匹配；selected 为空 = 内置兜底（内置行即「使用中」）
-                      // 当前使用：仅来源=内置时按号匹配（selected 空 = 内置兜底行）；
-                      // 外部 CLI 模式下没有哪个下载版本「使用中」（#135，卸载不再被锁死）
                       const isCurrent =
-                        runtimeCatalog.mode === 'external'
-                          ? false
-                          : runtimeCatalog.selected
-                            ? runtimeCatalog.selected === c.version
-                            : isBuiltin || isRunning
+                        runtimeCatalog.selected
+                          ? runtimeCatalog.selected === c.version
+                          : isBuiltin || isRunning
                       const tags: string[] = []
                       if (c.channel) tags.push(c.channel)
                       if (isBuiltin) tags.push('内置')

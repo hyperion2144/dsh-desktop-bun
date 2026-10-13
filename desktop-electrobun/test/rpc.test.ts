@@ -144,7 +144,6 @@ describe('命令表', () => {
     const h = harness()
     try {
       const env = (await h.table.get_desktop_client_environment?.({})) as Record<string, unknown>
-      expect(env.mode).toBe('advanced')
       expect(env.platform).toBe('darwin')
       expect(env.profile).toBe('desktop')
       // 视觉窗口化整块删除（换壳后不需要）：载荷里不再有这个键
@@ -404,15 +403,12 @@ describe('多窗口的数据面（列表类命令要看到别的 profile / 正�
   test('list_runtime_catalog：带上正在跑的那棵树，面板才能标「运行中」', async () => {
     const h = harness({
       runtime: () => ({
-        mode: 'builtin',
         builtinVersion: null,
         activeVersion: '0.2.1-alpha.2',
         activeKind: 'override',
         activeDir: '/tmp/spike-rt/0.2.1-alpha.2',
         selected: null,
         installed: [],
-        externalPath: null,
-        externalVersion: null,
       }),
     })
     try {
@@ -454,7 +450,7 @@ describe('/__shell__/rpc 端点', () => {
     const upstreamPort = ports[0] ?? 0
     const port = ports[1] ?? 0
     const router = createRpcRouter({
-      get_desktop_client_environment: () => ({ mode: 'advanced', platform: 'darwin', profile: 'desktop' }),
+      get_desktop_client_environment: () => ({ platform: 'darwin', profile: 'desktop' }),
       boom: () => {
         throw new Error('命令炸了')
       },
@@ -485,9 +481,9 @@ describe('/__shell__/rpc 端点', () => {
       })
       expect(response.status).toBe(200)
       expect(response.headers.get('cache-control')).toBe('no-store')
-      const payload = (await response.json()) as { ok: boolean; value: { mode: string } }
+      const payload = (await response.json()) as { ok: boolean; value: { platform: string } }
       expect(payload.ok).toBe(true)
-      expect(payload.value.mode).toBe('advanced')
+      expect(payload.value.platform).toBe('darwin')
     })
   })
 

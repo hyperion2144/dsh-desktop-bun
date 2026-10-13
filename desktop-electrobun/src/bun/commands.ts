@@ -4,7 +4,7 @@
 // 「尚未移植」而不是静默成功——面板会把它显示成一条失败提示，比转圈或假装保存好。
 // 命令实现全部只依赖注入的 deps，方便单测（不 import electrobun）。
 
-import type { DesktopSettings, DshMode, RuntimeSource } from '../shared/settings.ts'
+import type { DesktopSettings, RuntimeSource } from '../shared/settings.ts'
 import type { DownloadManager } from './downloads.ts'
 import type { RuntimeDownloadStatus } from './runtime-install.ts'
 import type { CatalogEntry, InstalledRuntime } from '../shared/runtime-catalog.ts'
@@ -42,11 +42,8 @@ export interface CommandDeps {
   profiles?: () => string[]
   /** dsh 服务状态码（旧壳 get_dsh_status 的 0..7 枚举；缺省当作「运行中」） */
   dshStatus?: () => number
-  /** 运行中的 dsh 版本（内置＝运行时目录名，外部＝CLI 版本） */
+  /** 运行中的 dsh 版本（运行时树的版本；快照缺位时兜底） */
   dshVersion?: () => string
-  /** 兼容/高级模式弹框（旧壳 get_mode_prompt_needed / choose_desktop_mode） */
-  modePrompt?: () => boolean
-  chooseMode?: (mode: string, tokenUrl?: string) => Promise<{ ok: true; needsToken: boolean }>
   openExternal?: (url: string) => void
   closeWindow?: () => void
   /** 试听音效（设置面板的「试听」；缺省不响，但要回一条可诊断的话） */
@@ -62,7 +59,7 @@ export interface CommandDeps {
   notifyPermission?: () => NotifyPermission
   /** 主动申请通知授权（返回申请后的状态） */
   notifyRequestPermission?: () => NotifyPermission
-  /** 运行时快照：来源 / 内置版本 / 已装列表 / 外部 dsh 路径（命令表不自己碰文件系统） */
+  /** 运行时快照：来源 / 内置版本 / 已装列表（命令表不自己碰文件系统） */
   runtime?: () => RuntimeSnapshot
   /** 拉取版本目录（github / npm；失败不抛，回 {entries, error}） */
   fetchCatalog?: (source: RuntimeSource) => Promise<{ entries: CatalogEntry[]; error?: string }>
@@ -130,20 +127,17 @@ function runningPort(deps: CommandDeps): number {
 }
 
 export interface RuntimeSnapshot {
-  mode: DshMode
   /** 随包内置版本（读内置树 package.json） */
   builtinVersion: string | null
   /** 当前生效运行时的真实版本 */
   activeVersion: string | null
-  /** override | external | installed | builtin */
+  /** override | installed | builtin */
   activeKind: string
   /** 当前生效运行时目录（面板显示「运行中」时用得上） */
   activeDir: string | null
-  /** 面板 select 的当前值：设置里的 dshRuntime（外部模式下不生效） */
+  /** 面板 select 的当前值：设置里的 dshRuntime */
   selected: string | null
   installed: InstalledRuntime[]
-  externalPath: string | null
-  externalVersion: string | null
 }
 
 
@@ -183,13 +177,9 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
   const handlers: Record<string, RpcHandler> = {
     // ---- 渲染环境：客户端插件的第一步；回 undefined 会让整片桌面 chrome 不激活 ----
     get_desktop_client_environment: () => {
-      const settings = deps.settings()
       return {
-        // 旧壳有 compatibility / advanced 两档；新壳只有 advanced（自绘 chrome 是唯一形态）
-        mode: 'advanced',
         platform: deps.platform,
         profile: profileOf(deps),
-        dshMode: settings.dshMode ?? 'builtin',
       }
     },
 
@@ -268,15 +258,6 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       return { ok: true }
     },
 
-    // 兼容/高级模式（旧壳 get_mode_prompt_needed / choose_desktop_mode）
-    get_mode_prompt_needed: () => deps.modePrompt?.() ?? false,
-    choose_desktop_mode: async (args: Record<string, unknown>) => {
-      const mode = typeof args['mode'] === 'string' ? args['mode'] : ''
-      const tokenUrl = typeof args['tokenUrl'] === 'string' ? args['tokenUrl'] : undefined
-      if (deps.chooseMode === undefined) throw new Error('接入模式选择器未就绪（壳还在启动）')
-      return await deps.chooseMode(mode, tokenUrl)
-    },
-
     // 底部状态条的轮询口（每 5s 一次）：旧壳的 0..7 枚举，缺了它状态永远是默认文案
     get_dsh_status: () => ({
       status: deps.dshStatus?.() ?? 2,
@@ -288,16 +269,12 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
     // 设置面板的「dsh 来源」卡：形状对齐 DshSourceState（running.origin 是标签，不是 URL）
     get_dsh_source: () => {
       const snapshot = deps.runtime?.()
-      const mode = snapshot?.mode ?? deps.settings().dshMode ?? 'builtin'
+      const mode = deps.settings().dshMode ?? 'builtin'
       const running = deps.status?.() ?? null
       const runningVersion = snapshot?.activeVersion ?? deps.dshVersion?.() ?? ''
       return {
         mode,
         builtin: snapshot?.builtinVersion == null ? null : { dsh_version: snapshot.builtinVersion },
-        external:
-          snapshot?.externalPath == null
-            ? null
-            : { dsh_version: snapshot.externalVersion ?? '', path: snapshot.externalPath },
         running:
           running === null
             ? null
@@ -314,10 +291,8 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       const fetched = (await deps.fetchCatalog?.(source)) ?? { entries: [] }
       const body: Record<string, unknown> = {
         source,
-        mode: snapshot?.mode ?? 'builtin',
         builtin: snapshot?.builtinVersion ?? null,
-        // 外部 CLI 不占本地运行时树：此时「当前使用」不指向任何已下载版本（旧壳 #135）
-        selected: (snapshot?.mode ?? 'builtin') === 'external' ? null : (snapshot?.selected ?? null),
+        selected: snapshot?.selected ?? null,
         installed: snapshot?.installed ?? [],
         // 当前真正在跑的那棵树：面板要能把它标成「运行中」，
         // 并且不再把正在跑的版本当成「可下载」（dev 用 DSH_SHELL_RUNTIME_DIR 时内置树可能压根不在）
@@ -346,14 +321,14 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       return deps.downloadRuntime(version, source)
     },
 
-    // 卸载：正在用 / 内置的不允许删（旧壳同款守卫；外置模式下不占本地树，故不拦）
+    // 卸载：正在用 / 内置的不允许删（旧壳同款守卫）
     remove_runtime: async (args) => {
       const version = argString(args, 'version')
       if (version === undefined || version === '') throw new Error('remove_runtime: version 不能为空')
       if (deps.removeRuntime === undefined) throw new Error('remove_runtime: 运行时管理不可用')
       const snapshot = deps.runtime?.()
       if (snapshot !== undefined) {
-        if (snapshot.mode === 'builtin' && snapshot.selected === version) {
+        if (snapshot.selected === version) {
           throw new Error(`${version} 正在使用，请先切换到其他版本`)
         }
         if (snapshot.builtinVersion === version) throw new Error(`${version} 是内置版本，不可删除`)
