@@ -249,7 +249,8 @@ describe('stagePlugins（端到端：池 + 注入清单）', () => {
 // 退出时要把本实例挂进 profile 池的链接拆掉（旧壳 cleanup_desktop_plugin_links 的等价物）：
 // 不拆的话，用户回到旧 Tauri 壳时 profile 池里会留一份指向「已不存在的新壳包目录」的悬空 symlink。
 describe('退出时拆插件链接', () => {
-  test('删掉指向自己包目录的链接，保留他实例的链接与实体目录', () => {
+  // stagePlugins 建 pool 链接与改链都依赖 symlink 特权，Windows 无特权跑不了 → 平台 skip（#18 skip 清单）
+  test.skipIf(process.platform === 'win32')('删掉指向自己包目录的链接，保留他实例的链接与实体目录', () => {
     const root = tempDir()
     const home = join(root, 'home')
     const pluginDir = fakePackage(join(root, 'app', 'plugins', 'dsh-desktop-bun'), 'dsh-desktop-bun')

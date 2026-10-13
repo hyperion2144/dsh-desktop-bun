@@ -24,5 +24,7 @@ export interface ClientContext {
   logger?: ClientLogger
   slots?: ClientSlots
   connection?: ClientConnection
+  /** cordis effect 挂载：回调可返回清理函数（advanced-shell 窗口 chrome 用，调用点无守卫直调）。 */
+  effect(fn: () => void | (() => void), name?: string): void
   [key: string]: unknown
 }
