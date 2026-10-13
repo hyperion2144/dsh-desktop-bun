@@ -15,7 +15,7 @@
  *
  * 退出码：0 = 安装器已生成；1 = 找不到产物 / makensis 失败。
  */
-import { existsSync, readdirSync, statSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
@@ -104,6 +104,8 @@ if (!existsSync(iconPath)) {
 // OutFile 固定落 artifacts/（与 mac dmg 同一个交付目录）。
 const outFile = join(projectRoot, 'artifacts', 'windows-x64-DeepSeekHarnessDesktopBUN-setup.exe')
 const nsiTemplate = `
+; Unicode true：快捷方式名里的中文（卸载）必须走 Unicode 安装器，否则开始菜单乱码
+Unicode true
 !define APP_NAME "DeepSeek Harness Desktop BUN"
 !define APP_ID "DeepSeekHarnessDesktopBUN"
 !define APP_DIR_NAME "${nsiEscape(appDirName)}"
@@ -135,7 +137,7 @@ Section "install"
   WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@" "DisplayIcon" "$INSTDIR\\@@APP_DIR_NAME@@\\launcher.exe"
   WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@" "UninstallString" "$INSTDIR\\@@APP_DIR_NAME@@\\uninstall.exe"
   CreateDirectory "$SMPROGRAMS\\@@APP_NAME@@"
-  CreateShortCut "$SMPROGRAMS\\@@APP_NAME@@\\@@APP_NAME@@.lnk" "$INSTDIR\\@@APP_DIR_NAME@@\\launcher.exe"
+  CreateShortCut "$SMPROGRAMS\\@@APP_NAME@@\\@@APP_NAME@@.lnk" "$INSTDIR\\@@APP_DIR_NAME@@\\bin\\launcher.exe"
   CreateShortCut "$SMPROGRAMS\\@@APP_NAME@@\\卸载.lnk" "$INSTDIR\\@@APP_DIR_NAME@@\\uninstall.exe"
 SectionEnd
 
@@ -152,11 +154,13 @@ SectionEnd`
   // Windows 自解压约定（extractor/main.zig extractFromSelf）：exe 同目录的 .installer/<stem>.tar.zst + <stem>.metadata.json，
   // 退回同目录裸 <stem>.tar.zst/<stem>.metadata.json。hutch 产出的 payload 在 Resources/<hash>.tar.zst，装完就地改名挪过去。
   const payloadDir = join(appDir, 'Resources')
-  const payloadListing = existsSync(payloadDir) ? readdirSync(payloadDir) : []
+  const payloadListing = payloadPreExtracted ? [] : (existsSync(payloadDir) ? readdirSync(payloadDir) : [])
   const payloadArchive = payloadListing.find((name) => name.endsWith('.tar.zst'))
   const payloadMetadata = payloadListing.find((name) => name === 'metadata.json')
   let payloadRename = '; 未找到 Resources/<hash>.tar.zst，跳过自解压重命名（无法首启自装）'
-  if (payloadArchive !== undefined && payloadMetadata !== undefined) {
+  if (payloadPreExtracted) {
+    payloadRename = '; 载荷已在打包期解并进应用树，安装期无需 .installer 改名'
+  } else if (payloadArchive !== undefined && payloadMetadata !== undefined) {
     const escapedPayload = nsiEscape(payloadArchive)
     payloadRename = [
       `  CreateDirectory "$INSTDIR\\@@APP_DIR_NAME@@\\bin\\.installer"`,
@@ -167,7 +171,8 @@ SectionEnd`
 const nsi = nsiTemplate.replaceAll('@@PAYLOAD_RENAME@@', payloadRename).replaceAll('@@APP_NAME@@', 'DeepSeek Harness Desktop BUN').replaceAll('@@APP_ID@@', 'DeepSeekHarnessDesktopBUN').replaceAll('@@APP_DIR_NAME@@', appDirName)
 
 const nsiPath = join(projectRoot, 'build', 'installer-windows.nsi')
-await Bun.write(nsiPath, nsi)
+// BOM 让 makensis 按 UTF-8 读脚本（中文快捷方式名不乱码）
+await Bun.write(nsiPath, '\uFEFF' + nsi)
 const sourceCount = listFilesRecursive(appDir).length
 console.log(`[installer] 应用目录：${appDir}（${String(sourceCount)} 个文件）`)
 console.log(`[installer] NSIS 脚本：${nsiPath}`)

@@ -126,6 +126,34 @@ if (payloads.length === 0) {
 }
 
 /** app 目录布局里也可能有一份 version.json（Windows 的 launcher：exe 旁边就是 Resources\）。 */
+function findLauncherDirs(root) {
+  const out = []
+  const walk = (dir, depth) => {
+    if (depth > 4) return
+    let entries = []
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
+    if (entries.some((entry) => entry.name === 'launcher.exe')) { out.push(dir); return }
+    for (const entry of entries) if (entry.isDirectory()) walk(join(dir, entry.name), depth + 1)
+  }
+  walk(root, 0)
+  return out
+}
+
+function listFilesRecursive(root) {
+  const out = []
+  const walk = (dir) => {
+    let entries = []
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const entry of entries) {
+      const child = join(dir, entry.name)
+      if (entry.isDirectory()) walk(child)
+      else out.push(child)
+    }
+  }
+  walk(root)
+  return out
+}
+
 function findVersionJsonOnDisk(root, depth = 0) {
   if (depth > 4) return []
   const found = []
@@ -236,7 +264,33 @@ function inspect(archive, label, depth = 0) {
   else checkVersion(raw, label)
 }
 
+let diskChecked = false
+if (platform === 'win32') {
+  // Windows：载荷已在打包期解并进应用树（setup 装完即用），不再随包发 *.tar.zst
+  // ⇒ 断言改为「应用目录磁盘树」：CEF 标志 + 壳插件 + 内置 dsh 树直接在文件系统上找。
+  const appDirs = findLauncherDirs(target)
+  if (appDirs.length === 0) {
+    problems.push('Windows 构建目录里找不到应用根（含 launcher.exe 的目录）')
+  }
+  for (const appDir of appDirs) {
+    const rels = listFilesRecursive(appDir).map((file) => file.slice(appDir.length + 1).replace(/\\/g, '/'))
+    const joined = rels.join('\n')
+    for (const marker of cefMarkers(platform)) {
+      if (!joined.includes(marker)) problems.push(`应用树缺 CEF 标志：${marker}`)
+    }
+    for (const required of REQUIRED_PAYLOAD_FILES) {
+      if (!rels.some((line) => line.endsWith(`/app/${required}`) || line.endsWith(`/${required}`))) {
+        problems.push(`应用树缺 ${required}（必需文件没被打进包）`)
+      }
+    }
+    console.log(`[assert] 应用树（磁盘）：${rels.length} 个文件，_required 与 CEF 标志已核对`)
+    diskChecked = true
+  }
+}
 for (const payload of payloads) inspect(payload, payload.slice(target.length + 1))
+if (platform === 'win32' && diskChecked === false && payloads.length === 0 && problems.length === 0) {
+  problems.push('Windows 产物既没有归档也没有可断言的应用树')
+}
 for (const file of diskVersionFiles) {
   try {
     checkVersion(readFileSync(file, 'utf8'), `${file.slice(0, target.length + 1)}…（磁盘）`)
