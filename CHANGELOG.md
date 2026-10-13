@@ -18,7 +18,7 @@
 - 应用内更新检查（Electrobun 更新器，基址为本仓 Releases）。
 
 ### Changed
-
+- CI 触发策略分流（#7）：push/PR 只跑检查（typecheck + test，新增 Check workflow）；完整构建（三平台 + 断言 + 冒烟 + 上传）仅由 workflow_dispatch 与 tag push 触发。
 - dsh 宿主由随包 Node sidecar 改为 Bun 直跑；启动链对齐官方桌面（`loadProfileDirectory` + `resolvedProfile`，profile 由 dsh 自身逻辑初始化）。
 - 页面跑在壳自建 loopback origin 上：静态资产本地优先、真实 secure context（存储可写）、注入经 `dshDesktopBoot.ready()` 交付。
 - 导航守卫在原生层评估（`navigationRules`），仅放行页面 origin，站外一律系统浏览器。

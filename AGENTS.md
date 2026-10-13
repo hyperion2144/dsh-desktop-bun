@@ -2,7 +2,7 @@
 
 - 壳改动一律在 `desktop-electrobun/` 内；桌面插件在 `desktop-plugin/`（构建 `lib/client.js` 用
   `npm run build:client`，测试 `npm run test:client`）。
-- 门禁：`bun run typecheck` + `bun test` 全绿才可提交；CI（build.yml）三平台构建 + 产物断言。
+- 门禁：`bun run typecheck` + `bun test` 全绿才可提交；CI 分流（#7）：push/PR 只跑检查（check.yml），完整构建留给 workflow_dispatch 与 tag push（build.yml）。
 - 提交纪律：一票一提交；`git add` 点名文件（禁 `-A`）；改动后同步 `CHANGELOG.md` 的
   `## Unreleased`；PR 优先，未经维护者允许不合并。
 - 契约红线：设置文件键名、`/api` 与 `/plugins` 的 no-store、页面 token 路径前缀准入、

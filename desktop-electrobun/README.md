@@ -65,7 +65,7 @@ bun run assert:artifact                       # 产物断言（CI）
 2. **纯逻辑单测**（进 CI）：`src/shared/*` 与可注入 IO 层。
 3. 引擎断言（CEF/长跑）属一次性验收，不进常规 CI。
 
-CI（`.github/workflows/build.yml`）：三平台矩阵 构建 → 类型检查 → 测试 → 出包 → 产物断言；Windows 追加 NSIS 安装器与冒烟。
+CI 分两条（#7）：push/PR 走 `.github/workflows/check.yml` 只跑类型检查 + 单测；完整构建（三平台矩阵 → 出包 → 产物断言，Windows 追加 NSIS 安装器与冒烟）在 `.github/workflows/build.yml`，仅手动 dispatch 或 tag push 触发。
 
 ## 已知边界
 
