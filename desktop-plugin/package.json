@@ -36,7 +36,8 @@
   ],
   "scripts": {
     "build:client": "node scripts/build-client.mjs",
-    "test:client": "node scripts/test-client.mjs"
+    "test:client": "node scripts/test-client.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dsh": {
     "client": {
@@ -53,6 +54,7 @@
     }
   },
   "devDependencies": {
+    "@types/react": "^18",
     "esbuild": "^0.24.0",
     "qrcode-generator": "^2.0.4",
     "typescript": "^5.6.0"

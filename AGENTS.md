@@ -1,8 +1,8 @@
 # dsh-desktop-bun 工作约定
 
 - 壳改动一律在 `desktop-electrobun/` 内；桌面插件在 `desktop-plugin/`（构建 `lib/client.js` 用
-  `npm run build:client`，测试 `npm run test:client`）。
-- 门禁：`bun run typecheck` + `bun test` 全绿才可提交；CI 分流：push/PR 只跑检查（check.yml），完整构建留给 workflow_dispatch、tag push 与每日定时兜底（build.yml，#7/#8）。
+  `bun run build:client`，测试 `bun run test:client`）。
+- 门禁：壳 `bun run typecheck` + `bun test`、插件 `bun run typecheck` + `bun run test:client` 全绿才可提交（插件命令需 Bun 1.4.x，与 CI setup-bun 及仓内 hutch 工具链对齐）；CI 分流：push/PR 跑检查（check.yml：壳检查 + 插件门禁 + Windows 兜底 job，#18），完整构建留给 workflow_dispatch、tag push 与每日定时兜底（build.yml，#7/#8）。
 - 提交纪律：一票一提交；`git add` 点名文件（禁 `-A`）；改动后同步 `CHANGELOG.md` 的
   `## Unreleased`；PR 优先，未经维护者允许不合并。
 - 契约红线：设置文件键名、`/api` 与 `/plugins` 的 no-store、页面 token 路径前缀准入、

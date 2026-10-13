@@ -28,6 +28,7 @@
 
 ### Fixed
 
+- CI 检查覆盖面（#18）：check.yml 并入桌面插件门禁——`test:client`（含 main 已重写指向新壳 `carrier.ts` 的载体断言段）+ 全量 `tsc`（tsconfig strict 覆盖 src/client 全部 14 文件，契约补 `ctx.effect`、disposer 用类型谓词收窄，零豁免）；新增 Windows 兜底 job（壳 `bun test` + 插件 `test:client` 双平台可跑性），首跑即抓到 `test-client.mjs` 裸路径动态 import 的移植性 bug（`pathToFileURL` 修复），POSIX-only 用例按平台条件 skip 并在票内留档清单；同步修正 `desktop-plugin/README.md` 旧壳构建/发布链说明；`build:client` 定性为构建产出、不进检查门禁。
 - Windows 安装版启动失败（#1）：DSH_HOME 缺省改走 `dshHome()`（Windows 无 HOME 时旧写法退化成相对路径 `.dsh`，日志/设置落进安装目录）；profile 依赖摊平改用 `lstatSync` 判存在——悬空链接不再撞 EEXIST，被旧版本真实目录占住的运行时包就地替换；指错方向的链接（含旧壳残留，不分公司）一律删掉重指到当前运行时树。
 - profile 依赖摊平落点改共享池（#13）：reconcile 不再把运行时树链进各 profile 自己的 `node_modules`，改链到共享池 `profiles/node_modules`（对齐旧壳不变量「共享包在父级 node_modules，Node 向上解析」），多 profile 只维护一份链接、切运行时全 profile 一致重指（设置面板切运行时立即重指，不等下次启动）；启动与切运行时都会幂等清掉壳此前写进 per-profile 池的运行时链接（防近者优遮蔽共享层造成跨 profile 版本错配），pnpm 自有链接（含 store 暂时悬空）与用户资产不动。
 - 内置 dsh 运行时按声明供给（#16）：新增 `desktop-electrobun/builtin-runtime.json` 声明 dsh 与 pnpm 的固定版本；prepare:bundle 按声明物化内置树（已就绪复用 / npm 下载 / `DSH_SHELL_BUILTIN_SOURCE` 显式逃生口），落盘版本与声明不符直接失败；assert-artifact 对产物里的内置 dsh 版本与声明再对一遍；退役 build.yml 备树步骤与本机运行时拾取链。

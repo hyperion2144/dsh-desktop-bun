@@ -270,8 +270,10 @@ export function registerDownloadsTab(ctx: ClientContext): void {
   // 服务不存在（老版 dsh）时回调不触发、不注册、不报错
   root.inject(['sidebarRightTabs'], (sub) => {
     const disposers: Array<() => void> = []
+    // unknown→disposer 用类型谓词收窄（#18 review），不用 as 断言压制
+    const isDisposer = (r: unknown): r is () => void => typeof r === 'function'
     const own = (r: unknown): void => {
-      if (typeof r === 'function') disposers.push(r)
+      if (isDisposer(r)) disposers.push(r)
     }
     try {
       const tabs = sub.sidebarRightTabs as { register: unknown } | undefined
