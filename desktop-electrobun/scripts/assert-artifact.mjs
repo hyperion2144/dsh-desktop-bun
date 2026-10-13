@@ -18,6 +18,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { dshVersionFromPackageJson, readBuiltinRuntimeDeclaration } from '../src/shared/builtin-runtime.ts'
 
 const projectRoot = resolve(import.meta.dir, '..')
 const buildRoot = join(projectRoot, 'build')
@@ -117,6 +118,23 @@ function checkVersion(raw, label) {
   }
 }
 const problems = []
+
+// 内置 dsh 版本要与声明一致（#16）：prepare:bundle 已校验过落盘树，这里对产物再对
+// 一遍——包里带的版本漂了，声明就形同虚设。声明本身读不出来也是 fail。
+const declaredBuiltin = readBuiltinRuntimeDeclaration(join(projectRoot, 'builtin-runtime.json'))
+const BUILTIN_DSH_PKG = 'dsh/node_modules/@deepseek-ai/dsh/package.json'
+if (declaredBuiltin === null) {
+  problems.push('内置运行时声明读不出来（desktop-electrobun/builtin-runtime.json）')
+}
+
+/** 内置 dsh package.json 的版本要与声明一致；不符计为 problem（门槛拦住）。 */
+function checkBuiltinVersion(raw, label) {
+  if (declaredBuiltin === null) return
+  const version = dshVersionFromPackageJson(raw)
+  if (version === null) problems.push(`${label} 的内置 dsh package.json 读不出版本号`)
+  else if (version !== declaredBuiltin.dsh) problems.push(`${label} 的内置 dsh 版本 ${version} ≠ 声明 ${declaredBuiltin.dsh}`)
+  else console.log(`[assert] ${label} → 内置 dsh ${version}（与声明一致）`)
+}
 
 console.log(`[assert] 产物目录：${target}`)
 console.log(`[assert] 平台：${platform}`)
@@ -256,6 +274,14 @@ function inspect(archive, label, depth = 0) {
       problems.push(`${label} 里缺 ${required}（必需文件没被打进包）`)
     }
   }
+  if (declaredBuiltin !== null) {
+    const pkgLine = norm.find((line) => line.endsWith(`/${BUILTIN_DSH_PKG}`))
+    if (pkgLine !== undefined) {
+      const raw = tarExtract(archive, pkgLine)
+      if (raw === null) problems.push(`${label} 的内置 dsh package.json 读不出来`)
+      else checkBuiltinVersion(raw, label)
+    }
+  }
   if (versionLine === undefined) {
     const sample = norm
       .slice(0, 20)
@@ -290,6 +316,16 @@ if (platform === 'win32') {
     for (const required of REQUIRED_PAYLOAD_FILES) {
       if (!rels.some((line) => line.endsWith(`/app/${required}`) || line.endsWith(`/${required}`))) {
         problems.push(`应用树缺 ${required}（必需文件没被打进包）`)
+      }
+    }
+    if (declaredBuiltin !== null) {
+      const pkgRel = rels.find((line) => line.endsWith(`/${BUILTIN_DSH_PKG}`))
+      if (pkgRel !== undefined) {
+        try {
+          checkBuiltinVersion(readFileSync(join(appDir, pkgRel), 'utf8'), '应用树（磁盘）')
+        } catch (error) {
+          problems.push(`读不出应用树里的内置 dsh package.json：${String(error)}`)
+        }
       }
     }
     console.log(`[assert] 应用树（磁盘）：${rels.length} 个文件，_required 与 CEF 标志已核对`)

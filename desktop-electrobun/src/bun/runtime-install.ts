@@ -102,7 +102,7 @@ export interface ResolvePnpmInput {
 
 /**
  * pnpm.cjs 的定位：显式 env > 当前运行时树 > 随包内置树 > 任一已下载树。
- * 内置树里那份是 `prepare-builtin-runtime.mjs` 装的 `pnpm@11.16.0`（`node_modules/pnpm/bin/pnpm.cjs`）。
+ * 内置树由 prepare:bundle 按 builtin-runtime.json 声明物化（#16），那份 pnpm 的版本即声明里的 pnpm 字段。
  */
 export function resolvePnpmCjs(input: ResolvePnpmInput): string | null {
   const env = input.env ?? process.env
