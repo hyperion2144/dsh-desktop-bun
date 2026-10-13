@@ -4,6 +4,7 @@ window.__ModuleLoader__.load({
 var module = { exports: {} };
 var exports = module.exports;
 
+"use strict";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -688,8 +689,9 @@ function registerDownloadsTab(ctx) {
   const root = ctx;
   root.inject(["sidebarRightTabs"], (sub) => {
     const disposers = [];
+    const isDisposer = (r) => typeof r === "function";
     const own = (r) => {
-      if (typeof r === "function") disposers.push(r);
+      if (isDisposer(r)) disposers.push(r);
     };
     try {
       const tabs = sub.sidebarRightTabs;

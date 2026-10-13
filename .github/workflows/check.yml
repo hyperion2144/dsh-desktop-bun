@@ -1,6 +1,6 @@
 name: Check
 
-# dsh-desktop-bun 的推送/PR 检查门禁（#7）：只跑 typecheck + test，不打包。
+# dsh-desktop-bun 的推送/PR 检查门禁（#7/#18）：跑 typecheck + test（壳 + 插件）与 Windows 兜底测试面，不打包。
 #
 # 触发策略（方案 A，与 build.yml 分工）：
 #   - 本文件：push(main) 与 pull_request —— 每轮迭代的快速反馈
@@ -32,7 +32,7 @@ permissions:
 
 jobs:
   check:
-    name: 检查（typecheck + test）
+    name: 检查（壳 + 插件：typecheck + test）
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -66,3 +66,48 @@ jobs:
       - name: 单元测试
         working-directory: desktop-electrobun
         run: bun test
+
+      # 插件门禁（#18）：test:client 纯函数断言 + 全量 tsc（strict，零豁免）。
+      # build:client 是构建产物产出、不是门禁（v2 拍板），不进 check。
+      - name: 插件依赖（bun install）
+        working-directory: desktop-plugin
+        run: bun install --frozen-lockfile
+
+      - name: 插件类型检查
+        working-directory: desktop-plugin
+        run: bun run typecheck
+
+      - name: 插件测试
+        working-directory: desktop-plugin
+        run: bun run test:client
+
+  # Windows 可跑性兜底（#18 拍板新增）：check 覆盖 Windows 特殊路径。
+  # 只跑测试面（壳 bun test + 插件 test:client），typecheck 与原生准备单跑
+  # ubuntu。POSIX-only 用例已按平台 skip（#18 留档清单）；本 job 保持启用、
+  # 失败即红——不为绿禁用，也不对步骤放水（无 continue-on-error）；若出现
+  # 大面积环境性失败，按 #18 风险条款带清单回维护者定夺。
+  check-windows:
+    name: 检查（Windows 兜底）
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: 壳单测
+        working-directory: desktop-electrobun
+        run: |
+          bun install --frozen-lockfile
+          bun test
+
+      - name: 插件测试
+        working-directory: desktop-plugin
+        run: |
+          bun install --frozen-lockfile
+          bun run test:client

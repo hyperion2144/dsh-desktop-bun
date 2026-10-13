@@ -6,7 +6,7 @@
  */
 import { build } from 'esbuild'
 import { mkdirSync, readFileSync, rmSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { createContext, runInContext } from 'node:vm'
 import assert from 'node:assert/strict'
@@ -25,7 +25,7 @@ await build({
   logLevel: 'silent',
 })
 
-const { shouldIntercept, interceptKind, filenameFromAnchor } = await import(join(tmp, 'download-intercept.mjs'))
+const { shouldIntercept, interceptKind, filenameFromAnchor } = await import(pathToFileURL(join(tmp, 'download-intercept.mjs')).href)
 
 // ── interceptKind：blob:/data: 一律接管；http(s)/同源相对链接仅带 download 属性才接管 ──
 assert.equal(interceptKind('blob:http://127.0.0.1:3080/uuid', true), 'blob', 'blob 链接拦截（页面分块交壳）')
@@ -63,7 +63,7 @@ await build({
   logLevel: 'silent',
 })
 
-const kb = await import(join(tmp, 'platform-keyboard.mjs'))
+const kb = await import(pathToFileURL(join(tmp, 'platform-keyboard.mjs')).href)
 const gesture = (over = {}) => ({
   code: 'Period',
   control: false,
@@ -199,7 +199,7 @@ await build({
   logLevel: 'silent',
 })
 
-const { carrierScript } = await import(join(tmp, 'carrier.mjs'))
+const { carrierScript } = await import(pathToFileURL(join(tmp, 'carrier.mjs')).href)
 const carrierRaw = carrierScript('macos')
 assert.ok(carrierRaw.includes('protocolVersion: 1'), '载体脚本带协议版本')
 
@@ -304,7 +304,7 @@ await build({
   logLevel: 'silent',
 })
 
-const guard = await import(join(tmp, 'composer-input-guard.mjs'))
+const guard = await import(pathToFileURL(join(tmp, 'composer-input-guard.mjs')).href)
 
 assert.equal(guard.hasDisallowedControl(null), false, 'null 放行')
 assert.equal(guard.hasDisallowedControl(''), false, '空串放行')
