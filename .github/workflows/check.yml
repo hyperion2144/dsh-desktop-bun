@@ -1,0 +1,68 @@
+name: Check
+
+# dsh-desktop-bun 的推送/PR 检查门禁（#7）：只跑 typecheck + test，不打包。
+#
+# 触发策略（方案 A，与 build.yml 分工）：
+#   - 本文件：push(main) 与 pull_request —— 每轮迭代的快速反馈
+#   - build.yml：workflow_dispatch 与 tag push —— 完整构建 + 断言 + 冒烟 + 上传
+# main 打包链的持续验证靠手动 dispatch（定时兜底另票处理）。
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'desktop-electrobun/**'
+      - 'resources/**'
+      - 'desktop-plugin/**'
+      - 'plugins/**'
+      - 'scripts/**'
+      - '.github/workflows/build.yml'
+      - '.github/workflows/check.yml'
+  pull_request:
+    paths:
+      - 'desktop-electrobun/**'
+      - 'resources/**'
+      - 'desktop-plugin/**'
+      - 'plugins/**'
+      - 'scripts/**'
+      - '.github/workflows/build.yml'
+      - '.github/workflows/check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: 检查（typecheck + test）
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Bun 版本与 build.yml 对齐（Electrobun 2.0.2 自带 Bun 1.4.0）。低版本缺
+      # `Bun.Terminal` / `Bun.spawn({terminal})` 等能力，node-pty 垫片会直接失效。
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      # 单测输入准备与 build.yml 的检查段一致：build:native 在 macOS 产出通知桥
+      # dylib（「dylib 就位」那条单测的输入），非 macOS 自行跳过——与现状 CI 的
+      # Linux 侧行为相同。不装运行时树 / prepare:bundle：需要真运行时的黑盒缝
+      # 单测会自行跳过（DSH_SHELL_TEST_RUNTIME 未设）。
+      - name: 依赖（bun install）
+        working-directory: desktop-electrobun
+        run: bun install --frozen-lockfile
+
+      - name: 准备（原生通知桥）
+        working-directory: desktop-electrobun
+        run: bun run build:native
+
+      - name: 类型检查
+        working-directory: desktop-electrobun
+        run: bun run typecheck
+
+      - name: 单元测试
+        working-directory: desktop-electrobun
+        run: bun test
