@@ -8,6 +8,7 @@ import {
   CONTEXT_MENU_ENDPOINT,
   SHELL_MENU_ACTIONS,
   contextMenuItems,
+  isOpenablePath,
   contextMenuScript,
   type ShellMenuItem,
 } from '../src/bun/context-menu.ts'
@@ -54,20 +55,20 @@ describe('外链：判定与拦截脚本', () => {
 
 describe('右键菜单：结构', () => {
   const none = { linkUrl: null, hasSelection: false, editable: false }
-  /** 只取 role 项——我们自己的 action 项（刷新/外链/复制链接）没有 role。 */
+  /** 只取 role 项——我们自己的 action 项（刷新/外链/复制链接/打开/DevTools）没有 role。 */
   const roles = (items: ShellMenuItem[]): (string | undefined)[] =>
     items.filter((item) => item.role !== undefined).map((item) => item.role)
 
-  test('空白处只有「刷新页面」——旧壳那份菜单里我们最需要的就这一项', () => {
+  test('空白处只有「刷新」——旧壳那份菜单里我们最需要的就这一项', () => {
     const items = contextMenuItems(none, false)
-    expect(items).toEqual([{ label: '刷新页面', action: SHELL_MENU_ACTIONS.reload }])
+    expect(items).toEqual([{ label: '刷新', action: SHELL_MENU_ACTIONS.reload }])
   })
 
   test('外链上多出「在系统浏览器打开」与「复制链接地址」', () => {
     const items = contextMenuItems({ ...none, linkUrl: 'https://example.com/a' }, true)
     expect(items[0]).toMatchObject({ action: SHELL_MENU_ACTIONS.openExternal, data: { url: 'https://example.com/a' } })
     expect(items[1]).toMatchObject({ action: SHELL_MENU_ACTIONS.copyLink })
-    expect(items.map((item) => item.label)).toContain('刷新页面')
+    expect(items.map((item) => item.label)).toContain('刷新')
   })
 
   test('应用内链接不给「在系统浏览器打开」（同源没必要绕出去）', () => {
@@ -89,6 +90,34 @@ describe('右键菜单：结构', () => {
     expect(items.find((item) => item.role === 'copy')?.enabled).toBe(false)
     expect(items.find((item) => item.role === 'paste')?.enabled).toBeUndefined()
   })
+
+  test('工作区文件行给「打开」，文件夹给「打开文件夹」，路径随 data 带回', () => {
+    const file = contextMenuItems({ ...none, filesEntry: 'file', filesPath: '/tmp/a.txt' }, false)
+    expect(file[0]).toMatchObject({ label: '打开', action: SHELL_MENU_ACTIONS.openPath, data: { path: '/tmp/a.txt' } })
+    expect(file[1]).toEqual({ type: 'separator' })
+    const dir = contextMenuItems({ ...none, filesEntry: 'directory', filesPath: '/tmp/proj' }, false)
+    expect(dir[0]).toMatchObject({ label: '打开文件夹', action: SHELL_MENU_ACTIONS.openPath, data: { path: '/tmp/proj' } })
+  })
+
+  test('文件行 other 类型与相对路径不开洞，回到纯「刷新」', () => {
+    const other = contextMenuItems({ ...none, filesEntry: 'other', filesPath: '/tmp/x' }, false)
+    expect(other).toEqual([{ label: '刷新', action: SHELL_MENU_ACTIONS.reload }])
+    const relative = contextMenuItems({ ...none, filesEntry: 'file', filesPath: 'etc/passwd' }, false)
+    expect(relative).toEqual([{ label: '刷新', action: SHELL_MENU_ACTIONS.reload }])
+    expect(isOpenablePath('/abs/path')).toBe(true)
+    expect(isOpenablePath('C:\\Users\\me')).toBe(true)
+    expect(isOpenablePath('C:/Users/me')).toBe(true)
+    expect(isOpenablePath('etc/passwd')).toBe(false)
+    expect(isOpenablePath('')).toBe(false)
+  })
+
+  test('「打开 DevTools」只在 dev 菜单出现，且垫底（release 不出现）', () => {
+    const release = contextMenuItems(none, false)
+    expect(release.some((item) => item.action === SHELL_MENU_ACTIONS.openDevTools)).toBe(false)
+    const dev = contextMenuItems(none, false, { devTools: true })
+    expect(dev[dev.length - 1]).toMatchObject({ label: '打开 DevTools', action: SHELL_MENU_ACTIONS.openDevTools })
+    expect(dev[dev.length - 2]).toEqual({ type: 'separator' })
+  })
 })
 
 describe('右键菜单：注入脚本', () => {
@@ -103,5 +132,13 @@ describe('右键菜单：注入脚本', () => {
 
   test('页面自己接管过右键就不插手', () => {
     expect(contextMenuScript('tok-a')).toContain('if (event.defaultPrevented) return')
+  })
+
+  test('工作区文件行的稳定标记与字段也进上下文（dsh ui-sidebar-files）', () => {
+    const script = contextMenuScript('tok-a')
+    expect(script).toContain('data-files-entry')
+    expect(script).toContain('data-files-path')
+    expect(script).toContain('filesEntry')
+    expect(script).toContain('filesPath')
   })
 })

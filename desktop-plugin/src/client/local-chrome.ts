@@ -7,11 +7,8 @@ const STRIP_HEIGHT: Record<DesktopClientPlatform, number> = {
   linux: 32,
 }
 
-/** macOS 折叠侧栏轨道目标宽度：容纳原生红绿灯（安全区约 80px）。 */
-const MACOS_COLLAPSED_SIDEBAR = 90
-
-/** stock ui-layout 折叠侧栏的内容轨道宽度（computeColumns 里 sidebar 折叠=56px）。 */
-const COLLAPSED_RAIL = 56
+/** macOS 折叠态拖拽带宽度：只铺红绿灯区（官方 shell.leading 座位按钮在 x≈88 起，#23）。 */
+const TRAFFIC_LIGHT_BAND = 76
 
 /** Win/Linux 自绘窗口按钮预留宽度（CSS px）。 */
 const CAPTION_CONTROLS_WIDTH = 138
@@ -147,16 +144,6 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
   bar.innerHTML = '<span class="dshDesktopStatusDot" aria-hidden="true"></span><span class="dshDesktopStatusText"></span>'
   host.appendChild(bar)
 
-  // 折叠加宽区两侧装饰条（darwin 折叠时定位）：与顶部条/状态条同一层主题填充，
-  // 保证整条轨道叠加层数一致。侧栏内容区/拖拽条都是两层同色填充（sidebarCol +
-  // SidebarRoot/strip），而折叠时 padding 让出的空档只有 sidebarCol 一层；皮肤
-  // （blue-fantasy）的 fill 带透明度，少一层会明显偏亮偏透（#37 残留）。
-  // 展开态隐藏由 CSS 的 display:none 承担，折叠态由内联 display:block 覆写。
-  const railPadLeft = document.createElement('div')
-  const railPadRight = document.createElement('div')
-  railPadLeft.className = 'dshDesktopRailPad'
-  railPadRight.className = 'dshDesktopRailPad'
-  host.append(railPadLeft, railPadRight)
 
   const refreshStatus = () => {
     const invoke = tauriInvoke()
@@ -367,34 +354,23 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
       // 每帧读「动画中间值」写回都会让 CSS 过渡重新开始，折叠会形同卡帧、非常慢。
       // 直接禁用让宽度即时到位（对应 stock 拖拽时本来就 transition:none 的行为）。
       frame.style.setProperty('transition', 'none', 'important')
-      strip.style.cssText = `left:0;top:0;width:${sidebarWidth}px;height:${height}px;`
-      drag.style.cssText = 'position:absolute;inset:0;'
-      sidebar.style.paddingTop = `${height}px`
-      // 折叠：把内部 56px 窄栏水平居中在加宽到 90px 的轨道里（红绿灯所在列仍是侧栏）
-      const sidePad = collapsed ? (MACOS_COLLAPSED_SIDEBAR - COLLAPSED_RAIL) / 2 : 0
-      sidebar.style.paddingLeft = sidePad ? `${sidePad}px` : ''
-      sidebar.style.paddingRight = sidePad ? `${sidePad}px` : ''
-      // 折叠加宽区（#37 残留）：两侧 17px 条带用与顶部条/状态条同一层主题填充
-      // （dshDesktopRailPad，样式见 styles.ts）补齐，使整条轨道叠加层数一致
-      // （皮肤为半透明多层叠加主题，fill 带透明度）。条带只铺在顶部条与状态条
-      // 之间，完全不触碰 dsh 任何元素的布局；展开态隐藏。
-      // 注：cssText 是整体覆写，折叠态必须显式 display:block，否则会落回
-      // .dshDesktopRailPad 的 display:none 而根本画不出来。
       if (collapsed) {
-        railPadLeft.style.cssText = `display:block;left:0;top:${height}px;width:${sidePad}px;bottom:${STATUS_BAR_HEIGHT}px;`
-        railPadRight.style.cssText = `display:block;left:${sidebarWidth - sidePad}px;top:${height}px;width:${sidePad}px;bottom:${STATUS_BAR_HEIGHT}px;`
+        // 官方桌面语义（html[data-platform='darwin']，advanced-shell 设置）：折叠=0px
+        // 全隐 + shell.leading 座位放官方「打开侧边栏/新会话」按钮（红绿灯旁 x≈88 起）。
+        // 拖拽带只铺红绿灯区（TRAFFIC_LIGHT_BAND），不遮座位按钮；状态条按维护者
+        // 拍板随侧栏隐藏（#23 Q1）。
+        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${height}px;background:transparent;`
+        drag.style.cssText = 'position:absolute;inset:0;'
+        sidebar.style.paddingTop = ''
+        bar.style.display = 'none'
       } else {
-        railPadLeft.style.display = 'none'
-        railPadRight.style.display = 'none'
+        // 官方桌面口径：拖拽带全透明、只铺红绿灯区（76px）——红绿灯浮在侧栏
+        // header 左侧空白区（折叠按钮在右侧，不受遮挡）；透明条带与任何主题
+        // 表面同色（同像素透出），色差从结构上不可能发生（#23）。
+        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${height}px;`
+        drag.style.cssText = 'position:absolute;inset:0;'
+        bar.style.display = ''
       }
-      // 折叠态隐藏侧栏列 border-right（stock 分隔线）：加宽后它会裸露在轨道右缘
-      // 中段（顶部条/状态条区域已被同色覆盖），视觉上像残留分割线；展开态还原。
-      if (collapsed) {
-        sidebar.style.setProperty('border-right', 'none', 'important')
-      } else {
-        sidebar.style.removeProperty('border-right')
-      }
-      if (collapsed) widenCollapsedRail(frame)
     } else {
       // 布局对齐旧壳（维护者口径）：Windows/Linux 中间列顶部保留一整条 chrome 条
       //（拖拽区 + 右侧窗口三键），中间列内容用 padding 顶下去，右侧 panel 覆写 top。
@@ -403,26 +379,6 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
       if (center !== null) center.style.paddingTop = `${height}px`
       const rightPanel = rightColumn?.querySelector('[data-sidebar-right-panel]')
       if (rightPanel !== null) (rightPanel as HTMLElement).style.top = `${height}px`
-    }
-  }
-
-  /**
-   * macOS：折叠时把 frame 首条网格轨道加宽到容纳红绿灯，其余轨道沿用当前值。
-   * AppFrame 每次重渲染都会以非 important 覆写内联 grid-template-columns，这里用
-   * important 叠加；darwin 分支已禁用 frame 网格过渡，因此写入是即时且稳定的，
-   * 不会与过渡互相重启。凭 computed 对比避免写回死循环。
-   */
-  const widenCollapsedRail = (frame: HTMLElement) => {
-    const collapsed = frame.hasAttribute('data-sidebar-collapsed')
-    const current = getComputedStyle(frame).gridTemplateColumns.split(' ').filter(Boolean)
-    if (current.length === 0) return
-    const desired = current.slice()
-    if (collapsed && parseInt(desired[0], 10) !== MACOS_COLLAPSED_SIDEBAR) {
-      desired[0] = `${MACOS_COLLAPSED_SIDEBAR}px`
-    }
-    const joined = desired.join(' ')
-    if (joined !== current.join(' ')) {
-      frame.style.setProperty('grid-template-columns', joined, 'important')
     }
   }
 

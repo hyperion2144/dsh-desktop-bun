@@ -174,6 +174,7 @@ describe('stagePlugins（端到端：池 + 注入清单）', () => {
     const mobileAccess = fakePackage(join(repoRoot, 'plugins', 'dsh-mobile-access'), 'dsh-mobile-access')
 
     const logs: string[] = []
+    const warns: string[] = []
     const result = stagePlugins({
       home,
       profile: 'desktop',
@@ -182,6 +183,7 @@ describe('stagePlugins（端到端：池 + 注入清单）', () => {
       runtimeVersion: '0.2.1-alpha.2',
       muxHeartbeatMs: 30000,
       log: (line) => logs.push(line),
+      warn: (line) => warns.push(line),
     })
 
     // 壳插件来自仓库根；手机访问来自 mobile/；移动布局（子模块没拉）缺包 → 跳过
@@ -196,6 +198,13 @@ describe('stagePlugins（端到端：池 + 注入清单）', () => {
     expect(yml).toContain('- id: dsh-mobile-access')
     expect(yml).not.toContain('dsh-web-mobile')
     expect(logs.join('\n')).toContain('缺包跳过：dsh-web-mobile')
+    // 警告通道：缺包不再纯静默——独立警告行点名缺的包与补救命令（#20）
+    expect(warns.join('\n')).toContain('警告')
+    expect(warns.join('\n')).toContain('dsh-web-mobile')
+    expect(warns.join('\n')).toContain('git submodule update --init')
+    expect(warns).toHaveLength(1)
+    // 通道分离：警告走 warn，不混进 log 通道
+    expect(logs.join('\n')).not.toContain('警告：')
   })
 
   test('幂等：内容没变不重写（mtime 保留）；桌面布局设置会去掉移动布局行', () => {
@@ -207,8 +216,11 @@ describe('stagePlugins（端到端：池 + 注入清单）', () => {
     fakePackage(join(repoRoot, 'plugins', 'dsh-mobile-access'), 'dsh-mobile-access')
     fakePackage(join(repoRoot, 'mobile', 'dsh-mobile-nav'), 'dsh-web-mobile')
 
-    const first = stagePlugins({ home, profile: 'web', appSupport, paths: { repoRoot, resourcesDir: null }, runtimeVersion: '0.2.1-alpha.2', muxHeartbeatMs: 0 })
+    const firstWarns: string[] = []
+    const first = stagePlugins({ home, profile: 'web', appSupport, paths: { repoRoot, resourcesDir: null }, runtimeVersion: '0.2.1-alpha.2', muxHeartbeatMs: 0, warn: (line) => firstWarns.push(line) })
     expect(first.staged).toHaveLength(3)
+    // 三件套齐全 → 警告通道必须安静
+    expect(firstWarns).toEqual([])
     expect(readFileSync(first.injectFile, 'utf8')).toContain('dsh-web-mobile')
     // 心跳关闭 → 不写 typert-gateway
     expect(readFileSync(first.injectFile, 'utf8')).not.toContain('typert-gateway')
@@ -249,7 +261,8 @@ describe('stagePlugins（端到端：池 + 注入清单）', () => {
 // 退出时要把本实例挂进 profile 池的链接拆掉（旧壳 cleanup_desktop_plugin_links 的等价物）：
 // 不拆的话，用户回到旧 Tauri 壳时 profile 池里会留一份指向「已不存在的新壳包目录」的悬空 symlink。
 describe('退出时拆插件链接', () => {
-  test('删掉指向自己包目录的链接，保留他实例的链接与实体目录', () => {
+  // stagePlugins 建 pool 链接与改链都依赖 symlink 特权，Windows 无特权跑不了 → 平台 skip（#18 skip 清单）
+  test.skipIf(process.platform === 'win32')('删掉指向自己包目录的链接，保留他实例的链接与实体目录', () => {
     const root = tempDir()
     const home = join(root, 'home')
     const pluginDir = fakePackage(join(root, 'app', 'plugins', 'dsh-desktop-bun'), 'dsh-desktop-bun')

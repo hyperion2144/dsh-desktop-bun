@@ -4,6 +4,7 @@ window.__ModuleLoader__.load({
 var module = { exports: {} };
 var exports = module.exports;
 
+"use strict";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -49,8 +50,7 @@ var STRIP_HEIGHT = {
   win32: 32,
   linux: 32
 };
-var MACOS_COLLAPSED_SIDEBAR = 90;
-var COLLAPSED_RAIL = 56;
+var TRAFFIC_LIGHT_BAND = 76;
 var CAPTION_CONTROLS_WIDTH = 138;
 var FRAME_LAYER_SELECTOR = "[data-shell-overlay]";
 function tauriWindowCommand(command) {
@@ -156,11 +156,6 @@ function installLocalChrome(platform) {
   bar.className = "dshDesktopStatusBar";
   bar.innerHTML = '<span class="dshDesktopStatusDot" aria-hidden="true"></span><span class="dshDesktopStatusText"></span>';
   host.appendChild(bar);
-  const railPadLeft = document.createElement("div");
-  const railPadRight = document.createElement("div");
-  railPadLeft.className = "dshDesktopRailPad";
-  railPadRight.className = "dshDesktopRailPad";
-  host.append(railPadLeft, railPadRight);
   const refreshStatus = () => {
     const invoke6 = tauriInvoke2();
     if (!invoke6) return;
@@ -336,44 +331,22 @@ function installLocalChrome(platform) {
     if (platform === "darwin") {
       const collapsed = frame.hasAttribute("data-sidebar-collapsed");
       frame.style.setProperty("transition", "none", "important");
-      strip.style.cssText = `left:0;top:0;width:${sidebarWidth}px;height:${height}px;`;
-      drag.style.cssText = "position:absolute;inset:0;";
-      sidebar.style.paddingTop = `${height}px`;
-      const sidePad = collapsed ? (MACOS_COLLAPSED_SIDEBAR - COLLAPSED_RAIL) / 2 : 0;
-      sidebar.style.paddingLeft = sidePad ? `${sidePad}px` : "";
-      sidebar.style.paddingRight = sidePad ? `${sidePad}px` : "";
       if (collapsed) {
-        railPadLeft.style.cssText = `display:block;left:0;top:${height}px;width:${sidePad}px;bottom:${STATUS_BAR_HEIGHT}px;`;
-        railPadRight.style.cssText = `display:block;left:${sidebarWidth - sidePad}px;top:${height}px;width:${sidePad}px;bottom:${STATUS_BAR_HEIGHT}px;`;
+        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${height}px;background:transparent;`;
+        drag.style.cssText = "position:absolute;inset:0;";
+        sidebar.style.paddingTop = "";
+        bar.style.display = "none";
       } else {
-        railPadLeft.style.display = "none";
-        railPadRight.style.display = "none";
+        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${height}px;`;
+        drag.style.cssText = "position:absolute;inset:0;";
+        bar.style.display = "";
       }
-      if (collapsed) {
-        sidebar.style.setProperty("border-right", "none", "important");
-      } else {
-        sidebar.style.removeProperty("border-right");
-      }
-      if (collapsed) widenCollapsedRail(frame);
     } else {
       strip.style.cssText = `left:${sidebarWidth}px;right:0;top:0;height:${height}px;`;
       drag.style.cssText = `position:absolute;top:0;bottom:0;left:0;right:${CAPTION_CONTROLS_WIDTH}px;`;
       if (center !== null) center.style.paddingTop = `${height}px`;
       const rightPanel = rightColumn?.querySelector("[data-sidebar-right-panel]");
       if (rightPanel !== null) rightPanel.style.top = `${height}px`;
-    }
-  };
-  const widenCollapsedRail = (frame) => {
-    const collapsed = frame.hasAttribute("data-sidebar-collapsed");
-    const current = getComputedStyle(frame).gridTemplateColumns.split(" ").filter(Boolean);
-    if (current.length === 0) return;
-    const desired = current.slice();
-    if (collapsed && parseInt(desired[0], 10) !== MACOS_COLLAPSED_SIDEBAR) {
-      desired[0] = `${MACOS_COLLAPSED_SIDEBAR}px`;
-    }
-    const joined = desired.join(" ");
-    if (joined !== current.join(" ")) {
-      frame.style.setProperty("grid-template-columns", joined, "important");
     }
   };
   try {
@@ -455,17 +428,8 @@ function installLocalChrome(platform) {
 var ADVANCED_STYLES = `
 .dshDesktopChromeHost { position: fixed; inset: 0; z-index: 45; pointer-events: none; }
 .dshDesktopChromeStrip { position: absolute; display: flex; align-items: stretch; pointer-events: auto; }
-/* \u62D6\u62FD\u6761\u80CC\u666F\uFF1A\u6309\u5E73\u53F0\u5339\u914D\u6240\u8986\u76D6\u533A\u57DF\u7684\u4E3B\u9898\u80CC\u666F\uFF08macOS \u8986\u76D6\u4FA7\u8FB9\u680F\u3001Win/Linux \u8986\u76D6\u4E2D\u95F4\u533A\uFF09\u3002
-   \u5BF9\u9F50 better-sidebar \u505A\u6CD5\uFF1A\u6CE8\u5165\u5143\u7D20\u663E\u5F0F\u8BBE --dsw-alias-bg-* / --dsw-specific-* \u800C\u975E\u900F\u660E\u4F9D\u8D56\u5E95\u5C42\u900F\u51FA\u3002 */
-body[data-dsh-desktop-platform="darwin"] .dshDesktopChromeStrip { background: var(--dsw-specific-sidebar-fill); }
-body[data-dsh-desktop-platform="win32"] .dshDesktopChromeStrip,
-body[data-dsh-desktop-platform="linux"] .dshDesktopChromeStrip { background: var(--dsw-alias-bg-base); }
-/* macOS \u6298\u53E0\u52A0\u5BBD\u533A\u4E24\u4FA7\u88C5\u9970\u6761\uFF08local-chrome \u6298\u53E0\u65F6\u5B9A\u4F4D\u5728\u9876\u90E8\u6761\u4E0E\u72B6\u6001\u6761\u4E4B\u95F4\uFF09\uFF1A
-   \u4E0E\u9876\u90E8\u6761/\u72B6\u6001\u6761\u540C\u4E00\u5C42\u4E3B\u9898\u586B\u5145\uFF0C\u4FDD\u8BC1\u6574\u6761\u8F68\u9053\u53E0\u52A0\u5C42\u6570\u4E00\u81F4\uFF08\u76AE\u80A4\u4E3A\u534A\u900F\u660E\u53E0\u52A0\u4E3B\u9898\uFF0C\u89C1 #37\uFF09\u3002
-   display:none \u517C\u4F5C\u5C55\u5F00\u6001\u9ED8\u8BA4\uFF1B\u6298\u53E0\u6001\u7531\u5185\u8054\u6837\u5F0F\u663E\u5F0F display:block \u6253\u5F00\u3002 */
-.dshDesktopRailPad { position: absolute; display: none; background: var(--dsw-specific-sidebar-fill); pointer-events: none; }
 .dshDesktopChromeDrag { user-select: none; }
-.dshDesktopStatusBar { position: absolute; background: var(--dsw-specific-sidebar-fill); display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 11px; line-height: 1; color: var(--dsw-alias-label-secondary, currentColor); border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.25)); pointer-events: auto; user-select: none; }
+.dshDesktopStatusBar { position: absolute; display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 11px; line-height: 1; color: var(--dsw-alias-label-secondary, currentColor); border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.25)); pointer-events: auto; user-select: none; }
 .dshDesktopStatusDot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
 /* \u8BBE\u7F6E\u5F39\u7A97\u5DE6\u4FA7 tab \u5217\u53EF\u6EDA\u52A8\uFF08dsh \u4E0A\u6E38 navList \u65E0 overflow\uFF0Ctab \u591A\u4E86\u88AB\u622A\u65AD\uFF09\uFF1A
    \u7528\u5F39\u7A97\u7A33\u5B9A\u6807\u8BB0\u5B9A\u4F4D\uFF0C\u4E0D\u4F9D\u8D56 hash \u7C7B\u540D\u3002 */
@@ -503,10 +467,12 @@ function installAdvancedStyles() {
 function applyAdvancedShell(ctx, environment) {
   ctx.effect(() => {
     document.body.dataset.dshDesktopPlatform = environment.platform;
+    document.documentElement.dataset.platform = environment.platform;
     const removeStyles = installAdvancedStyles();
     return () => {
       removeStyles();
       delete document.body.dataset.dshDesktopPlatform;
+      delete document.documentElement.dataset.platform;
     };
   }, "desktop: advanced shell styles");
   ctx.effect(() => installLocalChrome(environment.platform), "desktop: local window chrome");
@@ -688,8 +654,9 @@ function registerDownloadsTab(ctx) {
   const root = ctx;
   root.inject(["sidebarRightTabs"], (sub) => {
     const disposers = [];
+    const isDisposer = (r) => typeof r === "function";
     const own = (r) => {
-      if (typeof r === "function") disposers.push(r);
+      if (isDisposer(r)) disposers.push(r);
     };
     try {
       const tabs = sub.sidebarRightTabs;

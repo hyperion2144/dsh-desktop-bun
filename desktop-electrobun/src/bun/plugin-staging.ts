@@ -106,8 +106,11 @@ export function stagePlugins(options: {
   desktopLayoutOnPhones?: boolean
   env?: Record<string, string | undefined>
   log?: (line: string) => void
+  /** 警告通道：缺包这类「供给断了但不致命」的事走这里（不传则回落 log） */
+  warn?: (line: string) => void
 }): StageResult {
   const log = options.log ?? ((): void => {})
+  const warn = options.warn ?? ((line: string): void => console.warn(line))
   const env = options.env ?? {}
   const pool = join(options.home, 'profiles', options.profile, 'node_modules')
   mkdirSync(pool, { recursive: true })
@@ -160,6 +163,12 @@ export function stagePlugins(options: {
       (missing.length > 0 ? ` | 缺包跳过：${missing.join('、')}` : '') +
       ` | 注入清单 ${injectFile}`,
   )
+  // 缺包不再纯静默：单独发一条警告，点名缺的包与补救办法（#20）
+  if (missing.length > 0) {
+    warn(
+      `警告：插件缺包跳过：${missing.join('、')}——缺的插件本次不注入；若来自子模块，先 git submodule update --init 拉取再启动`,
+    )
+  }
   return { pool, injectFile, staged, missing }
 }
 

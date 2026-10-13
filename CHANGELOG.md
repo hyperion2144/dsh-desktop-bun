@@ -16,6 +16,7 @@
 - 远程 dsh：接入远程地址（token 换会话 cookie），托盘一键切回本地。
 - 运行时管理：内置/已下载两种来源的发现与切换；下载走 npm/GitHub 目录；卸载进回收站。
 - 应用内更新检查（Electrobun 更新器，基址为本仓 Releases）。
+- 页面右键菜单补齐（#21）：在既有系统 role 项与链接项之上，新增工作区文件行「打开」、文件夹行「打开文件夹」（dsh ui-sidebar-files 的 data-files-entry/data-files-path 稳定标记 → Utils.openPath，路径只认绝对路径）；dev 构建（未打包）菜单垫底「打开 DevTools」（BrowserView.openDevTools），release 不出现；「刷新页面」更名「刷新」。
 - CI 每日定时全量兜底（#8）：build.yml 新增 schedule（UTC 18:30 = 北京 02:30）；main 打包链（三平台打包 / NSIS / 断言 / 冒烟）由每日自动验证，防 hutch 与 runner 镜像漂移导致的静默腐坏。
 
 ### Changed
@@ -29,9 +30,12 @@
 ### Fixed
 
 - 端口三类混显、只有上游可设（#22）：Profile 端口表只显一列「启动端口」（实为页面 origin 口）却拿它当上游输入框占位，lane 口只读、页面口无设置项、壳级转发器口写死 3091——dsh 实例上游口 / 页面口（loopback）/ lane（手机代理）三类口互相混淆。行契约改显式 page_port / upstream_port / lane_port 三列（台账补记 dataPort=上游口激活避让；未运行 profile 显配置/公式期望值，页面口显上次台账值或「启动时分配」）；三类口全部可设置：上游 profile_ports.<name>（既有）、页面口 profile_page_ports.<name>（新键，语义对齐 env DSH_SHELL_PAGE_PORT——请求值被占顺延，保存二次确认 + 常驻警示「换口＝换浏览器本地存储」）、lane profile_lane_ports.<name>（既有键改可编辑）、壳级转发器 lane_forwarder_port（新键，缺省回退遗留 lane_port 再缺省 3091，重启壳生效）；另修面板点号键 patch 新壳静默丢失（旧壳 Rust 会展开）：updateSettings 补 expandDottedPatch。
+- 手机布局插件未进 dev 与打包（#20）：mobile/dsh-mobile-nav 子模块未拉取时插件池缺 dsh-web-mobile，staging 只在汇总行尾部带一句「缺包跳过」纯静默——新增独立警告通道（缺包时单独一行点名缺的包与 `git submodule update --init` 补救命令，经壳 `console.warn` 输出）；assert-artifact 把 `plugins/dsh-web-mobile/package.json` 列入必带清单（漏拉子模块的构建硬失败）；README 两处补子模块拉取步骤；CI Checkout 已带 `submodules: recursive`（44f2c53）。
+- CI 检查覆盖面（#18）：check.yml 并入桌面插件门禁——`test:client`（含 main 已重写指向新壳 `carrier.ts` 的载体断言段）+ 全量 `tsc`（tsconfig strict 覆盖 src/client 全部 14 文件，契约补 `ctx.effect`、disposer 用类型谓词收窄，零豁免）；新增 Windows 兜底 job（壳 `bun test` + 插件 `test:client` 双平台可跑性），首跑即抓到 `test-client.mjs` 裸路径动态 import 的移植性 bug（`pathToFileURL` 修复），POSIX-only 用例按平台条件 skip 并在票内留档清单；同步修正 `desktop-plugin/README.md` 旧壳构建/发布链说明；`build:client` 定性为构建产出、不进检查门禁。
 - Windows 安装版启动失败（#1）：DSH_HOME 缺省改走 `dshHome()`（Windows 无 HOME 时旧写法退化成相对路径 `.dsh`，日志/设置落进安装目录）；profile 依赖摊平改用 `lstatSync` 判存在——悬空链接不再撞 EEXIST，被旧版本真实目录占住的运行时包就地替换；指错方向的链接（含旧壳残留，不分公司）一律删掉重指到当前运行时树。
 - profile 依赖摊平落点改共享池（#13）：reconcile 不再把运行时树链进各 profile 自己的 `node_modules`，改链到共享池 `profiles/node_modules`（对齐旧壳不变量「共享包在父级 node_modules，Node 向上解析」），多 profile 只维护一份链接、切运行时全 profile 一致重指（设置面板切运行时立即重指，不等下次启动）；启动与切运行时都会幂等清掉壳此前写进 per-profile 池的运行时链接（防近者优遮蔽共享层造成跨 profile 版本错配），pnpm 自有链接（含 store 暂时悬空）与用户资产不动。
 - 内置 dsh 运行时按声明供给（#16）：新增 `desktop-electrobun/builtin-runtime.json` 声明 dsh 与 pnpm 的固定版本；prepare:bundle 按声明物化内置树（已就绪复用 / npm 下载 / `DSH_SHELL_BUILTIN_SOURCE` 显式逃生口），落盘版本与声明不符直接失败；assert-artifact 对产物里的内置 dsh 版本与声明再对一遍；退役 build.yml 备树步骤与本机运行时拾取链。
+- 注入 chrome 条带与侧栏色差、折叠侧栏未隐藏（#23）：条带不再填主题 token（上游实际绘制面不对应任何单一 token，实测即色差源），改为全透明拖拽带——红绿灯浮在侧栏 header 左侧空白区，透明层与任何主题同像素透出，色差从结构上消除；壳补设官方桌面信号 `html[data-platform]`（旧 Tauri 壳有、Electrobun 迁移丢失），ui-layout 据此 darwin 折叠=0px 全隐并由 shell.leading 座位提供官方「打开侧边栏/新会话」按钮；拖拽带折叠态收窄到红绿灯区（76px）不遮座位按钮，底部状态条随折叠隐藏；退役折叠加宽轨道与两侧补条等 #37 补偿逻辑。
 - client bundle 工厂 id 旧名致页面卡「Loading plugins」（#19）：插件改名 dsh-desktop-bun 后 build-client.mjs 的 banner id 仍是 dsh-desktop-tauriapp，模块系统按挂载名找不到工厂、回退单独加载再执行一遍 bundle，duplicate registration 抛错整页 boot 死循环；id 改回挂载名并在构建脚本注释里固化「工厂 id = 宿主挂载名」不变式。
 - Windows 插件 experimental-inspector 激活失败（#6）：preload 归一 fetch 后，上游仍用旧访问器描述符 spread+value 定义属性被 Bun 拒绝——spread 定义一并替换成干净数据属性；补丁幂等改带 rev 指纹（旧补丁机器能刷到新替换）；koffi 禁用补丁的替换锚行尾锚定，修复历次 rev 提升在实机上叠加 throw 的缺陷。
 - 修复 `npm run test:client`：dshDesktop 载体脚本测试改从 electrobun 壳的 `desktop-electrobun/src/bun/carrier.ts` 转译取材（旧壳 Rust 文件路径早已不存在，该测试自壳迁移起即不可跑），并同步 `platform-keyboard` / `desktop-browser-bridge` 的载体注释指认。

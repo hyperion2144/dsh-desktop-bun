@@ -110,7 +110,8 @@ describe('迁移 profile（旧壳 migrate_profile_inner）', () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  test('成功路径：复制文件、跳过 node_modules 与锁文件、重建依赖、包名换成 dsh-profile-<dest>', async () => {
+  // seedProfile 种的 link-out 软链在 Windows 无特权时建不了（需开发者模式）→ 平台 skip（#18 skip 清单）
+  test.skipIf(process.platform === 'win32')('成功路径：复制文件、跳过 node_modules 与锁文件、重建依赖、包名换成 dsh-profile-<dest>', async () => {
     const home = tempRoot()
     const src = seedProfile(home, 'desktop', (dir) => {
       writeFileSync(join(dir, 'stale.lock'), 'x')

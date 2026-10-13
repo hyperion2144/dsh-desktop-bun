@@ -35,19 +35,14 @@ macOS 首次打开若非公证版本，需右键「打开」；Windows 网络下
 ### 从源码构建
 
 ```bash
-npm run build:client        # 先构建插件 client（lib/client.js）
-cd desktop && npm install
-npm run build               # 等价 tauri build：macOS 出 .app/.dmg，Windows 出 .msi/.exe
+bun run build:client        # esbuild 打包 src/client → lib/client.js（构建产出，非检查门禁）
+bun run typecheck           # tsc --noEmit（strict）
+bun run test:client         # 断言门禁（download-intercept / platform-keyboard / carrier / composer-input-guard）
 ```
 
-内置 dsh 运行时由 `desktop/scripts/prepare-builtin-runtime.mjs` 准备（版本在脚本顶部 `BUILTIN_DSH_VERSION` 精确 pin，pnpm 亦精确 pin；本地与 CI 一致可复现）：
+旧 Tauri 壳（`desktop/`）已退役：应用构建/开发在 `desktop-electrobun/`（Electrobun/Bun 主进程 + CEF），见 [desktop-electrobun/README.md](desktop-electrobun/README.md)。
 
-```bash
-node desktop/scripts/prepare-builtin-runtime.mjs --variant latest   # 装内置依赖树 + Node sidecar
-node desktop/scripts/prepare-builtin-runtime.mjs --variant latest --skip-node   # 只重装依赖树
-```
-
-发布链：提交 → 三处升版本（`package.json` / `desktop/src-tauri/tauri.conf.json` / `desktop/src-tauri/Cargo.toml`）→ `git tag vX.Y.Z && git push` → CI 双平台构建并出 draft release → `gh release edit vX.Y.Z --draft=false --latest`。
+发布链：升版本（`desktop-electrobun/package.json`）→ `git tag vX.Y.Z && git push` → build.yml tag 触发三平台全量构建出 artifact（`*-setup.exe` / `*.dmg` / `linux-*.tar.gz`，`assert:artifact` 复核内置运行时与 version.json）；draft release 自动发布 job 尚未启用（build.yml 内注释留档），发布目前为人工步骤。
 
 ### 作为 DSH 插件 / 技能使用
 
