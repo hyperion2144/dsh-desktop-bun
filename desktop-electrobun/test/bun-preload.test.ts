@@ -29,12 +29,35 @@ afterEach(() => {
   for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-/** 上游 inspector 里那三行的真实形态（真正被替换的是第三行）。 */
+
+/** 守卫行原文（preload 用它定位）。 */
+const INSPECTOR_GUARD_LINE =
+  '\tif (descriptor !== void 0 && !("value" in descriptor)) throw new Error("inspector: globalThis.fetch is an accessor and cannot be observed safely");'
+/** rev≤6 旧补丁的归一块产物（无 rev 指纹、未修 spread 定义）。 */
+const INSPECTOR_LEGACY_NORMALIZE = [
+  '\t// bun-preload: fetch 访问器归一（billion-context 装的是访问器，inspector 原本会硬拒）',
+  '\tif (descriptor !== void 0 && !("value" in descriptor)) {',
+  '\t\tObject.defineProperty(globalThis, "fetch", { value: original, writable: true, configurable: true, enumerable: descriptor.enumerable ?? true });',
+  '\t}',
+].join('\n')
+/** 上游 spread 定义块（#6：descriptor 是 const，旧 get/set 不能与 value 共存 → Bun 拒绝）。 */
+const INSPECTOR_SPREAD_FROM = '\t} : {\n\t\t...descriptor,\n\t\tvalue: observedFetch\n\t});'
+const INSPECTOR_SPREAD_TO = '\t} : {\n\t\tvalue: observedFetch,\n\t\twritable: true,\n\t\tconfigurable: true\n\t});'
+/** 上游 inspector 的真实形态：descriptor/original + 守卫行 + spread 定义块。 */
 const INSPECTOR_UPSTREAM = [
   'const descriptor = Object.getOwnPropertyDescriptor(globalThis, "fetch");',
   'const original = globalThis.fetch;',
   'if (typeof original !== "function") throw new Error("inspector: globalThis.fetch is unavailable");',
-  '\tif (descriptor !== void 0 && !("value" in descriptor)) throw new Error("inspector: globalThis.fetch is an accessor and cannot be observed safely");',
+  'const observedFetch = original;',
+  INSPECTOR_GUARD_LINE,
+  '\tObject.defineProperty(globalThis, "fetch", descriptor === void 0 ? {',
+  '\t\tvalue: observedFetch,',
+  '\t\twritable: true,',
+  '\t\tconfigurable: true',
+  '\t} : {',
+  '\t\t...descriptor,',
+  '\t\tvalue: observedFetch',
+  '\t});',
   'export const done = true;',
   '',
 ].join('\n')
@@ -96,6 +119,91 @@ describe('bun-preload Patch 12（inspector 的 fetch 访问器）', () => {
     expect(first.split('bun-preload: fetch 访问器归一').length - 1).toBe(1)
   })
 
+  test('spread 定义换成数据属性（#6：旧访问器描述符 spread+value 会被 Bun 拒）', () => {
+    const tree = tempTree()
+    writeInspector(tree, INSPECTOR_UPSTREAM)
+
+    const result = runPreload(tree)
+    const patched = readFileSync(inspectorPath(tree), 'utf8')
+
+    expect(result.stdout).toContain('Patch 12: fetch 访问器归一 applied')
+    expect(patched).not.toContain('...descriptor')
+    expect(patched).toContain(INSPECTOR_SPREAD_TO)
+    // spread 修复不碍归一块：归一那行还在，同文件其余行不动。
+    expect(patched).toContain('Object.defineProperty(globalThis, "fetch", { value: original, writable: true, configurable: true, enumerable: descriptor.enumerable ?? true })')
+    expect(patched).toContain('export const done = true;')
+  })
+
+  test('rev≤6 旧补丁机器：旧归一块刷新成带 rev 指纹的新补丁，并补上 spread 修复', () => {
+    const tree = tempTree()
+    writeInspector(tree, INSPECTOR_UPSTREAM.replace(INSPECTOR_GUARD_LINE, INSPECTOR_LEGACY_NORMALIZE))
+
+    const result = runPreload(tree)
+    const patched = readFileSync(inspectorPath(tree), 'utf8')
+
+    expect(result.stdout).toContain('Patch 12: fetch 访问器归一 applied')
+    expect(patched).toMatch(/bun-preload-rev:\d+/)
+    // 旧产物首行（无 rev 前缀）必须被换掉，否则下个 rev 还是刷不动。
+    expect(patched).not.toContain('\t// bun-preload: fetch 访问器归一（')
+    expect(patched).not.toContain('...descriptor')
+    expect(patched).toContain(INSPECTOR_SPREAD_TO)
+  })
+
+  test('rev≥7 产物（归一形态、无守卫行）：只刷指纹，不误判上游版本不符', () => {
+    const tree = tempTree()
+    const patchedRev6 = [
+      'const descriptor = Object.getOwnPropertyDescriptor(globalThis, "fetch");',
+      'const original = globalThis.fetch;',
+      'const observedFetch = original;',
+      '\t// bun-preload-rev:6 bun-preload: fetch 访问器归一（billion-context 装的是访问器，inspector 原本会硬拒）',
+      '\tif (descriptor !== void 0 && !("value" in descriptor)) {',
+      '\t\tObject.defineProperty(globalThis, "fetch", { value: original, writable: true, configurable: true, enumerable: descriptor.enumerable ?? true });',
+      '\t}',
+      '\t} : {',
+      '\t\tvalue: observedFetch,',
+      '\t\twritable: true,',
+      '\t\tconfigurable: true',
+      '\t});',
+    ].join('\n')
+    writeInspector(tree, patchedRev6)
+
+    const result = runPreload(tree)
+    const patched = readFileSync(inspectorPath(tree), 'utf8')
+
+    expect(result.stderr).not.toContain('上游版本不符')
+    expect(patched).toMatch(/bun-preload-rev:\d+/)
+    expect(patched).not.toMatch(/bun-preload-rev:6(?!\d)/)
+    expect(patched).not.toContain('...descriptor')
+  })
+
+  test('结果层：访问器 fetch 下 import 打过补丁的 inspector 不抛（#6 真实失败面）', () => {
+    const tree = tempTree()
+    writeInspector(tree, INSPECTOR_UPSTREAM)
+    runPreload(tree)
+
+    // 真 bun 子进程：先把 fetch 装成访问器（Windows 报障形态），再 import 打过补丁的 inspector。
+    const script = join(tree, 'probe.mjs')
+    writeFileSync(script, [
+      'Object.defineProperty(globalThis, "fetch", {',
+      '  get() { return () => "fetched" },',
+      '  configurable: true,',
+      '})',
+      'await import("./node_modules/@deepseek-ai/dsh-experimental-inspector/lib/index.js")',
+      'const d = Object.getOwnPropertyDescriptor(globalThis, "fetch")',
+      'if (!d || !("value" in d) || !d.writable || !d.configurable) throw new Error("fetch not a writable data property")',
+      'globalThis.fetch = async () => "overwritten"',
+      'console.log("probe-ok:" + await globalThis.fetch())',
+    ].join('\n'))
+    const child = Bun.spawnSync({
+      cmd: [process.execPath, '--no-install', script],
+      cwd: tree,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(child.stderr.toString()).not.toContain('Invalid property')
+    expect(child.stdout.toString()).toContain('probe-ok:overwritten')
+  })
+
   test('上游文本变了只警告、不动文件（下次上游自带修复也不会被我们覆盖）', () => {
     const tree = tempTree()
     const drifted = INSPECTOR_UPSTREAM.replace('cannot be observed safely', 'cannot be observed at all')
@@ -114,5 +222,70 @@ describe('bun-preload Patch 12（inspector 的 fetch 访问器）', () => {
     expect(result.code).toBe(0)
     expect(result.stdout).toContain('child-ok')
     expect(result.stderr).not.toContain('Patch 12: 未找到上游 accessor 检查文本')
+  })
+})
+
+describe('bun-preload Patch 6（koffi 禁用，rev 提升防叠加）', () => {
+  function koffiPath(tree: string): string {
+    return join(tree, 'node_modules', '@deepseek-ai', 'dsh-win32-process', 'lib', 'index.js')
+  }
+
+  test('rev≤6 旧产物：刷指纹，不再叠一层 throw（行尾锚定修复）', () => {
+    const tree = tempTree()
+    const legacy = [
+      "function loadWin32ProcessBindings() { if (typeof Bun !== 'undefined') throw new Error('koffi not available on Bun runtime'); // bun-preload-rev:6",
+      'const x = 1;',
+    ].join('\n')
+    mkdirSync(dirname(koffiPath(tree)), { recursive: true })
+    writeFileSync(koffiPath(tree), legacy, 'utf8')
+
+    const result = runPreload(tree)
+    const patched = readFileSync(koffiPath(tree), 'utf8')
+
+    expect(result.stdout).toContain('Patch 6:')
+    // 层数不增：throw 恰好一处；旧 rev 注释统一刷成当前 rev。
+    expect(patched.split('koffi not available on Bun runtime').length - 1).toBe(1)
+    expect(patched).not.toContain('bun-preload-rev:6')
+    expect(patched).not.toMatch(/bun-preload-rev:6(?!\d)/)
+  })
+
+  test('实机 4 层叠加产物：刷指纹收敛，层数不再增长', () => {
+    const tree = tempTree()
+    const layer = " if (typeof Bun !== 'undefined') throw new Error('koffi not available on Bun runtime');"
+    const layered = [
+      'function loadWin32ProcessBindings() {' + layer + ' // bun-preload-rev:6' + layer + ' // bun-preload-rev:5' + layer + ' // bun-preload-rev:4' + layer + ' // bun-preload-rev:3',
+      'const x = 1;',
+    ].join('\n')
+    mkdirSync(dirname(koffiPath(tree)), { recursive: true })
+    writeFileSync(koffiPath(tree), layered, 'utf8')
+
+    const result = runPreload(tree)
+    const patched = readFileSync(koffiPath(tree), 'utf8')
+
+    expect(result.stdout).toContain('Patch 6:')
+    expect(patched.split('koffi not available on Bun runtime').length - 1).toBe(4)
+    expect(patched).not.toMatch(/bun-preload-rev:[3-6](?!\d)/)
+    expect(patched).toMatch(/bun-preload-rev:\d+/)
+  })
+
+  test('原始上游：函数头单行化打上 throw（FROM 行尾锚定不误伤产物形态）', () => {
+    const tree = tempTree()
+    const upstream = [
+      'function loadWin32ProcessBindings() {',
+      '  const koffi = require("koffi")',
+      '  return koffi',
+      '}',
+    ].join('\n')
+    mkdirSync(dirname(koffiPath(tree)), { recursive: true })
+    writeFileSync(koffiPath(tree), upstream, 'utf8')
+
+    const result = runPreload(tree)
+    const patched = readFileSync(koffiPath(tree), 'utf8')
+
+    expect(result.stdout).toContain('Patch 6: koffi 禁用 applied')
+    const head = patched.split('\n')[0]
+    expect(head).toContain('function loadWin32ProcessBindings() { if (typeof Bun')
+    expect(head).toMatch(/bun-preload-rev:\d+$/)
+    expect(patched).toContain('  const koffi = require("koffi")')
   })
 })

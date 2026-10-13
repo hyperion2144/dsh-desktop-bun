@@ -309,7 +309,7 @@ process.env.DSH_BUN_COMPAT_DISABLE_HMR = "1";
 // 抹掉——实测：黑盒测试宿主退出后，运行中的窗口终端立刻变回「进程已退出（1）」、inspector
 // 也起不来。改为「打上就不动」：目标文件是 dispatcher 形态（Bun 走 shim、其它运行时转
 // index.original.js），对 Node 无害；每条补丁带 rev 指纹，rev 变了才重写。
-const PATCH_REV = 6;
+const PATCH_REV = 7;
 const REV_MARK = `bun-preload-rev:${PATCH_REV}`;
 /** 已处理的文件，仅用于结尾汇总日志。 */
 const _patches = new Set();
@@ -323,6 +323,11 @@ function writePatch(filePath, content) {
 /** 该文件是否已经是当前 rev 的产物。 */
 function hasCurrentRev(filePath) {
   try { return readFileSync(filePath, 'utf8').includes(REV_MARK); } catch { return false; }
+}
+
+/** 旧 rev 产物升级：把文件里所有旧 rev 指纹注释刷成当前 rev（形态不变）。 */
+function bumpRev(content) {
+  return content.replace(/\/\/ bun-preload-rev:\d+/g, `// ${REV_MARK}`);
 }
 
 // Find DSH root from preload location
@@ -355,8 +360,10 @@ for (const target of packageTargets('@deepseek-ai/dsh-ptc-runtime-node/lib/index
 // ── Patch 6: Disable koffi (dsh-win32-process) on Bun ──
 // koffi loads but produces broken N-API bindings on Bun (JavaScriptCore, not V8).
 // Make loadWin32ProcessBindings throw → probeWindowsJob returns false → fallback to child_process.spawn.
-const KOFFI_GUARD_FROM = 'function loadWin32ProcessBindings() {';
-const KOFFI_GUARD_TO = `function loadWin32ProcessBindings() { if (typeof Bun !== 'undefined') throw new Error('koffi not available on Bun runtime'); // ${REV_MARK}`;
+// 行尾锚定：TO 产物以函数头开头，若 FROM 不带 \n 会永久命中、每次 rev 提升叠一层
+// throw（实测上游实机已叠 4 层 rev:3-6）。带 \n 后产物落入下方「刷新指纹」分支。
+const KOFFI_GUARD_FROM = 'function loadWin32ProcessBindings() {\n';
+const KOFFI_GUARD_TO = `function loadWin32ProcessBindings() { if (typeof Bun !== 'undefined') throw new Error('koffi not available on Bun runtime'); // ${REV_MARK}\n`;
 for (const target of packageTargets('@deepseek-ai/dsh-win32-process/lib/index.js')) {
   if (hasCurrentRev(target)) {
     console.log(`[bun-preload] Patch 6: ${REV_MARK} 已就位 ${target}`);
@@ -366,7 +373,7 @@ for (const target of packageTargets('@deepseek-ai/dsh-win32-process/lib/index.js
   if (!src.includes(KOFFI_GUARD_FROM)) {
     // 同上：已是打过补丁的形态，只刷新 rev 指纹
     if (src.includes('koffi not available on Bun runtime')) {
-      writePatch(target, src.replace(/\/\/ bun-preload-rev:\d+/g, `// ${REV_MARK}`));
+      writePatch(target, bumpRev(src));
       console.log(`[bun-preload] Patch 6: ${REV_MARK} 已就位（刷新指纹）${target}`);
       continue;
     }
@@ -646,7 +653,7 @@ const APP_BOOT_RESOLVER_TO = [
 for (const target of packageTargets('@deepseek-ai/dsh-app-boot/lib/index.js')) {
   const source = readFileSync(target, 'utf8');
   if (source.includes('pluginResourceFallback')) {
-    if (!hasCurrentRev(target)) writePatch(target, source.replace(/\/\/ bun-preload-rev:\d+/g, `// ${REV_MARK}`));
+    if (!hasCurrentRev(target)) writePatch(target, bumpRev(source));
     console.log(`[bun-preload] Patch 10: ${REV_MARK} 已就位 ${target}`);
     continue;
   }
@@ -703,7 +710,7 @@ const LOADER_RESOLVE_HELPER = [
 for (const target of packageTargets('@deepseek-ai/cordis-plugin-loader/lib/index.js')) {
   const source = readFileSync(target, 'utf8');
   if (source.includes('__bunResolveFromBase')) {
-    if (!hasCurrentRev(target)) writePatch(target, source.replace(/\/\/ bun-preload-rev:\d+/g, `// ${REV_MARK}`));
+    if (!hasCurrentRev(target)) writePatch(target, bumpRev(source));
     console.log(`[bun-preload] Patch 11: ${REV_MARK} 已就位 ${target}`);
     continue;
   }
@@ -729,24 +736,62 @@ for (const target of packageTargets('@deepseek-ai/cordis-plugin-loader/lib/index
 const INSPECTOR_FETCH_GUARD =
   '\tif (descriptor !== void 0 && !("value" in descriptor)) throw new Error("inspector: globalThis.fetch is an accessor and cannot be observed safely");';
 const INSPECTOR_FETCH_MARK = 'bun-preload: fetch 访问器归一';
+// #6：descriptor 是 const，归一只改属性本身动不了它；上游随后把它 spread 进新描述符再叠 value，
+// Bun 直接拒绝（TypeError: Invalid property.  'value' present on property with getter or setter.）——
+// spread 定义也要一并换成干净数据属性。
 const INSPECTOR_FETCH_NORMALIZE = [
+  `\t// ${REV_MARK} ${INSPECTOR_FETCH_MARK}（billion-context 装的是访问器，inspector 原本会硬拒）`,
+  '\tif (descriptor !== void 0 && !("value" in descriptor)) {',
+  '\t\tObject.defineProperty(globalThis, "fetch", { value: original, writable: true, configurable: true, enumerable: descriptor.enumerable ?? true });',
+  '\t}',
+].join('\n');
+// rev≤6 时代的归一块（无 rev 指纹）：报障实机上就是它占着守卫行的位置。
+const INSPECTOR_FETCH_LEGACY = [
   `\t// ${INSPECTOR_FETCH_MARK}（billion-context 装的是访问器，inspector 原本会硬拒）`,
   '\tif (descriptor !== void 0 && !("value" in descriptor)) {',
   '\t\tObject.defineProperty(globalThis, "fetch", { value: original, writable: true, configurable: true, enumerable: descriptor.enumerable ?? true });',
   '\t}',
 ].join('\n');
+const INSPECTOR_FETCH_SPREAD_FROM = '\t} : {\n\t\t...descriptor,\n\t\tvalue: observedFetch\n\t});';
+const INSPECTOR_FETCH_SPREAD_TO = '\t} : {\n\t\tvalue: observedFetch,\n\t\twritable: true,\n\t\tconfigurable: true\n\t});';
 for (const target of packageTargets('@deepseek-ai/dsh-experimental-inspector/lib/index.js')) {
-  const source = readFileSync(target, 'utf8');
-  if (source.includes(INSPECTOR_FETCH_MARK)) {
+  if (hasCurrentRev(target)) {
     console.log(`[bun-preload] Patch 12: ${REV_MARK} 已就位 ${target}`);
     continue;
   }
-  if (!source.includes(INSPECTOR_FETCH_GUARD)) {
+  const source = readFileSync(target, 'utf8');
+  // 三种已知形态各自认领（rev 提升不能让已归一的机器被永久跳过）：
+  //  a) 原始上游：守卫行在 → 归一替换；
+  //  b) rev≤6 产物：旧归一块（无 rev 指纹）在 → 升级成当前归一块；
+  //  c) rev≥7 产物：归一形态（首行已带 rev 前缀）→ 只刷指纹。
+  let next;
+  if (source.includes(INSPECTOR_FETCH_GUARD)) {
+    next = source.replace(INSPECTOR_FETCH_GUARD, INSPECTOR_FETCH_NORMALIZE);
+  } else if (source.includes(INSPECTOR_FETCH_LEGACY)) {
+    next = source.replace(INSPECTOR_FETCH_LEGACY, INSPECTOR_FETCH_NORMALIZE);
+  } else if (source.includes(INSPECTOR_FETCH_MARK)) {
+    const refreshed = bumpRev(source);
+    if (refreshed === source) {
+      console.log(`[bun-preload] Patch 12: ${REV_MARK} 已就位 ${target}`);
+    } else {
+      writePatch(target, refreshed);
+      console.log(`[bun-preload] Patch 12: ${REV_MARK} 指纹已刷新 ${target}`);
+    }
+    continue;
+  } else {
     console.warn(`[bun-preload] Patch 12: 未找到上游 accessor 检查文本，跳过 ${target}（上游版本不符）`);
     continue;
   }
-  writePatch(target, source.replace(INSPECTOR_FETCH_GUARD, INSPECTOR_FETCH_NORMALIZE));
-  console.log(`[bun-preload] Patch 12: fetch 访问器归一 applied to ${target}`);
+  // spread 修复独立判定：锚漂了只 warn，不连坐归一（#6 审查采纳项）。
+  let spreadFixed = false;
+  if (next.includes(INSPECTOR_FETCH_SPREAD_FROM)) {
+    next = next.replace(INSPECTOR_FETCH_SPREAD_FROM, INSPECTOR_FETCH_SPREAD_TO);
+    spreadFixed = true;
+  } else {
+    console.warn(`[bun-preload] Patch 12: 未找到上游 spread 定义文本，跳过 spread 修复 ${target}（上游版本不符）`);
+  }
+  writePatch(target, next);
+  console.log(`[bun-preload] Patch 12: fetch 访问器归一 applied${spreadFixed ? '（含 spread 修复）' : ''} to ${target}`);
 }
 
-console.log(`[bun-preload] ${REV_MARK} 应用完成：stripTypeScriptTypes / node-addon-require-builtin 桩 / HMR 关闭 / Bun.Terminal PTY / xterm 同步写 / 插件展示元数据解析 / 插件说明符 baseUrl 解析 / inspector fetch 访问器归一（不还原）`);
+console.log(`[bun-preload] ${REV_MARK} 应用完成：stripTypeScriptTypes / node-addon-require-builtin 桩 / HMR 关闭 / Bun.Terminal PTY / xterm 同步写 / 插件展示元数据解析 / 插件说明符 baseUrl 解析 / inspector fetch 归一+spread 修复（不还原）`);
