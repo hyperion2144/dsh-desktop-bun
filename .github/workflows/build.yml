@@ -211,6 +211,21 @@ jobs:
           # 多轮 CI 实测：tar.partial 冻结、launcher 活着但不前进）。冒烟改为「装完后直接用
           # 包内 bun 跑 Resources/main.js」，与 mac launcher 的引导语义一致，覆盖安装器 + 载荷 + 服务面。
           $payloadRes = Join-Path $appRoot.FullName 'Resources'
+          # 载荷解压：不依赖上游自解压器（本 payload 上会卡死），用 zstd + tar 自行解开
+          $zst = Get-ChildItem $payloadRes -Filter *.tar.zst | Select-Object -First 1
+          if ($null -eq $zst) { throw '安装树里没有载荷归档（*.tar.zst）' }
+          $zstdDir = Join-Path $env:RUNNER_TEMP 'zstd'
+          $zip = Join-Path $zstdDir 'zstd.zip'
+          New-Item -ItemType Directory -Force -Path $zstdDir | Out-Null
+          Invoke-WebRequest -Uri 'https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-v1.5.6-win64.zip' -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $zstdDir -Force
+          $zstdExe = Get-ChildItem $zstdDir -Recurse -Filter zstd.exe | Select-Object -First 1
+          if ($null -eq $zstdExe) { throw 'zstd.exe 下载失败' }
+          & $zstdExe.FullName -d -f ($zst.FullName) -o (Join-Path $env:RUNNER_TEMP 'payload.tar')
+          if ($LASTEXITCODE -ne 0) { throw 'zstd 解压载荷失败' }
+          tar -xf (Join-Path $env:RUNNER_TEMP 'payload.tar') -C 'C:\dsh-smoke'
+          if ($LASTEXITCODE -ne 0) { throw 'tar 解包载荷失败' }
+          Write-Host '冒烟：载荷已解到 C:\dsh-smoke'
           $bunExe = Join-Path $payloadRes 'app\bun\bun.exe'
           $mainJs = Join-Path $payloadRes 'main.js'
           if (-not (Test-Path $bunExe)) { throw ("安装树里没有 bun.exe：{0}" -f $bunExe) }
