@@ -13,10 +13,13 @@ export function applyAdvancedShell(ctx: ClientContext, environment: DesktopClien
 
   ctx.effect(() => {
     document.body.dataset.dshDesktopPlatform = environment.platform
+    // 官方桌面契约：html[data-platform]（旧 Tauri 壳即设，Electrobun 迁移时丢失，#23）
+    document.documentElement.dataset.platform = environment.platform
     const removeStyles = installAdvancedStyles()
     return () => {
       removeStyles()
       delete document.body.dataset.dshDesktopPlatform
+      delete document.documentElement.dataset.platform
     }
   }, 'desktop: advanced shell styles')
 
