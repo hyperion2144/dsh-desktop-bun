@@ -227,10 +227,14 @@ jobs:
           tar -xf (Join-Path $env:RUNNER_TEMP 'payload.tar') -C 'C:\dsh-smoke'
           if ($LASTEXITCODE -ne 0) { throw 'tar 解包载荷失败' }
           Write-Host '冒烟：载荷已解到 C:\dsh-smoke'
-          $bunExe = Join-Path $payloadRes 'app\bun\bun.exe'
+          $bunExe = Get-ChildItem $payloadRes -Recurse -Filter bun.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $bunExe) {
+            Get-ChildItem (Join-Path $payloadRes 'app') -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 24 | ForEach-Object { Write-Host ("app 内：{0}" -f $_.FullName.Substring($payloadRes.Length)) }
+            throw "载荷里找不到 bun.exe"
+          }
           $mainJs = Join-Path $payloadRes 'main.js'
-          if (-not (Test-Path $bunExe)) { throw ("安装树里没有 bun.exe：{0}" -f $bunExe) }
           if (-not (Test-Path $mainJs)) { throw ("安装树里没有 main.js：{0}" -f $mainJs) }
+          Write-Host ("冒烟：bun = {0}" -f $bunExe.FullName)
           $log2 = Join-Path $env:RUNNER_TEMP 'smoke-payload.log'
           Write-Host ("冒烟：直接拉起包内载荷：{0} {1}" -f $bunExe, $mainJs)
           Start-Process -FilePath $bunExe -ArgumentList "`"$mainJs`"" -WorkingDirectory $payloadRes -RedirectStandardOutput $log2 -RedirectStandardError ($log2 + '.err')
