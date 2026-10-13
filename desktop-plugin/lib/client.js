@@ -1437,6 +1437,31 @@ function PfBtn({
     }
   );
 }
+function PortCell({
+  testId,
+  placeholder,
+  value,
+  onChange,
+  onEnter,
+  onSave
+}) {
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+      "input",
+      {
+        placeholder,
+        style: { ...INPUT_BASE_STYLE, width: 84 },
+        "data-desktop-settings": testId,
+        value,
+        onChange: (e) => onChange(e.target.value),
+        onKeyDown: (e) => {
+          if (e.key === "Enter") onEnter();
+        }
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", style: { marginLeft: 6 }, onClick: onSave, children: "\u4FDD\u5B58" })
+  ] });
+}
 function showToast(text, ok) {
   const el = document.createElement("div");
   el.style.cssText = `position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:999999;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:500;max-width:480px;box-shadow:0 4px 12px rgba(0,0,0,.4);cursor:pointer;backdrop-filter:blur(8px);${ok ? "background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.6);color:#4ade80" : "background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.6);color:#f87171"}`;
@@ -1489,6 +1514,9 @@ function DesktopSettingsPanel() {
   const [profilePortsStatus, setProfilePortsStatus] = (0, import_react3.useState)({ state: "loading", text: "\u52A0\u8F7D\u4E2D\u2026" });
   const [profilePortInputs, setProfilePortInputs] = (0, import_react3.useState)({});
   const [profilePortBoxNote, setProfilePortBoxNote] = (0, import_react3.useState)(null);
+  const [profileLaneInputs, setProfileLaneInputs] = (0, import_react3.useState)({});
+  const [profilePageInputs, setProfilePageInputs] = (0, import_react3.useState)({});
+  const [forwarderInput, setForwarderInput] = (0, import_react3.useState)("");
   const [migrationSource, setMigrationSource] = (0, import_react3.useState)("");
   const [migrationDest, setMigrationDest] = (0, import_react3.useState)("");
   const [migrationRunning, setMigrationRunning] = (0, import_react3.useState)(false);
@@ -1612,6 +1640,21 @@ function DesktopSettingsPanel() {
           desktop_layout_on_phones: d.desktop_layout_on_phones ?? null,
           prevent_sleep: d.prevent_sleep ?? null
         });
+        const forwarderSaved = ns.lane_forwarder_port;
+        setForwarderInput(typeof forwarderSaved === "number" && forwarderSaved > 0 ? String(forwarderSaved) : "");
+        const savedInputs = (key) => {
+          const raw = ns[key];
+          const out = {};
+          if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+            for (const [k, n] of Object.entries(raw)) {
+              if (typeof n === "number" && n > 0) out[k] = String(n);
+            }
+          }
+          return out;
+        };
+        setProfilePortInputs(savedInputs("profile_ports"));
+        setProfileLaneInputs(savedInputs("profile_lane_ports"));
+        setProfilePageInputs(savedInputs("profile_page_ports"));
         if (d.profiles.length > 0) {
           const first = d.profiles[0];
           if (first) {
@@ -1770,11 +1813,36 @@ function DesktopSettingsPanel() {
       }
     })();
   };
-  const handleSaveProfilePort = (profile) => {
-    const raw = profilePortInputs[profile] ?? "";
+  const parsePortInput = (raw) => {
     const v = Number(raw);
-    if (!raw || Number.isNaN(v) || v < 1 || v > 65535) return;
-    void nsSave({ [`profile_ports.${profile}`]: v }).then(() => setProfilePortBoxNote(`${profile} \u7AEF\u53E3\u5DF2\u6539\u4E3A ${v}\uFF1B\u91CD\u542F\u8BE5 profile \u751F\u6548\u3002`)).catch((e) => setProfilePortBoxNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`));
+    return !raw || Number.isNaN(v) || v < 1 || v > 65535 ? null : v;
+  };
+  const savePortSetting = (key, v, note) => {
+    void nsSave({ [key]: v }).then(() => setProfilePortBoxNote(note)).catch((e) => setProfilePortBoxNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`));
+  };
+  const handleSaveProfilePort = (profile) => {
+    const v = parsePortInput(profilePortInputs[profile] ?? "");
+    if (v === null) return;
+    savePortSetting(`profile_ports.${profile}`, v, `${profile} \u4E0A\u6E38\u7AEF\u53E3\u5DF2\u6539\u4E3A ${v}\uFF1B\u91CD\u542F\u8BE5 profile \u751F\u6548\u3002`);
+  };
+  const handleSaveProfileLanePort = (profile) => {
+    const v = parsePortInput(profileLaneInputs[profile] ?? "");
+    if (v === null) return;
+    savePortSetting(`profile_lane_ports.${profile}`, v, `${profile} lane \u7AEF\u53E3\u5DF2\u6539\u4E3A ${v}\uFF1B\u91CD\u542F\u8BE5 profile \u751F\u6548\u3002`);
+  };
+  const handleSaveProfilePagePort = (profile) => {
+    const v = parsePortInput(profilePageInputs[profile] ?? "");
+    if (v === null) return;
+    const ok = window.confirm(
+      `${profile} \u9875\u9762\u53E3\u5C06\u6539\u4E3A ${v}\uFF1A\u6362\u53E3\uFF1D\u6362\u6D4F\u89C8\u5668\u672C\u5730\u5B58\u50A8\uFF08localStorage/IndexedDB \u7559\u5728\u65E7\u53E3\uFF09\u3002\u786E\u8BA4\u4FEE\u6539\uFF1F`
+    );
+    if (!ok) return;
+    savePortSetting(`profile_page_ports.${profile}`, v, `${profile} \u9875\u9762\u53E3\u5DF2\u6539\u4E3A ${v}\uFF1B\u91CD\u542F\u8BE5 profile \u751F\u6548\u3002`);
+  };
+  const handleSaveForwarderPort = () => {
+    const v = parsePortInput(forwarderInput.trim());
+    if (v === null) return;
+    savePortSetting("lane_forwarder_port", v, `lane \u8F6C\u53D1\u5668\u7AEF\u53E3\u5DF2\u6539\u4E3A ${v}\uFF1B\u91CD\u542F\u58F3\u751F\u6548\u3002`);
   };
   const handleSaveConcurrency = () => {
     const v = Math.max(1, Math.min(32, parseInt(concurrencyInput, 10) || 3));
@@ -2090,38 +2158,60 @@ function DesktopSettingsPanel() {
       /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u5207\u6362 Profile \u4F1A\u4EE5\u76EE\u6807 profile \u91CD\u542F dsh web\u3002" })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "Profile \u7AEF\u53E3", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { ...ROW_STYLE, marginBottom: 10 }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { style: LABEL_STYLE, children: "\u58F3 lane \u8F6C\u53D1\u5668\u53E3\uFF08\u91CD\u542F\u58F3\u751F\u6548\uFF09" }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+          "input",
+          {
+            style: { ...INPUT_BASE_STYLE, width: 84 },
+            "data-desktop-settings": "lane-forwarder-port",
+            placeholder: "3091",
+            value: forwarderInput,
+            onChange: (e) => setForwarderInput(e.target.value),
+            onKeyDown: (e) => {
+              if (e.key === "Enter") handleSaveForwarderPort();
+            }
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveForwarderPort, children: "\u4FDD\u5B58" })
+      ] }),
       profilePortsStatus.state === "ok" ? /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("table", { style: { width: "100%", fontSize: 12, borderCollapse: "collapse" }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("tr", { children: ["Profile", "\u542F\u52A8\u7AEF\u53E3", "Lane \u7AEF\u53E3", "\u72B6\u6001", ""].map((h) => /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("th", { style: { textAlign: "left" }, children: h }, h)) }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("tr", { children: ["Profile", "dsh \u7AEF\u53E3\uFF08\u4E0A\u6E38\uFF09", "\u9875\u9762\u53E3\uFF08loopback\uFF09", "Lane \u7AEF\u53E3", "\u72B6\u6001", ""].map((h) => /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("th", { style: { textAlign: "left" }, children: h }, h)) }) }),
         /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("tbody", { children: profilePorts.map((r) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("tr", { children: [
           /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { children: r.profile }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("td", { children: [
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-              "input",
-              {
-                placeholder: String(r.port),
-                style: { ...INPUT_BASE_STYLE, width: 84 },
-                "data-desktop-settings": `profile-port-${r.profile}`,
-                value: profilePortInputs[r.profile] ?? "",
-                onChange: (e) => {
-                  const v = e.target.value;
-                  setProfilePortInputs((prev) => ({ ...prev, [r.profile]: v }));
-                },
-                onKeyDown: (e) => {
-                  if (e.key === "Enter") handleSaveProfilePort(r.profile);
-                }
-              }
-            ),
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-              PfBtn,
-              {
-                variant: "ghost",
-                style: { marginLeft: 6 },
-                onClick: () => handleSaveProfilePort(r.profile),
-                children: "\u4FDD\u5B58"
-              }
-            )
-          ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { children: r.lane_port }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+            PortCell,
+            {
+              testId: `profile-port-${r.profile}`,
+              placeholder: String(r.upstream_port),
+              value: profilePortInputs[r.profile] ?? "",
+              onChange: (v) => setProfilePortInputs((prev) => ({ ...prev, [r.profile]: v })),
+              onEnter: () => handleSaveProfilePort(r.profile),
+              onSave: () => handleSaveProfilePort(r.profile)
+            }
+          ) }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+            PortCell,
+            {
+              testId: `profile-page-port-${r.profile}`,
+              placeholder: r.page_port > 0 ? String(r.page_port) : "\u542F\u52A8\u65F6\u5206\u914D",
+              value: profilePageInputs[r.profile] ?? "",
+              onChange: (v) => setProfilePageInputs((prev) => ({ ...prev, [r.profile]: v })),
+              onEnter: () => handleSaveProfilePagePort(r.profile),
+              onSave: () => handleSaveProfilePagePort(r.profile)
+            }
+          ) }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+            PortCell,
+            {
+              testId: `profile-lane-port-${r.profile}`,
+              placeholder: String(r.lane_port),
+              value: profileLaneInputs[r.profile] ?? "",
+              onChange: (v) => setProfileLaneInputs((prev) => ({ ...prev, [r.profile]: v })),
+              onEnter: () => handleSaveProfileLanePort(r.profile),
+              onSave: () => handleSaveProfileLanePort(r.profile)
+            }
+          ) }),
           /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
             "td",
             {
@@ -2135,7 +2225,8 @@ function DesktopSettingsPanel() {
         ] }, r.profile)) })
       ] }) : profilePortsStatus.state === "error" ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DANGER_NOTE_STYLE, children: profilePortsStatus.text }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: profilePortsStatus.text ?? "\u52A0\u8F7D\u4E2D\u2026" }),
       profilePortBoxNote && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: profilePortBoxNote }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "web \u56FA\u5B9A\u9ED8\u8BA4 3080 \xB7 desktop \u56FA\u5B9A\u9ED8\u8BA4 3081 \xB7 \u5176\u4F59\u81EA\u52A8\u5206\u914D\uFF1Blane \u540C\u89C4\u5219\u9519\u5F00\uFF083092 \u8D77\uFF09\u3002\u6539\u52A8\u540E\u91CD\u542F\u8BE5 profile \u751F\u6548\u3002" })
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u4E0A\u6E38\uFF08dsh \u5B9E\u4F8B\uFF09\uFF1Aweb 3080 \xB7 desktop 3081 \xB7 \u5176\u4F59 3082 \u8D77\u6563\u5217\u907F\u8BA9\uFF1Blane\uFF08\u624B\u673A\u4EE3\u7406\uFF09\uFF1Aweb 3092 \xB7 desktop 3093 \xB7 \u5176\u4F59 3094 \u8D77\u6563\u5217\uFF1B\u9875\u9762\u53E3\uFF08loopback origin\uFF09\uFF1A6390 \u8D77 40 \u4E2A\u987A\u5EF6\u3002\u6539\u52A8\u540E\u91CD\u542F\u8BE5 profile \u751F\u6548\uFF1B \u8F93\u5165\u6846\u663E\u793A\u7684\u662F\u5DF2\u4FDD\u5B58\u7684\u671F\u671B\u503C\uFF0C\u7070\u5B57 placeholder \u662F\u5F53\u524D\u5B9E\u9645\u503C\u3002" }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DANGER_NOTE_STYLE, children: "\u26A0\uFE0F \u6539\u9875\u9762\u53E3\uFF1D\u6362\u6D4F\u89C8\u5668\u672C\u5730\u5B58\u50A8\uFF1AlocalStorage / IndexedDB / \u767B\u5F55\u6001\u7559\u5728\u65E7\u7AEF\u53E3\uFF0C\u4E0D\u4F1A\u8DDF\u968F\u5230\u65B0\u53E3\uFF1B\u8F6C\u53D1\u5668\u53E3\u6539\u52A8\u9700\u91CD\u542F\u58F3\u3002" })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u8FC1\u79FB Profile", children: [
       /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: LABEL_STYLE, children: "\u6E90 profile \u2192 \u76EE\u6807 profile\uFF08\u5168\u91CF\u590D\u5236\uFF1B\u76EE\u6807\u5DF2\u5B58\u5728\u9700\u8986\u76D6\u786E\u8BA4\uFF09" }),

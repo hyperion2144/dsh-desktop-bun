@@ -76,6 +76,19 @@ describe('normalizeSettings', () => {
     expect(normalizeSettings({ profile_ports: {} }).profilePorts).toBeUndefined()
   })
 
+  test('页面口表与壳转发器口：认两种键名，坏条目丢弃', () => {
+    const settings = normalizeSettings({
+      profile_page_ports: { desktop: 6391, bad: 'x' },
+      lane_forwarder_port: 3095,
+    })
+    expect(settings.profilePagePorts).toEqual({ desktop: 6391 })
+    expect(settings.laneForwarderPort).toBe(3095)
+    const camel = normalizeSettings({ profilePagePorts: { web: 6400 }, laneForwarderPort: 3096 })
+    expect(camel.profilePagePorts).toEqual({ web: 6400 })
+    expect(camel.laneForwarderPort).toBe(3096)
+    expect(normalizeSettings({ profile_page_ports: {} }).profilePagePorts).toBeUndefined()
+    expect(normalizeSettings({ lane_forwarder_port: 70_000 }).laneForwarderPort).toBeUndefined()
+  })
   test('通知：14 条场景补齐，用户改动保留，多余键丢掉', () => {
     const settings = normalizeSettings({
       notifications: {
@@ -116,6 +129,8 @@ describe('serializeSettings', () => {
       active_profile: 'web',
       port: 3080,
       profile_ports: { web: 3080, desktop: 3081 },
+      profile_page_ports: { desktop: 6391 },
+      lane_forwarder_port: 3095,
       proxy_mode: 'manual',
       proxy_url: 'socks5://127.0.0.1:1080',
       notifications: { dnd: { on: true } },
@@ -124,6 +139,8 @@ describe('serializeSettings', () => {
     const round = normalizeSettings(JSON.parse(JSON.stringify(serializeSettings(original))))
     expect(round.activeProfile).toBe('web')
     expect(round.profilePorts).toEqual({ web: 3080, desktop: 3081 })
+    expect(round.profilePagePorts).toEqual({ desktop: 6391 })
+    expect(round.laneForwarderPort).toBe(3095)
     expect(round.proxyUrl).toBe('socks5://127.0.0.1:1080')
     expect(round.preventSleep).toBe(false)
     expect(round.notifications.dnd.on).toBe(true)
@@ -273,6 +290,22 @@ describe('loadSettings / saveSettings', () => {
     const raw = JSON.parse(readFileSync(settingsPath(home), 'utf8'))
     expect(raw.prevent_sleep).toBe(false)
     expect(raw.download_concurrency).toBe(5)
+  })
+
+  test('updateSettings 展开点号键（页面按旧壳习惯发 profile_ports.<name>）', () => {
+    const home = tempHome()
+    saveSettings(home, normalizeSettings({ profile_ports: { web: 3080 }, profile_lane_ports: { web: 3092 } }))
+    const next = updateSettings(home, {
+      'profile_ports.web': 4000,
+      'profile_lane_ports.web': 4092,
+      'profile_page_ports.desktop': 6391,
+    })
+    expect(next.profilePorts).toEqual({ web: 4000 })
+    expect(next.profileLanePorts).toEqual({ web: 4092 })
+    expect(next.profilePagePorts).toEqual({ desktop: 6391 })
+    // 整表写法与点号键混用：点号键并进同一张表，不互相覆盖
+    const merged = updateSettings(home, { profile_ports: { desktop: 3081 }, 'profile_ports.web': 4001 })
+    expect(merged.profilePorts).toEqual({ desktop: 3081, web: 4001 })
   })
 })
 

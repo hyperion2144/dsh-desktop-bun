@@ -70,6 +70,8 @@ export interface DesktopSettings {
   remoteSession?: string
   lanePort?: number
   cloudflaredBin?: string
+  /** 壳级 lane 转发器监听口（新增可选键；缺省回退遗留 lane_port，再缺省 3091）。 */
+  laneForwarderPort?: number
   proxyMode?: ProxyMode
   proxyUrl?: string
   noProxy?: string
@@ -83,6 +85,8 @@ export interface DesktopSettings {
   preventSleep?: boolean
   profilePorts?: Record<string, number>
   profileLanePorts?: Record<string, number>
+  /** 页面口（loopback origin）偏好：语义对齐 env DSH_SHELL_PAGE_PORT——请求值，被占顺延（改口=换本地存储隔离空间）。 */
+  profilePagePorts?: Record<string, number>
   dshMode?: DshMode
   dshRuntime?: string
   runtimeSource?: RuntimeSource
@@ -111,6 +115,7 @@ export function serializeSettings(settings: DesktopSettings): Record<string, unk
   put('remote_session', settings.remoteSession)
   put('lane_port', settings.lanePort)
   put('cloudflared_bin', settings.cloudflaredBin)
+  put('lane_forwarder_port', settings.laneForwarderPort)
   put('proxy_mode', settings.proxyMode)
   put('proxy_url', settings.proxyUrl)
   put('no_proxy', settings.noProxy)
@@ -123,6 +128,7 @@ export function serializeSettings(settings: DesktopSettings): Record<string, unk
   put('prevent_sleep', settings.preventSleep)
   put('profile_ports', settings.profilePorts)
   put('profile_lane_ports', settings.profileLanePorts)
+  put('profile_page_ports', settings.profilePagePorts)
   put('dsh_mode', settings.dshMode)
   put('dsh_runtime', settings.dshRuntime)
   put('runtime_source', settings.runtimeSource)
@@ -338,6 +344,7 @@ export function normalizeSettings(raw: unknown): DesktopSettings {
   const numberFields: Array<[keyof DesktopSettings, string[]]> = [
     ['port', ['port']],
     ['lanePort', ['lanePort', 'lane_port']],
+    ['laneForwarderPort', ['laneForwarderPort', 'lane_forwarder_port']],
   ]
   for (const [key, names] of numberFields) {
     const value = port(pick(...names))
@@ -349,6 +356,8 @@ export function normalizeSettings(raw: unknown): DesktopSettings {
   if (profilePorts !== undefined) settings.profilePorts = profilePorts
   const profileLanePorts = portMap(pick('profileLanePorts', 'profile_lane_ports'))
   if (profileLanePorts !== undefined) settings.profileLanePorts = profileLanePorts
+  const profilePagePorts = portMap(pick('profilePagePorts', 'profile_page_ports'))
+  if (profilePagePorts !== undefined) settings.profilePagePorts = profilePagePorts
   return settings
 }
 
@@ -473,6 +482,7 @@ function port(value: unknown): number | undefined {
   push('profile', settings.activeProfile, base.activeProfile)
   push('port', settings.port, undefined)
   push('lanePort', settings.lanePort, undefined)
+  push('laneForwarderPort', settings.laneForwarderPort, undefined)
   push('dshMode', settings.dshMode, base.dshMode)
   push('runtimeSource', settings.runtimeSource, base.runtimeSource)
   push('dshRuntime', settings.dshRuntime, undefined)
@@ -485,6 +495,7 @@ function port(value: unknown): number | undefined {
   push('remoteAddr', settings.remoteAddr, undefined)
   if (settings.remoteList.length > 0) parts.push(`remoteList=${String(settings.remoteList.length)} 条`)
   if (settings.profilePorts !== undefined) parts.push(`profilePorts=${JSON.stringify(settings.profilePorts)}`)
+  if (settings.profilePagePorts !== undefined) parts.push(`profilePagePorts=${JSON.stringify(settings.profilePagePorts)}`)
   if (!settings.notifications.enabled) parts.push('notifications=off')
   const offScenarios = NOTIFICATION_SCENARIOS.filter(
     (meta) => (settings.notifications.scenarios[meta.id]?.enabled ?? meta.defaultOn) !== meta.defaultOn,

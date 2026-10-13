@@ -71,7 +71,8 @@ interface DshSourceState {
 
 interface ProfilePortRow {
   profile: string
-  port: number
+  page_port: number
+  upstream_port: number
   lane_port: number
   running: boolean
 }
@@ -300,6 +301,42 @@ function PfBtn({
   )
 }
 
+// #22：Profile 端口表三类口的输入格同构（输入 + 保存），只差占位/测试 id/回调。
+function PortCell({
+  testId,
+  placeholder,
+  value,
+  onChange,
+  onEnter,
+  onSave,
+}: {
+  testId: string
+  placeholder: string
+  value: string
+  onChange: (v: string) => void
+  onEnter: () => void
+  onSave: () => void
+}): React.ReactElement {
+  return (
+    <>
+      <input
+        placeholder={placeholder}
+        style={{ ...INPUT_BASE_STYLE, width: 84 }}
+        data-desktop-settings={testId}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') onEnter()
+        }}
+      />
+      <PfBtn variant="ghost" style={{ marginLeft: 6 }} onClick={onSave}>
+        保存
+      </PfBtn>
+    </>
+  )
+}
+
+
 
 // 全局 toast：挂 document.body，不依赖设置面板是否打开。
 function showToast(text: string, ok: boolean): void {
@@ -376,6 +413,9 @@ function DesktopSettingsPanel(): React.ReactElement {
   }>({ state: 'loading', text: '加载中…' })
   const [profilePortInputs, setProfilePortInputs] = useState<Record<string, string>>({})
   const [profilePortBoxNote, setProfilePortBoxNote] = useState<string | null>(null)
+  const [profileLaneInputs, setProfileLaneInputs] = useState<Record<string, string>>({})
+  const [profilePageInputs, setProfilePageInputs] = useState<Record<string, string>>({})
+  const [forwarderInput, setForwarderInput] = useState('')
 
   // 迁移
   const [migrationSource, setMigrationSource] = useState('')
@@ -570,6 +610,23 @@ function DesktopSettingsPanel(): React.ReactElement {
           desktop_layout_on_phones: d.desktop_layout_on_phones ?? null,
           prevent_sleep: d.prevent_sleep ?? null,
         })
+        const forwarderSaved = ns.lane_forwarder_port
+        setForwarderInput(typeof forwarderSaved === 'number' && forwarderSaved > 0 ? String(forwarderSaved) : '')
+        // #22：三个 per-profile 端口输入框按已保存期望值回填——设置弹窗每次挂载都重读，
+        // 只写不回填 = 切 tab 回来像「改回去」（灰字 placeholder 才是当前实际值）。
+        const savedInputs = (key: string): Record<string, string> => {
+          const raw = ns[key]
+          const out: Record<string, string> = {}
+          if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+            for (const [k, n] of Object.entries(raw as Record<string, unknown>)) {
+              if (typeof n === 'number' && n > 0) out[k] = String(n)
+            }
+          }
+          return out
+        }
+        setProfilePortInputs(savedInputs('profile_ports'))
+        setProfileLaneInputs(savedInputs('profile_lane_ports'))
+        setProfilePageInputs(savedInputs('profile_page_ports'))
         // 迁移 select 默认填充：源取第一个，目标取另一个（保持原 fillDst 行为）。
         if (d.profiles.length > 0) {
           const first = d.profiles[0]
@@ -751,15 +808,45 @@ function DesktopSettingsPanel(): React.ReactElement {
     })()
   }
 
-  const handleSaveProfilePort = (profile: string): void => {
-    const raw = profilePortInputs[profile] ?? ''
+  // 三类口保存共用：解析校验 + 落盘 + 框内回执（#22）。
+  const parsePortInput = (raw: string): number | null => {
     const v = Number(raw)
-    if (!raw || Number.isNaN(v) || v < 1 || v > 65535) return
-    void nsSave({ [`profile_ports.${profile}`]: v })
-      .then(() => setProfilePortBoxNote(`${profile} 端口已改为 ${v}；重启该 profile 生效。`))
+    return !raw || Number.isNaN(v) || v < 1 || v > 65535 ? null : v
+  }
+  const savePortSetting = (key: string, v: number, note: string): void => {
+    void nsSave({ [key]: v })
+      .then(() => setProfilePortBoxNote(note))
       .catch((e) => setProfilePortBoxNote(`保存失败：${String(e)}`))
   }
 
+  const handleSaveProfilePort = (profile: string): void => {
+    const v = parsePortInput(profilePortInputs[profile] ?? '')
+    if (v === null) return
+    savePortSetting(`profile_ports.${profile}`, v, `${profile} 上游端口已改为 ${v}；重启该 profile 生效。`)
+  }
+
+  const handleSaveProfileLanePort = (profile: string): void => {
+    const v = parsePortInput(profileLaneInputs[profile] ?? '')
+    if (v === null) return
+    savePortSetting(`profile_lane_ports.${profile}`, v, `${profile} lane 端口已改为 ${v}；重启该 profile 生效。`)
+  }
+
+  // 页面口＝loopback origin 的端口：换口＝换浏览器本地存储（#22 Q1：保存必须二次确认 + 常驻警示）。
+  const handleSaveProfilePagePort = (profile: string): void => {
+    const v = parsePortInput(profilePageInputs[profile] ?? '')
+    if (v === null) return
+    const ok = window.confirm(
+      `${profile} 页面口将改为 ${v}：换口＝换浏览器本地存储（localStorage/IndexedDB 留在旧口）。确认修改？`
+    )
+    if (!ok) return
+    savePortSetting(`profile_page_ports.${profile}`, v, `${profile} 页面口已改为 ${v}；重启该 profile 生效。`)
+  }
+
+  const handleSaveForwarderPort = (): void => {
+    const v = parsePortInput(forwarderInput.trim())
+    if (v === null) return
+    savePortSetting('lane_forwarder_port', v, `lane 转发器端口已改为 ${v}；重启壳生效。`)
+  }
 
   const handleSaveConcurrency = (): void => {
     const v = Math.max(1, Math.min(32, parseInt(concurrencyInput, 10) || 3))
@@ -1162,11 +1249,25 @@ function DesktopSettingsPanel(): React.ReactElement {
 
       {/* ── Profile 端口（#90）── */}
       <SectionBox title="Profile 端口">
+        <div style={{ ...ROW_STYLE, marginBottom: 10 }}>
+          <span style={LABEL_STYLE}>壳 lane 转发器口（重启壳生效）</span>
+          <input
+            style={{ ...INPUT_BASE_STYLE, width: 84 }}
+            data-desktop-settings="lane-forwarder-port"
+            placeholder="3091"
+            value={forwarderInput}
+            onChange={(e) => setForwarderInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleSaveForwarderPort()
+            }}
+          />
+          <PfBtn variant="ghost" onClick={handleSaveForwarderPort}>保存</PfBtn>
+        </div>
         {profilePortsStatus.state === 'ok' ? (
           <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
             <thead>
               <tr>
-                {['Profile', '启动端口', 'Lane 端口', '状态', ''].map((h) => (
+                {['Profile', 'dsh 端口（上游）', '页面口（loopback）', 'Lane 端口', '状态', ''].map((h) => (
                   <th key={h} style={{ textAlign: 'left' }}>{h}</th>
                 ))}
               </tr>
@@ -1176,28 +1277,35 @@ function DesktopSettingsPanel(): React.ReactElement {
                 <tr key={r.profile}>
                   <td>{r.profile}</td>
                   <td>
-                    <input
-                      placeholder={String(r.port)}
-                      style={{ ...INPUT_BASE_STYLE, width: 84 }}
-                      data-desktop-settings={`profile-port-${r.profile}`}
+                    <PortCell
+                      testId={`profile-port-${r.profile}`}
+                      placeholder={String(r.upstream_port)}
                       value={profilePortInputs[r.profile] ?? ''}
-                      onChange={(e) => {
-                        const v = e.target.value
-                        setProfilePortInputs((prev) => ({ ...prev, [r.profile]: v }))
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleSaveProfilePort(r.profile)
-                      }}
+                      onChange={(v) => setProfilePortInputs((prev) => ({ ...prev, [r.profile]: v }))}
+                      onEnter={() => handleSaveProfilePort(r.profile)}
+                      onSave={() => handleSaveProfilePort(r.profile)}
                     />
-                    <PfBtn
-                      variant="ghost"
-                      style={{ marginLeft: 6 }}
-                      onClick={() => handleSaveProfilePort(r.profile)}
-                    >
-                      保存
-                    </PfBtn>
                   </td>
-                  <td>{r.lane_port}</td>
+                  <td>
+                    <PortCell
+                      testId={`profile-page-port-${r.profile}`}
+                      placeholder={r.page_port > 0 ? String(r.page_port) : '启动时分配'}
+                      value={profilePageInputs[r.profile] ?? ''}
+                      onChange={(v) => setProfilePageInputs((prev) => ({ ...prev, [r.profile]: v }))}
+                      onEnter={() => handleSaveProfilePagePort(r.profile)}
+                      onSave={() => handleSaveProfilePagePort(r.profile)}
+                    />
+                  </td>
+                  <td>
+                    <PortCell
+                      testId={`profile-lane-port-${r.profile}`}
+                      placeholder={String(r.lane_port)}
+                      value={profileLaneInputs[r.profile] ?? ''}
+                      onChange={(v) => setProfileLaneInputs((prev) => ({ ...prev, [r.profile]: v }))}
+                      onEnter={() => handleSaveProfileLanePort(r.profile)}
+                      onSave={() => handleSaveProfileLanePort(r.profile)}
+                    />
+                  </td>
                   <td
                     style={{
                       color: r.running
@@ -1219,7 +1327,12 @@ function DesktopSettingsPanel(): React.ReactElement {
         )}
         {profilePortBoxNote && <div style={NOTE_STYLE}>{profilePortBoxNote}</div>}
         <div style={NOTE_STYLE}>
-          web 固定默认 3080 · desktop 固定默认 3081 · 其余自动分配；lane 同规则错开（3092 起）。改动后重启该 profile 生效。
+          上游（dsh 实例）：web 3080 · desktop 3081 · 其余 3082 起散列避让；lane（手机代理）：web 3092 · desktop 3093 ·
+          其余 3094 起散列；页面口（loopback origin）：6390 起 40 个顺延。改动后重启该 profile 生效；
+          输入框显示的是已保存的期望值，灰字 placeholder 是当前实际值。
+        </div>
+        <div style={DANGER_NOTE_STYLE}>
+          ⚠️ 改页面口＝换浏览器本地存储：localStorage / IndexedDB / 登录态留在旧端口，不会跟随到新口；转发器口改动需重启壳。
         </div>
       </SectionBox>
 

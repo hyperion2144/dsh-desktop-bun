@@ -139,12 +139,36 @@ export function saveSettings(home: string, settings: DesktopSettings): void {
   renameSync(tmp, path)
 }
 
+/**
+ * 页面 patch 的点号键（`profile_ports.web`）展开成嵌套表——旧壳 Rust 侧会展开它们，
+ * 换壳后丢失这一层会让面板的保存变成静默空操作（#22 实测：落盘后键整个消失）。
+ * 与整表写法混用时并进同一张表，不互相覆盖。
+ */
+function expandDottedPatch(patch: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(patch)) {
+    if (!key.includes('.')) {
+      out[key] = value
+      continue
+    }
+    const parts = key.split('.')
+    let node = out
+    for (const part of parts.slice(0, -1)) {
+      const existing = node[part]
+      if (typeof existing !== 'object' || existing === null || Array.isArray(existing)) node[part] = {}
+      node = node[part] as Record<string, unknown>
+    }
+    const leaf = parts[parts.length - 1]
+    if (leaf !== undefined) node[leaf] = value
+  }
+  return out
+}
 /** 读改写：给「设置页改一项」「托盘切一项」用。 */
 export function updateSettings(home: string, patch: Record<string, unknown>, log?: SettingsLogger): DesktopSettings {
   const { settings } = loadSettings({ home, log })
   // patch 可能来自页面（设置面板按旧壳习惯下 snake_case）或壳内部（camelCase）。先落成
   // snake 再合，两种写法都能被 normalizeSettings 认出来，不会静默丢掉。
-  const next = normalizeSettings({ ...serializeSettings(settings), ...patch })
+  const next = normalizeSettings({ ...serializeSettings(settings), ...expandDottedPatch(patch) })
   saveSettings(home, next)
   return next
 }

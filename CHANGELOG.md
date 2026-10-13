@@ -28,6 +28,7 @@
 
 ### Fixed
 
+- 端口三类混显、只有上游可设（#22）：Profile 端口表只显一列「启动端口」（实为页面 origin 口）却拿它当上游输入框占位，lane 口只读、页面口无设置项、壳级转发器口写死 3091——dsh 实例上游口 / 页面口（loopback）/ lane（手机代理）三类口互相混淆。行契约改显式 page_port / upstream_port / lane_port 三列（台账补记 dataPort=上游口激活避让；未运行 profile 显配置/公式期望值，页面口显上次台账值或「启动时分配」）；三类口全部可设置：上游 profile_ports.<name>（既有）、页面口 profile_page_ports.<name>（新键，语义对齐 env DSH_SHELL_PAGE_PORT——请求值被占顺延，保存二次确认 + 常驻警示「换口＝换浏览器本地存储」）、lane profile_lane_ports.<name>（既有键改可编辑）、壳级转发器 lane_forwarder_port（新键，缺省回退遗留 lane_port 再缺省 3091，重启壳生效）；另修面板点号键 patch 新壳静默丢失（旧壳 Rust 会展开）：updateSettings 补 expandDottedPatch。
 - Windows 安装版启动失败（#1）：DSH_HOME 缺省改走 `dshHome()`（Windows 无 HOME 时旧写法退化成相对路径 `.dsh`，日志/设置落进安装目录）；profile 依赖摊平改用 `lstatSync` 判存在——悬空链接不再撞 EEXIST，被旧版本真实目录占住的运行时包就地替换；指错方向的链接（含旧壳残留，不分公司）一律删掉重指到当前运行时树。
 - profile 依赖摊平落点改共享池（#13）：reconcile 不再把运行时树链进各 profile 自己的 `node_modules`，改链到共享池 `profiles/node_modules`（对齐旧壳不变量「共享包在父级 node_modules，Node 向上解析」），多 profile 只维护一份链接、切运行时全 profile 一致重指（设置面板切运行时立即重指，不等下次启动）；启动与切运行时都会幂等清掉壳此前写进 per-profile 池的运行时链接（防近者优遮蔽共享层造成跨 profile 版本错配），pnpm 自有链接（含 store 暂时悬空）与用户资产不动。
 - 内置 dsh 运行时按声明供给（#16）：新增 `desktop-electrobun/builtin-runtime.json` 声明 dsh 与 pnpm 的固定版本；prepare:bundle 按声明物化内置树（已就绪复用 / npm 下载 / `DSH_SHELL_BUILTIN_SOURCE` 显式逃生口），落盘版本与声明不符直接失败；assert-artifact 对产物里的内置 dsh 版本与声明再对一遍；退役 build.yml 备树步骤与本机运行时拾取链。

@@ -15,7 +15,7 @@ export interface PortClaim {
   profile: string
   /** 页面 origin 端口（要跨启动稳定，进台账） */
   port: number
-  /** 数据面/反代监听端口（随机即可，仅供诊断） */
+  /** 上游监听端口（dsh 实例数据面；台账用它避免后续分配撞上，并在面板里显示） */
   dataPort?: number
   /** 手机访问 lane 端口（同一 profile 的上游/页面端口互不重复） */
   lanePort?: number
