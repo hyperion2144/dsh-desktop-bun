@@ -95,12 +95,12 @@ cp -r skill ~/.claude/skills/dsh-desktop-tauriapp
 ## 仓库结构
 
 ```
-src/client/   本仓库作为 dsh 插件的浏览器半区（esbuild → lib/client.js）
-desktop/      Tauri 2 桌面壳（Rust，macOS + Windows）；scripts/ 含运行时准备与验收脚本
-mobile/       手机访问（dsh-mobile-access 服务 + Expo 原生壳 + 鸿蒙骨架）
-skill/        Claude/DSH 兼容技能包（SKILL.md + resources/ + Windows 实战笔记）
-docs/         设计与审计文档（含 Windows 无管理员实测报告）
-lib/          插件 client 构建产物（随包分发）
+desktop-electrobun/  Electrobun+Bun 桌面壳（多窗口 + 内置 dsh 运行时管理）
+desktop-plugin/      dsh 插件（src/client/ 浏览器半区，esbuild → lib/client.js；scripts/ 含构建与验收脚本）
+plugins/             独立插件服务（dsh-mobile-access 手机访问服务，client.js 入库随包分发）
+mobile/              移动端壳（dsh-mobile-nav 布局插件子模块 + shell-web 共享模块 + Expo Android/iOS 壳 + harmony 鸿蒙壳）
+docs/                设计与审计文档
+resources/           内置资源（dsh 运行时素材 + 图标）
 ```
 
 ## 移动端壳（Android / iOS / 鸿蒙）

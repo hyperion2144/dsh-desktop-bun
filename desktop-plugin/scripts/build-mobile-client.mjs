@@ -1,7 +1,7 @@
 /**
 * 构建 dsh-mobile-access 的 client bundle。
-* 入口：mobile/dsh-mobile-access/client/client.source.jsx（裸 ES module 源码，含 JSX）
-* 产物：mobile/dsh-mobile-access/client/client.js，包裹在
+* 入口：plugins/dsh-mobile-access/client/client.source.jsx（裸 ES module 源码，含 JSX）
+* 产物：plugins/dsh-mobile-access/client/client.js，包裹在
 * `window.__ModuleLoader__.load({ id, factory })` 中，与桌面插件格式一致。
 * 入口必须是 .jsx —— esbuild 按扩展名走 jsx loader（automatic）；入口不能是已打包产物（否则双层包装 → duplicate factory registration）。
 */
@@ -10,11 +10,14 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const PACKAGE_NAME = 'dsh-mobile-access'
-const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const clientSrc = join(root, 'mobile/dsh-mobile-access/client/client.source.jsx')
-const clientOut = join(root, 'mobile/dsh-mobile-access/client/client.js')
+const scriptDir = dirname(fileURLToPath(import.meta.url))
+const root = join(scriptDir, '..', '..')
+const pluginNodeModules = join(scriptDir, '..', 'node_modules')
+const clientSrc = join(root, 'plugins/dsh-mobile-access/client/client.source.jsx')
+const clientOut = join(root, 'plugins/dsh-mobile-access/client/client.js')
 
 const result = await build({
+  nodePaths: [pluginNodeModules],
   entryPoints: [clientSrc],
   outfile: clientOut,
   bundle: true,

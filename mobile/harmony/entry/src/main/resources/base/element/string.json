@@ -1,0 +1,24 @@
+{
+  "string": [
+    {
+      "name": "app_name",
+      "value": "DeepSeek 手机访问"
+    },
+    {
+      "name": "module_desc",
+      "value": "手机访问壳（鸿蒙 ArkTS）"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "DeepSeek Harness 手机访问入口"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "DeepSeek 手机访问"
+    },
+    {
+      "name": "reason_camera",
+      "value": "用于扫描桌面端配对二维码完成设备配对"
+    }
+  ]
+}

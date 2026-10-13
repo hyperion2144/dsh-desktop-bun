@@ -4,7 +4,6 @@ window.__ModuleLoader__.load({
 var module = { exports: {} };
 var exports = module.exports;
 
-"use strict";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -33,7 +32,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// mobile/dsh-mobile-access/client/client.source.jsx
+// ../plugins/dsh-mobile-access/client/client.source.jsx
 var client_source_exports = {};
 __export(client_source_exports, {
   apply: () => apply,
@@ -1676,7 +1675,7 @@ var createDataURL = function(width, height, getPixel) {
 var qrcode_default = qrcode;
 var stringToBytes = qrcode.stringToBytes;
 
-// mobile/dsh-mobile-access/client/client.source.jsx
+// ../plugins/dsh-mobile-access/client/client.source.jsx
 var import_jsx_runtime = require("react/jsx-runtime");
 var inject = ["slots", "connection"];
 function apply(ctx) {
