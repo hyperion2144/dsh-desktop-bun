@@ -205,7 +205,7 @@ describe('stagePlugins（端到端：池 + 注入清单）', () => {
     const repoRoot = join(root, 'repo')
     fakePackage(join(repoRoot, 'desktop-plugin'), 'dsh-desktop-bun')
     fakePackage(join(repoRoot, 'plugins', 'dsh-mobile-access'), 'dsh-mobile-access')
-    fakePackage(join(repoRoot, 'plugins', 'dsh-mobile-nav'), 'dsh-web-mobile')
+    fakePackage(join(repoRoot, 'mobile', 'dsh-mobile-nav'), 'dsh-web-mobile')
 
     const first = stagePlugins({ home, profile: 'web', appSupport, paths: { repoRoot, resourcesDir: null }, runtimeVersion: '0.2.1-alpha.2', muxHeartbeatMs: 0 })
     expect(first.staged).toHaveLength(3)

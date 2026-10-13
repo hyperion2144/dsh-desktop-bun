@@ -70,7 +70,7 @@ export function desktopPluginDir(paths: PluginPaths, env: Record<string, string 
 export function mobilePackageDir(paths: PluginPaths, name: string, rel: string): string | null {
   const candidates = [
     paths.resourcesDir === null ? '' : join(paths.resourcesDir, 'plugins', name),
-    join(paths.repoRoot, 'plugins', rel),
+    join(paths.repoRoot, 'mobile', rel),
   ]
   return locatePackage(candidates)
 }

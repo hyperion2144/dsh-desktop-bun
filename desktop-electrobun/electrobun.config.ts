@@ -43,7 +43,7 @@ const desktopPluginDir = join(repoDir, 'desktop-plugin')
 const desktopPluginFiles = ['package.json', 'index.js', 'cordis.patch.yml', 'README.md', 'LICENSE', ...listFiles(desktopPluginDir, 'lib')]
 const mobileAccessDir = join(repoDir, 'plugins', 'dsh-mobile-access')
 const mobileAccessFiles = ['package.json', 'cordis.patch.yml', ...listFiles(mobileAccessDir, 'lib'), ...listFiles(mobileAccessDir, 'client')]
-const mobileLayoutDir = join(repoDir, 'plugins', 'dsh-mobile-nav')
+const mobileLayoutDir = join(repoDir, 'mobile', 'dsh-mobile-nav')
 const mobileLayoutFiles = ['package.json', 'cordis.patch.yml', 'README.md', ...listFiles(mobileLayoutDir, 'lib'), ...listFiles(mobileLayoutDir, 'assets')]
 
 export default {

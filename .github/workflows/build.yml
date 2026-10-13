@@ -58,6 +58,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
 
       # macos-14 runner 自带 Android SDK（~9GB）等用不到的大件，而 CEF 构建 + 压缩 + DMG 要写出
