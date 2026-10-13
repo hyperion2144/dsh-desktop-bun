@@ -48,6 +48,8 @@ declare module 'electrobun/bun' {
     loadURL(url: string): void
     executeJavascript(js: string): void
     remove(): void
+   /** 打开本视图的 DevTools/inspector（Electrobun `BrowserView.openDevTools`） */
+   openDevTools(): void
     on(event: string, handler: (event: unknown) => void): void
   }
 
@@ -64,6 +66,8 @@ declare module 'electrobun/bun' {
       url: string
       loadURL(url: string): void
       executeJavascript(js: string): void
+     /** 打开本窗口 webview 的 DevTools/inspector（dev 右键菜单用） */
+     openDevTools(): void
     }
     setWindowButtonPosition(x: number, y: number): void
     /** 窗口带到前台（单实例激活用）：恢复最小化 / 显示 / 抢焦点 */
@@ -89,6 +93,8 @@ declare module 'electrobun/bun' {
 
   export interface BuildConfigShape {
     channel: string
+   /** false＝dev 构建；stable/canary 为 true（Electrobun version.json 语义） */
+   isPackaged: boolean
     defaultRenderer?: string
     availableRenderers?: string[]
     [key: string]: unknown
@@ -101,6 +107,8 @@ declare module 'electrobun/bun' {
     showNotification?(options: { title: string; body?: string; subtitle?: string; silent?: boolean }): void
     /** 系统浏览器 / 默认应用程序打开外链（FFI，成功返 true） */
     openExternal(url: string): boolean
+   /** 用系统默认应用打开文件 / 文件管理器打开文件夹（Electrobun `Utils.openPath`） */
+   openPath(path: string): boolean
     /** 原生文件选择器（返回绝对路径数组；Electrobun `Utils.openFileDialog`） */
     openFileDialog(options: {
       startingFolder?: string

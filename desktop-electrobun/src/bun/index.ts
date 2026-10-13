@@ -11,7 +11,7 @@ import { startService, type ServiceOptions, type ShellService } from './service.
 import { createNativeNotify } from './notify-un.ts'
 import type { RuntimeSnapshot } from './commands.ts'
 import type { RuntimeDownloadStatus } from './runtime-install.ts'
-import { SHELL_MENU_ACTIONS, contextMenuItems } from './context-menu.ts'
+import { SHELL_MENU_ACTIONS, contextMenuItems, isOpenablePath } from './context-menu.ts'
 import { isExternalUrl } from './external.ts'
 import { APP_NAME } from '../shared/app.ts'
 import { appSupportDir, dshHome, trayImagePath } from './runtime.ts'
@@ -362,7 +362,10 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     onContextMenu: (request) => {
       const linkIsExternal =
         request.linkUrl !== null && isExternalUrl(request.linkUrl, originOf(profile))
-      const items = contextMenuItems(request, linkIsExternal)
+      // dev 构建（未打包）才给「打开 DevTools」；BuildConfig.getSync 内部有缓存，右键时取不贵
+      const items = contextMenuItems(request, linkIsExternal, {
+        devTools: BuildConfig.getSync().isPackaged === false,
+      })
       // 「挂不上也要出声」：菜单内容进日志，实机排查时能看出是哪一档
       console.log(`[shell] 右键菜单：${items.map((item) => item.label ?? item.role ?? item.type ?? '?').join(' | ')}`)
       ContextMenu.showContextMenu(items as unknown[])
@@ -947,8 +950,21 @@ if (!noWindow) {
   // 右键菜单里我们自己那几项（原生 role 由系统处理，不会回到这里）；
   // 多窗口下作用在「最近聚焦」那个窗口上。
   ContextMenu.on('context-menu-clicked', (event) => {
-    const detail = (event as { data?: { action?: string; data?: { url?: string } } }).data
+    const detail = (event as { data?: { action?: string; data?: { url?: string; path?: string } } }).data
     const action = detail?.action ?? ''
+    // 工作区文件行：打开文件 / 打开文件夹（系统默认方式，Utils.openPath）
+    if (action === SHELL_MENU_ACTIONS.openPath) {
+      const path = detail?.data?.path
+      if (typeof path === 'string' && isOpenablePath(path)) {
+        if (!Utils.openPath(path)) console.warn(`[shell] 系统没接住打开：${path}`)
+      }
+      return
+    }
+    // dev 菜单：打开当前聚焦窗口的 inspector（Electrobun BrowserView.openDevTools）
+    if (action === SHELL_MENU_ACTIONS.openDevTools) {
+      focusedWindow()?.webview?.openDevTools()
+      return
+    }
     const url = detail?.data?.url
     if (action === SHELL_MENU_ACTIONS.reload) {
       focusedWindow()?.webview?.loadURL(uiService().state.pageUrl)

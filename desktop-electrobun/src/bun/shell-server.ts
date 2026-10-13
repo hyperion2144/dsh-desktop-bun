@@ -21,7 +21,7 @@ import { corsHeaders, scrubRequestHeaders, scrubResponseHeaders, shouldNoStore }
 import { isExternalUrl } from './external.ts'
 import { VIEW_TOKEN_HEADER, denyReason, isCommandAllowed } from '../shared/view-grant.ts'
 import type { ViewGrant, ViewRegistry } from '../shared/view-grant.ts'
-import type { ContextMenuRequest } from './context-menu.ts'
+import { isOpenablePath, type ContextMenuRequest } from './context-menu.ts'
 import type { ProfileOpRequest, ProfileOpResult } from './profile-dialog.ts'
 
 /** 官方 web-document.ts 的同一行：index 会等异步的 Host 注入，先把 promise 挂上。 */
@@ -279,6 +279,12 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
             linkUrl: typeof body?.linkUrl === 'string' && body.linkUrl !== '' ? body.linkUrl : null,
             hasSelection: body?.hasSelection === true,
             editable: body?.editable === true,
+            // 工作区文件行：entry 白名单化，路径只认绝对路径（isOpenablePath，防相对路径/URL 混入）
+            filesEntry:
+              body?.filesEntry === 'file' || body?.filesEntry === 'directory' || body?.filesEntry === 'other'
+                ? body.filesEntry
+                : null,
+            filesPath: typeof body?.filesPath === 'string' && isOpenablePath(body.filesPath) ? body.filesPath : null,
           })
           return new Response(null, { status: 204 })
         }
