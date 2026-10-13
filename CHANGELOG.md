@@ -33,6 +33,9 @@
 - 启动闪屏与更新提醒窗跟随 DSH 主题（#140）：读 profile 的 `ui-theme` 偏好（浅色 / 暗色 / 跟随系统），读不到就跟随系统；配色走 CSS 变量 + `prefers-color-scheme`，系统切深浅色时窗不用重开。
 - 运行时安装先装到临时目录、成功才整棵改名（#139）：下载进行中不再出现「已下载 · 可切换」的半成品，面板与提醒卡都不会把装到一半的运行时当成可切换的版本；装到一半被中断的残留目录下次启动自动清理。
 - Windows CI 增加打包态 DevTools CDP 冒烟（#109）：`dev_tools` 开关开启时 WebView2 调试口可探活，关闭时连接拒绝。
+- 移动端壳迁入（#31）：`mobile/shell-web/`（引导清单/会话守卫/本地资产共享模块，`node --test` 19 例全绿）与 `mobile/expo-app/`（Expo SDK 57 Android+iOS 壳）自旧仓同路径迁入（shell-web 保持 expo-app 兄弟目录，7 处相对 import 与 metro watchFolders 依赖此布局）；内置运行时来源由旧壳 Tauri staged 资源改接本仓 `desktop-electrobun/builtin-runtime/`——`scripts/sync-builtin.mjs` 的 dist 缺省路径与提示语同步改写（先 `cd desktop-electrobun && bun run prepare:bundle` 物化再打包）；`assets/dsh-frontend.tgz` 按本仓 `builtin-runtime.json`（dsh 0.2.1-alpha.2）重新生成入库（入口 index-Dp57FHwW.js，131 文件 2.0 MB）；desktop-plugin/README 仓库结构 mobile/ 行对齐现状。
+- 鸿蒙壳迁入（#32）：`mobile/harmony/`（ArkTS+ArkWeb，168 文件）自旧仓同路径迁入；`scripts/sync-builtin.sh` 的 dist 缺省路径与提示语同步改接本仓 `desktop-electrobun/builtin-runtime/`（先 `cd desktop-electrobun && bun run prepare:bundle` 物化再同步）；`scripts/pre-commit-guard.sh` 提交守卫去掉旧仓 Tauri 配置目标；rawfile（内置前端 + 布局插件随包产物）按本仓重新生成入库（入口 index-Dp57FHwW.js，布局插件 client.js 与 dsh-mobile-nav 子模块 b78babc 逐字节一致）。
+- 移动端 CI 出包接入（#33）：新增 `.github/workflows/mobile.yml`（workflow_dispatch + tag push '**' 与 build.yml 同口径），matrix android（ubuntu，temurin JDK 17 + setup-android 只装 platform-tools + expo prebuild + gradlew assembleDebug）与 ios（macos-14，pod install + xcodebuild Release CODE_SIGNING_ALLOWED=NO + zip Payload），产物走 upload-artifact（鸿蒙不出包维持本地 DevEco）；不发 Release（与桌面「发布还没接」同口径）；check.yml 补移动端快检（paths 加 mobile/**，跑 shell-web 与 dsh-mobile-access 的 node --test，19+71 例，旧仓从未进 CI）。
 
 ### Changed
 
@@ -108,6 +111,10 @@
 - Windows/Linux 通知设置页不再显示只有 macOS 才成立的「权限不可用 / 请使用打包后的 .app」提示（#74）。
 - win 打包态开发者工具接通 WebView2 CDP，右键菜单/F12 直开、不自动弹窗（#106）。
 - Linux 防休眠补上真实现（#75）：GNOME 会话走 `gnome-session-inhibit`、其它桌面走 `systemd-inhibit`，持有进程随壳退出自动释放；拿不到抑制通道时不再静默，设置面板「电源」区明示降级原因。顺带修掉「防休眠」开关运行期开/关不生效（#186 遗留）。
+- 移动端「直接加载远程页面」无 cookie 直连报 unpair（#36，对照旧仓 #195）：已保存条目重进时占位地址原样交给 WebView，而此刻 ports 未就绪、会话 cookie 未知——WebView 以无 cookie 身份直连 lane 门禁拿 401 `{"error":"unpaired"}`；三选一选「直接加载」时 fallback URL 与占位相同，source 不变不触发重载，`injectedJavaScriptBeforeContentLoaded` 的 cookie bootstrap 永远补不上，页面就停在 unpair。修复：占位地址改纯函数 `entryPlaceholderUrl`（配对入口或 cookie 未就绪一律停 about:blank，cookie 就绪后 source 变化触发带 bootstrap 的重载，与鸿蒙侧 #155「一律先从 about:blank 开始」同一教训），鸿蒙侧经 #155 重写已无此问题，补三例纯逻辑测试锁死判定。
+- 移动端「下载对应运行时」按远程构建定位版本 + 完整下载（#35，对照旧仓 #194）：下载目标不再固定取 npm next/latest——桌面会把运行时 pin 在任意版本上，旧目标下载完重比必 miss（「下载了却用不了」）；两端改为先按远程入口产物名逐版本探 CDN index.html 定位同构建版本（新→旧，cap 30），探不到退回 next/latest 缺省渠道。鸿蒙端下载清单改走 jsdelivr flat 文件列表（原来只按 index.html 引用拓文件，漏掉全部懒加载 chunk——「只下载几个文件」），列表不可得退回原引用拓法；expo 端本就走完整 tgz。共享判定进 shell-web（`versionCandidates` / `distFilesFromFlatJson`，两端同源），Expo 侧下载端口带 remoteEntry、会话编排先取远端再下载（同一份首页重比，不多打一次远程）。
+- 迁移遗留路径破损修复（#37）：`desktop-plugin/scripts/build-mobile-client.mjs` 自旧仓仓库根迁至 `desktop-plugin/scripts/` 后 root 基准少退一层、入口/产物路径仍指旧仓 mobile/ 前缀——改指 repo 根 `plugins/dsh-mobile-access/`，esbuild `nodePaths` 指向 `desktop-plugin/node_modules` 解析 qrcode-generator（产物保持内联）；重建 `client.js` 入库（与旧产物功能字节一致，仅源路径注释与 esbuild "use strict" 行为差异），本仓恢复该入库产物的重建途径；两处 README 对齐现状（dsh-mobile-access 测试命令改 plugins 路径、desktop-plugin/README 仓库结构块按本仓目录改写）。
+- 移动端 iOS Release 启动黑屏（#34，对照旧仓 #193）：expo 壳 `http1.ts` 在模块顶层 `new TextDecoder('latin1')`，而真机/模拟器的 JS 引擎 Hermes 只支持 utf-8——模块求值即抛 RangeError，bundle 加载失败，Release 无红屏只有黑屏（任何设备都会中，不限 iPad）。改分块 `String.fromCharCode` 逐字节直转（latin1 字节与码点一一对应，分块防长参爆栈），补 latin1 逐值解码与 >64KB 分块两例回归；iPad 模拟器 Release 实测 HomeScreen 正常渲染。
 
 - macOS 交付物 DMG 打开报「已损坏」（#95）：CI 里 `hutch electrobun build` 先打出 .app 与 `artifacts/*.dmg`，之后 `sign:app` 只重签 build/ 下那份 .app——上传的 DMG 里始终是签名前副本（bundle 无 `_CodeSignature`，arm64 直接判「已损坏」，与本机 Gatekeeper 允许任何来源无关）。sign-app.mjs 签名后改用 `ditto` + `hdiutil` 以签名后的 .app 重打 `artifacts/*.dmg`（保留 /Applications 拖放入口），覆盖前只读挂载复核 DMG 内 app 的 `codesign --verify`，复核失败非零退出（宁可 CI 红也不发坏包）；本地无 `artifacts/*.dmg` 时跳过。
 
