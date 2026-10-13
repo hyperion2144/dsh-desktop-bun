@@ -453,7 +453,6 @@ function installLocalChrome(platform) {
 
 // src/client/styles.ts
 var ADVANCED_STYLES = `
-body[data-dsh-desktop-tauriapp-mode="advanced"] { margin: 0; }
 .dshDesktopChromeHost { position: fixed; inset: 0; z-index: 45; pointer-events: none; }
 .dshDesktopChromeStrip { position: absolute; display: flex; align-items: stretch; pointer-events: auto; }
 /* \u62D6\u62FD\u6761\u80CC\u666F\uFF1A\u6309\u5E73\u53F0\u5339\u914D\u6240\u8986\u76D6\u533A\u57DF\u7684\u4E3B\u9898\u80CC\u666F\uFF08macOS \u8986\u76D6\u4FA7\u8FB9\u680F\u3001Win/Linux \u8986\u76D6\u4E2D\u95F4\u533A\uFF09\u3002
@@ -502,16 +501,11 @@ function installAdvancedStyles() {
 
 // src/client/advanced-shell.ts
 function applyAdvancedShell(ctx, environment) {
-  if (environment.mode !== "advanced") {
-    throw new Error(`dsh-desktop-tauriapp: advanced shell received mode ${JSON.stringify(environment.mode)}`);
-  }
   ctx.effect(() => {
-    document.body.dataset.dshDesktopMode = "advanced";
     document.body.dataset.dshDesktopPlatform = environment.platform;
     const removeStyles = installAdvancedStyles();
     return () => {
       removeStyles();
-      delete document.body.dataset.dshDesktopMode;
       delete document.body.dataset.dshDesktopPlatform;
     };
   }, "desktop: advanced shell styles");
@@ -1717,14 +1711,6 @@ function DesktopSettingsPanel() {
       cancelled = true;
     };
   }, [migrationRunning]);
-  const handleSourceModeChange = (value) => {
-    void nsSave({ dsh_mode: value }).then(() => invoke4("restart_dsh_service")).then(
-      () => setMsg({ ok: true, text: `dsh \u6765\u6E90\u5DF2\u5207\u6362\u4E3A ${value === "builtin" ? "\u5185\u7F6E" : "\u5916\u90E8"}\uFF0C\u6B63\u5728\u91CD\u542F\u2026` })
-    ).catch((err) => {
-      console.error("[desktop-settings] set_dsh_source/restart \u5931\u8D25\uFF1A", err);
-      setMsg({ ok: false, text: `\u5207\u6362\u5931\u8D25\uFF1A${String(err)}` });
-    });
-  };
   const handleSelectRemote = (addr) => {
     void (async () => {
       try {
@@ -1964,21 +1950,19 @@ function DesktopSettingsPanel() {
     } catch {
     }
   }, []);
-  const sourceModeValue = sourceState ? sourceState.running ? sourceState.running.mode : sourceState.mode : "builtin";
   const sourceInfoText = (() => {
     if (!sourceState) return "";
     const parts = [];
     if (sourceState.running) {
-      const runVer = sourceState.running.version || (sourceState.running.mode === "builtin" ? sourceState.builtin?.dsh_version ?? "" : sourceState.external?.dsh_version ?? "");
+      const runVer = sourceState.running.version || (sourceState.builtin?.dsh_version ?? "");
       const origin = sourceState.running.origin === "shell" ? "\u672C\u58F3 spawn" : "\u590D\u7528\u63A5\u5165";
       parts.push(
-        `\u5F53\u524D\u8FD0\u884C\uFF1A${sourceState.running.mode === "builtin" ? "\u5185\u7F6E" : "\u5916\u90E8"} dsh ${runVer}\uFF08${origin} \xB7 port ${sourceState.running.port}\uFF09`
+        `\u5F53\u524D\u8FD0\u884C\uFF1A\u5185\u7F6E dsh ${runVer}\uFF08${origin} \xB7 port ${sourceState.running.port}\uFF09`
       );
     } else {
-      parts.push("\u5F53\u524D\u65E0\u8FD0\u884C\u4E2D\u7684 dsh \u5B9E\u4F8B\uFF1B\u4E0B\u6B21\u542F\u52A8\u5C06\u4F7F\u7528\u4E0B\u65B9\u6240\u9009\u6765\u6E90");
+      parts.push("\u5F53\u524D\u65E0\u8FD0\u884C\u4E2D\u7684 dsh \u5B9E\u4F8B\uFF1B\u4E0B\u6B21\u542F\u52A8\u5C06\u4F7F\u7528\u5185\u7F6E\u6811");
     }
     if (sourceState.builtin) parts.push(`\u5185\u7F6E\u53EF\u7528\uFF1Adsh ${sourceState.builtin.dsh_version}`);
-    if (sourceState.external) parts.push(`\u5916\u90E8\u53EF\u7528\uFF1Adsh ${sourceState.external.dsh_version}\uFF08${sourceState.external.path}\uFF09`);
     return parts.join(" \xB7 ");
   })();
   const migrationDestOptions = desktop.profiles.filter((p) => p.name !== migrationSource);
@@ -2039,25 +2023,13 @@ function DesktopSettingsPanel() {
         ]
       }
     ),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "dsh \u6765\u6E90\uFF08\u5185\u7F6E / \u5916\u90E8\uFF09", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-        ThemeSelect,
-        {
-          style: { marginBottom: 8 },
-          value: sourceModeValue,
-          onChange: handleSourceModeChange,
-          options: [
-            { value: "builtin", label: "\u5185\u7F6E\uFF08\u968F\u5E94\u7528\u5206\u53D1\uFF0C\u63A8\u8350\uFF09" },
-            { value: "external", label: "\u5916\u90E8\uFF08DSH_BIN \u2192 PATH \u2192 npm \u5168\u5C40\uFF09" }
-          ]
-        }
-      ),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "dsh \u6765\u6E90", children: [
       sourceState ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: sourceInfoText }) : sourceError ? /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: DANGER_NOTE_STYLE, children: [
         "\u68C0\u6D4B\u5931\u8D25\uFF1A",
         sourceError
       ] }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u68C0\u6D4B\u4E2D\u2026" }),
       /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { marginTop: 8 }, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: () => void refreshSource(), children: "\u91CD\u65B0\u68C0\u6D4B" }) }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u5185\u7F6E\uFF1A\u968F\u5E94\u7528\u5206\u53D1\u7684 dsh \u4F9D\u8D56\u6811 + Node\uFF0C\u76F4\u8C03\u5185\u90E8\u542F\u52A8\u63A5\u53E3\uFF08\u4E0D\u4F9D\u8D56\u7CFB\u7EDF\u73AF\u5883\uFF09\u3002\u5916\u90E8\uFF1A\u4F7F\u7528\u7CFB\u7EDF\u5B89\u88C5\u7684 dsh CLI\u3002\u5207\u6362\u540E\u7ACB\u5373\u91CD\u542F dsh\u3002" })
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u5185\u7F6E\uFF1A\u968F\u5E94\u7528\u5206\u53D1\u7684 dsh \u4F9D\u8D56\u6811 + Node\uFF0C\u76F4\u8C03\u5185\u90E8\u542F\u52A8\u63A5\u53E3\uFF08\u4E0D\u4F9D\u8D56\u7CFB\u7EDF\u73AF\u5883\uFF09\u3002" })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "dsh \u670D\u52A1\u5730\u5740", children: [
       /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
@@ -2320,7 +2292,7 @@ function DesktopSettingsPanel() {
       /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { marginTop: 8 }, children: [
         runtimeStatus.state === "error" && runtimeStatus.text && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DANGER_NOTE_STYLE, children: runtimeStatus.text }),
         runtimeCatalog && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { marginBottom: 6 }, children: runtimeCatalog.mode === "external" ? `\u5F53\u524D\u4F7F\u7528\uFF1A\u5916\u90E8 dsh ${sourceState?.running?.version || sourceState?.external?.dsh_version || "\uFF08\u7248\u672C\u672A\u77E5\uFF09"}\uFF08\u8FD0\u884C\u65F6\u7248\u672C\u504F\u597D\u4EC5\u4FDD\u7559\uFF0C\u4E0D\u751F\u6548\uFF09` : runtimeCatalog.selected ? `\u5F53\u524D\u4F7F\u7528\uFF1A\u8FD0\u884C\u65F6 ${runtimeCatalog.selected}${runtimeCatalog.builtin ? "\uFF08\u5185\u7F6E\u515C\u5E95 " + runtimeCatalog.builtin + "\uFF09" : ""}` : runtimeCatalog.builtin ? `\u5F53\u524D\u4F7F\u7528\uFF1A\u5185\u7F6E dsh ${runtimeCatalog.builtin}\uFF08\u515C\u5E95\uFF09` : runtimeCatalog.running?.version ? `\u5F53\u524D\u4F7F\u7528\uFF1A\u8FD0\u884C\u65F6 ${runtimeCatalog.running.version}\uFF08${runtimeCatalog.running.kind}\uFF09` : "\u5F53\u524D\u65E0\u53EF\u7528 dsh" }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { marginBottom: 6 }, children: runtimeCatalog.selected ? `\u5F53\u524D\u4F7F\u7528\uFF1A\u8FD0\u884C\u65F6 ${runtimeCatalog.selected}${runtimeCatalog.builtin ? "\uFF08\u5185\u7F6E\u515C\u5E95 " + runtimeCatalog.builtin + "\uFF09" : ""}` : runtimeCatalog.builtin ? `\u5F53\u524D\u4F7F\u7528\uFF1A\u5185\u7F6E dsh ${runtimeCatalog.builtin}\uFF08\u515C\u5E95\uFF09` : runtimeCatalog.running?.version ? `\u5F53\u524D\u4F7F\u7528\uFF1A\u8FD0\u884C\u65F6 ${runtimeCatalog.running.version}\uFF08${runtimeCatalog.running.kind}\uFF09` : "\u5F53\u524D\u65E0\u53EF\u7528 dsh" }),
           (() => {
             const seen = /* @__PURE__ */ new Set();
             const heads = [];
@@ -2344,9 +2316,9 @@ function DesktopSettingsPanel() {
               visible.map((c) => {
                 const installed = runtimeCatalog.installed.some((i) => i.version === c.version);
                 const isBuiltin = runtimeCatalog.builtin === c.version;
-                const isRunning = runtimeCatalog.mode !== "external" && runtimeCatalog.running?.version !== null && runtimeCatalog.running?.version !== void 0 && runtimeCatalog.running.version === c.version;
+                const isRunning = runtimeCatalog.running?.version !== null && runtimeCatalog.running?.version !== void 0 && runtimeCatalog.running.version === c.version;
                 const available = installed || isBuiltin || isRunning;
-                const isCurrent = runtimeCatalog.mode === "external" ? false : runtimeCatalog.selected ? runtimeCatalog.selected === c.version : isBuiltin || isRunning;
+                const isCurrent = runtimeCatalog.selected ? runtimeCatalog.selected === c.version : isBuiltin || isRunning;
                 const tags = [];
                 if (c.channel) tags.push(c.channel);
                 if (isBuiltin) tags.push("\u5185\u7F6E");
@@ -3068,20 +3040,15 @@ function registerNotificationsTab(ctx) {
 }
 
 // src/client/environment.ts
-var MODES = /* @__PURE__ */ new Set(["compatibility", "advanced"]);
 var PLATFORMS = /* @__PURE__ */ new Set(["darwin", "win32", "linux"]);
 function parseDesktopClientEnvironment(search) {
   const params = new URLSearchParams(search);
-  const mode = params.get("dsh-desktop-tauriapp-mode");
   const platform = params.get("dsh-desktop-tauriapp-platform");
-  if (mode === null && platform === null) return void 0;
-  if (!MODES.has(mode)) {
-    throw new Error(`dsh-desktop-tauriapp: invalid or missing dsh-desktop-tauriapp-mode ${JSON.stringify(mode)}`);
-  }
+  if (platform === null) return void 0;
   if (!PLATFORMS.has(platform)) {
     throw new Error(`dsh-desktop-tauriapp: invalid or missing dsh-desktop-tauriapp-platform ${JSON.stringify(platform)}`);
   }
-  return { mode, platform };
+  return { platform };
 }
 async function requestDesktopClientEnvironment() {
   const w = window;
@@ -3099,10 +3066,8 @@ async function requestDesktopClientEnvironment() {
   }
   const env = raw;
   if (!env) return void 0;
-  if (env.mode !== "compatibility" && env.mode !== "advanced") return void 0;
   if (env.platform !== "darwin" && env.platform !== "win32" && env.platform !== "linux") return void 0;
   return {
-    mode: env.mode,
     platform: env.platform,
     profile: typeof env.profile === "string" ? env.profile : void 0
   };
@@ -3762,7 +3727,7 @@ function apply(ctx) {
     registerNotificationsTab(ctx);
     step = "\u9AD8\u7EA7\u5E03\u5C40";
     void requestDesktopClientEnvironment().then((environment) => {
-      if (environment?.mode === "advanced") applyAdvancedShell(ctx, environment);
+      if (environment !== void 0) applyAdvancedShell(ctx, environment);
     }).catch(() => {
     });
   } catch (error) {

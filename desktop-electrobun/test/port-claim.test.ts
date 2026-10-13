@@ -35,7 +35,7 @@ describe('端口认领判定（旧壳 decide_claim）', () => {
       }),
     ).toBe('foreign-unknown')
   })
-  test('外部 dsh 占 web 遗留端口 → foreign-web（兼容复用候选）', () => {
+  test('外部 dsh 占 web 遗留端口 → foreign-web（自动清场候选）', () => {
     expect(decideClaim({ profile: 'web', port: 3080, portOpen: true, claims: [], legacyWebPort: 3080 })).toBe('foreign-web')
     expect(decideClaim({ profile: 'web', port: 5080, portOpen: true, claims: [], legacyWebPort: 5080 })).toBe('foreign-web')
     expect(decideClaim({ profile: 'web', port: 3080, portOpen: true, claims: [], legacyWebPort: 5080 })).toBe('foreign-unknown')

@@ -54,7 +54,7 @@ bun run assert:artifact                       # 产物断言（CI）
 | `src/bun/{tray,tray-menu}.ts` | 托盘（事件驱动 `setMenu`，不重建不闪菜单） |
 | `src/bun/{profile-manager,plugin-staging,profile-dialog}.ts` | profile 依赖物化 / 插件 staging 与 `--patch` 注入 / 新建迁移对话框 |
 | `src/bun/{downloads,notifications,keep-awake,lane-forwarder,watchdog,register-cli}.ts` | 下载管理器 / 通知策略 / 防休眠 / 手机 lane 转发 / 服务健康自愈 / 注册 dsh 命令 |
-| `src/bun/{runtime-store,runtime}.ts` + `src/shared/runtime-catalog.ts` | 运行时三来源（内置/已下载/外部 CLI）、下载安装、回收站卸载 |
+| `src/bun/{runtime-store,runtime}.ts` + `src/shared/runtime-catalog.ts` | 运行时来源（内置/已下载）、下载安装、回收站卸载 |
 | `src/shared/*.ts` | 纯逻辑（无 IO，直接单测）：设置归一化、端口公式、准入、导航规则、代理解析、watchdog 裁决 |
 | `runtime/bun-preload.mjs` | Bun 兼容层（node-pty shim / xterm 同步写 / koffi 探测），随 dsh 版本维护 |
 | `scripts/*.mjs` | 打包物料 / 封装签名 / NSIS 安装器 / 产物断言 |

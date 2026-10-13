@@ -19,10 +19,10 @@
  *   实现 dsh 的 DesktopShortcutsApi（get / edit / subscribe / recording）；
  * - 关窗：`closeWindow(revision)` 只在自己仍是最新配置时关（隐藏）当前窗口。
  *
- * Rust 侧载体（desktop/src-tauri/src/ui/browser_guests/mod.rs 的
- * DESKTOP_CARRIER_INIT_SCRIPT）在 document-start 写 platform 标记，并挂
- * `dshDesktop.keyboard` / `dshDesktop.shortcuts` 的惰性转发桩——dsh 在 client 插件构造期
- * 就会取用它们，而真实实现要等本模块装载，所以桩必须自己等实现出现。
+ * 壳侧载体（desktop-electrobun/src/bun/carrier.ts 的 carrierScript，随 preload 注入）在
+ * document-start 写 platform 标记，并挂 `dshDesktop.keyboard` / `dshDesktop.shortcuts`
+ * 的惰性转发桩——dsh 在 client 插件构造期就会取用它们，而真实实现要等本模块装载，
+ * 所以桩必须自己等实现出现。
  *
  * 已知不覆盖：Windows 无本机编译目标（靠 CI 静态把关）；被系统/WebView 先消费的组合
  * （⌘Q、⌘W 等）拿不到；iframe / guest webview 内的按键不在本捕获层内；壳不做绑定冲突

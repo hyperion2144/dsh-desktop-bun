@@ -238,11 +238,8 @@ function downloadStatusSafe(): RuntimeDownloadStatus {
   }
 }
 
-/** 运行时的展示名：外部 CLI / 已下载版本 / 随包内置三档，旧壳 `运行时：<label>` 同一口径。 */
+/** 运行时的展示名：已下载版本 / 随包内置两档，旧壳 `运行时：<label>` 同一口径。 */
 function runtimeLabelOf(snapshot: RuntimeSnapshot): string {
-  if (snapshot.mode === 'external') {
-    return snapshot.externalVersion === null ? '外部 dsh（未找到）' : `外部 dsh ${snapshot.externalVersion}`
-  }
   if (snapshot.activeVersion !== null && snapshot.activeVersion !== snapshot.builtinVersion) {
     return `${snapshot.activeVersion}（已下载）`
   }
@@ -280,13 +277,11 @@ function trayState(): TrayState {
     }),
     hostRunning: uiService().state.hostPid > 0,
     runtimeLabel: runtimeLabelOf(snapshot),
-    mode: settings.dshMode ?? 'builtin',
     builtinVersion: snapshot.builtinVersion,
     runningVersion: snapshot.activeVersion,
     selected: settings.dshRuntime ?? null,
     installed: snapshot.installed.map((entry) => entry.version),
     catalog: catalogCache?.entries ?? [],
-    externalAvailable: snapshot.externalPath !== null,
     downloading: download.active && download.version !== '' ? download.version : null,
     remoteAddr: settings.remoteAddr ?? null,
     remoteList: settings.remoteList,
@@ -602,14 +597,12 @@ async function restartServiceFromTray(): Promise<void> {
 }
 
 
-/** 托盘「运行时版本」：内置 / 外部 dsh / 某个已下载版本（写设置 + 杀宿主让守护器重起）。 */
+/** 托盘「运行时版本」：内置 / 某个已下载版本（写设置 + 杀宿主让守护器重起）。 */
 async function switchRuntimeFromTray(action: TrayAction): Promise<void> {
   const patch: Record<string, unknown> =
-    action.mode === 'external'
-      ? { dsh_mode: 'external' }
-      : action.version === undefined
-        ? { dsh_mode: 'builtin', dsh_runtime: null }
-        : { dsh_mode: 'builtin', dsh_runtime: action.version }
+    action.version === undefined
+      ? { dsh_mode: 'builtin', dsh_runtime: null }
+      : { dsh_mode: 'builtin', dsh_runtime: action.version }
   console.log(`[shell] 托盘：切换运行时 ${JSON.stringify(patch)}`)
   uiService().save(patch)
   refreshTray()
@@ -928,18 +921,11 @@ if ((process.env.DSH_DESKTOP_AUTO_QUIT ?? '') !== '') {
 
 let startupBlocked = false
 if (!noWindow) {
-  // 兼容/高级模式弹框（旧壳：端口被外部实例占用时先问再动）：启动界面里问，选完再建主窗。
+  // 启动被阻塞时在启动界面报错（端口被陌生程序占用；本壳/外部 dsh 占用已在壳内自动清场后自拉，不再询问）。
   if (service.state.blocked !== undefined) {
     splash?.webview?.executeJavascript(splashFailScript(service.state.blocked))
     setTimeout(() => { void shutdown() }, SPLASH_FAILURE_HOLD_MS)
     startupBlocked = true
-  }
-  if (!startupBlocked && service.modePromptNeeded()) {
-    const { profile, port } = { profile: service.state.profile, port: service.state.upstreamPort }
-    const origin = service.state.origin
-    const modeUi = `(function(){var d=document.createElement('div');d.style.cssText='position:fixed;inset:0;background:rgba(16,20,24,0.95);display:flex;flex-direction:column;gap:10px;padding:18px;font:13px/1.5 system-ui;color:#d7dde6;z-index:9';d.innerHTML='<b style=\"font-size:14px\">检测到已有 dsh 服务（外部实例）</b><span>端口 ${port} 上已有 dsh 在跑。兼容模式直接复用它（标准布局）；高级模式会停掉它并由壳重新拉起（桌面界面）。</span><input id=\"tk\" placeholder=\"可选：粘贴 dsh web 打印的完整 URL（含 token）\" style=\"padding:6px 8px;border-radius:6px;border:1px solid #3a4453;background:#0b0e12;color:#d7dde6\"/><div style=\"display:flex;gap:8px;justify-content:flex-end\"><button id=\"c\" style=\"padding:6px 12px;border-radius:6px\">兼容模式（标准布局）</button><button id=\"a\" style=\"padding:6px 12px;border-radius:6px;background:#3b82f6;color:#fff;border:0\">高级模式（桌面界面）</button></div><span id=\"m\" style=\"color:#8b95a3\"></span>';document.body.appendChild(d);var post=async function(mode){document.getElementById('m').textContent=mode==='compat'?'正在进入兼容模式…':'正在停用外部服务并以高级模式启动…';try{var r=await fetch('${origin}/__shell__/mode',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({mode:mode,tokenUrl:document.getElementById('tk').value})});var j=await r.json();if(j.needsToken){document.getElementById('m').textContent='请粘贴带 token 的完整 URL 后再点兼容模式';return}d.remove()}catch(e){document.getElementById('m').textContent=String(e)}};document.getElementById('c').onclick=function(){post('compat')};document.getElementById('a').onclick=function(){post('advanced')}})()`
-    splash?.webview?.executeJavascript(modeUi)
-    await service.modeChosen
   }
   // 标题栏形态与旧壳对齐：macOS 保留原生红绿灯并叠在内容上（旧壳 TitleBarStyle::Overlay），
   // Windows/Linux 隐藏原生标题栏，caption 行与窗口按钮由插件 client 自绘（旧壳 decorations:false）。

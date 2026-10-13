@@ -59,14 +59,11 @@ import { readKeybindings, writeKeybindings } from './keybindings.ts'
 import type { CatalogEntry } from '../shared/runtime-catalog.ts'
 import type { RuntimeSource } from '../shared/settings.ts'
 import {
-  externalPackageRoot,
-  externalVersion,
   fetchRuntimeCatalog,
   listInstalledRuntimes,
   purgeRuntimeTrash,
   readRuntimeVersion,
   recordInstalledRuntime,
-  resolveExternalRuntime,
   trashInstalledRuntime,
 } from './runtime-store.ts'
 import { createRuntimeDownloader, ensureNodeShim, installRuntime, resolvePnpmCjs } from './runtime-install.ts'
@@ -146,8 +143,6 @@ export interface ShellState {
   settings: DesktopSettings
   /** 设置文件的读取过程（首启/迁移/损坏重建） */
   settingsProvenance: { created: boolean; migrated: boolean; recovered: boolean }
-  /** 接入模式（旧壳 DshState.mode 的内存态：compat 复用外部实例、advanced 壳自拉） */
-  mode: 'advanced' | 'compat'
   /** 启动被阻塞的原因（旧壳 ForeignUnknown：端口被陌生程序占用，只报错不代杀）；未阻塞时无此字段 */
   blocked?: string
 }
@@ -168,7 +163,7 @@ export interface ShellService {
   settings: () => DesktopSettings
   /** 改设置：与命令表同一条写盘路径（落盘 + 刷新状态文件） */
   save: (patch: Record<string, unknown>) => DesktopSettings
-  /** 运行时快照（来源 / 内置版本 / 已装列表 / 外部 dsh） */
+  /** 运行时快照（来源 / 内置版本 / 已装列表） */
   runtime: () => RuntimeSnapshot
   /** 拉版本目录（失败不抛，回 {entries, error}） */
   fetchCatalog: (source: RuntimeSource) => Promise<{ entries: CatalogEntry[]; error?: string }>
@@ -178,12 +173,6 @@ export interface ShellService {
   downloadStatus: () => RuntimeDownloadStatus
   /** 下载并安装一个运行时（单飞） */
   download: (version: string, source: RuntimeSource) => Promise<{ ok: true; version: string }>
-  /** 兼容/高级模式弹框当前是否在等用户选（旧壳 get_mode_prompt_needed） */
-  modePromptNeeded: () => boolean
-  /** 选模式（旧壳 choose_desktop_mode）：compat 复用外部实例（可带 tokenUrl），advanced 清场后壳自拉 */
-  chooseDesktopMode: (mode: string, tokenUrl?: string) => Promise<{ ok: true; needsToken: boolean }>
-  /** 等待用户选完模式；无弹框时启动即已定（advanced），立即 resolve */
-  modeChosen: Promise<'advanced' | 'compat'>
   /** 新建 / 迁移 profile（F9：托盘弹框的落点；结果回给弹框展示） */
   profileOp: (request: ProfileOpRequest) => Promise<ProfileOpResult>
   /** profileOp 落地后的回调（create → 开窗，migrate → 刷新托盘）；测试可注入 */
@@ -227,12 +216,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   ].filter((entry) => entry !== '')
   log(`设置：${settingsSummary(settings)}${provenance.length > 0 ? `（${provenance.join('；')}）` : ''}`)
 
-  // 运行时选中：设置里的 dsh 来源（builtin/external）与偏好版本在这里生效；
+  // 运行时选中：设置里的偏好版本（dsh_runtime）在这里生效；
   // 旧壳的 DSH_MODE / DSH_SHELL_RUNTIME_DIR 覆盖仍在 layout 内部处理。
   let paths = layout({
     env,
     profile: options.profile ?? activeProfile(settings, env),
-    mode: settings.dshMode,
     preferred: settings.dshRuntime,
   })
   options.onStage?.('layout')
@@ -256,7 +244,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   const builtinDir = resolveBuiltinRuntimeDir(env, { repoRoot: paths.repoRoot, resourcesDir: paths.resourcesDir })
   const pnpmCjs = resolvePnpmCjs({
     env,
-    runtimeRoot: paths.runtimeKind === 'external' ? null : paths.runtimeDir,
+    runtimeRoot: paths.runtimeDir,
     builtinDir,
     appSupport: paths.appSupport,
   })
@@ -336,7 +324,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 上游/lane 固定端口（旧壳公式，用户口径：不做随机端口与顺延）：
   //   上游 = env DSH_DESKTOP_PORT > profile_ports >（web 的遗留 port）> 3080/3081/3082+fnv%512
   //   lane = env DSH_MOBILE_LANE_PORT > profile_lane_ports >（web 的遗留 lane_port）> 3092/3093/3094+fnv%512
-  // 跨进程的端口冲突不做静默顺延：启动前判定（见下方 decideClaim），弹「兼容/高级」或明确报错。
+  // 跨进程的端口冲突不做静默顺延：启动前判定（见下方 decideClaim）；本壳/外部 dsh 占用 → 自动清场后壳自拉，陌生程序占用 → 明确报错。
   // 同进程多窗口的互相避让用 taken（含其它服务面已占的端口与页面端口），只在会话内存里记。
   const taken = new Set<number>([pagePort])
   for (const claim of claims) {
@@ -608,13 +596,6 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     claims: oursAlive ? [{ profile: paths.profile, port: upstreamPort, alive: true }] : [],
     legacyWebPort: profilePort(settings, 'web', env),
   })
-  // 接入模式与弹框状态（旧壳 DshState：内存态，不落盘、重启后端口仍被占会再问）
-  let shellMode: 'advanced' | 'compat' = 'advanced'
-  let modePromptNeeded = false
-  let resolveModeChoice!: (mode: 'advanced' | 'compat') => void
-  const modeChosen = new Promise<'advanced' | 'compat'>((resolvePromise) => {
-    resolveModeChoice = resolvePromise
-  })
   let blockedMessage: string | undefined
   // 远程模式跳过本地端口认领（旧壳 startup 远程短路：根本不走本地 spawn 链）
   if (remoteAddr !== null || decision === 'free') {
@@ -622,9 +603,16 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   } else if (decision === 'foreign-unknown') {
     blockedMessage = `端口 ${String(upstreamPort)} 被其他实例或程序占用（profile=${paths.profile}），已停止自动拉起；可在设置中调整该 profile 的端口后重试`
     log(`[shell] ${blockedMessage}`)
-  } else if (remoteAddr === null) {
-    modePromptNeeded = true
-    log(`[shell] 127.0.0.1:${String(upstreamPort)} 已有${decision === 'ours' ? '本壳拉起过的' : '外部'} dsh 实例在监听，等待选择「兼容 / 高级」接入模式`)
+  } else {
+    // 端口被占（本壳旧实例 / 外部 dsh web）：自动清场后由壳自拉（不再弹「兼容 / 高级」弹框）
+    const freed = await stopPortOwner({ port: upstreamPort, log })
+    if (freed) {
+      log(`[shell] 已清理 127.0.0.1:${String(upstreamPort)} 上的旧实例，由壳重新拉起上游`)
+      await connect()
+    } else {
+      blockedMessage = `端口 ${String(upstreamPort)} 清理失败，仍被其他程序占用（profile=${paths.profile}）；可在设置中调整该 profile 的端口后重试`
+      log(`[shell] ${blockedMessage}`)
+    }
   }
   options.onStage?.('cookie')
 
@@ -666,25 +654,17 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     },
     downloadDir: join(env.HOME ?? home, 'Downloads'),
   })
-  // 命令表要的运行时快照：设置里的来源 + 当前生效的运行时 + 已装列表 + 外部 dsh 定位。
+  // 命令表要的运行时快照：当前生效的运行时 + 内置版本 + 已装列表。
   // 每次调用都重算（面板刷新时顺带发现新装/新删的版本；旧壳同样在命令里现查）。
   const runtimeSnapshot = (): RuntimeSnapshot => {
-    const mode = liveSettings.dshMode ?? 'builtin'
-    // 外部来源取「能用」的那一个：PATH 上可能先撞到壳自己的垫片脚本（定位不到包根）
-    const external = mode === 'external' ? resolveExternalRuntime(env, { home: env.HOME, log }) : null
-    const externalBin = external?.bin ?? null
-    const externalRoot = externalBin === null ? null : externalPackageRoot(externalBin)
     const builtinDir = resolveBuiltinRuntimeDir(env, { repoRoot: paths.repoRoot, resourcesDir: paths.resourcesDir })
     return {
-      mode,
       builtinVersion: builtinDir === null ? null : readRuntimeVersion(builtinDir),
       activeVersion: paths.runtimeVersion,
       activeKind: paths.runtimeKind,
       activeDir: paths.runtimeDir,
       selected: liveSettings.dshRuntime ?? null,
       installed: listInstalledRuntimes(paths.appSupport),
-      externalPath: externalBin,
-      externalVersion: external?.version ?? (externalRoot === null ? null : externalVersion(externalRoot)),
     }
   }
   const serverOptions: ShellServerOptions = {
@@ -700,8 +680,6 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onWindowControl: options.onWindowControl,
     onProfileOp: (request) => service.profileOp(request),
     onInputConfirm: options.onInputConfirm,
-    getModePrompt: () => ({ needed: modePromptNeeded, profile: paths.profile, port: upstreamPort }),
-    chooseMode: (mode, tokenUrl) => chooseDesktopMode(mode, tokenUrl),
     views: options.views,
     onLog: log,
     onRpc: async (raw, grant) => {
@@ -757,49 +735,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     noWindow: options.noWindow ?? false,
     settings,
     settingsProvenance: { created: loaded.created, migrated: loaded.migrated, recovered: loaded.recovered },
-    mode: shellMode,
     ...(blockedMessage === undefined ? {} : { blocked: blockedMessage }),
   }
   await Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
-
-  // ---- 兼容 / 高级模式（旧壳 choose_desktop_mode + get_mode_prompt_needed）----
-  const chooseDesktopMode = async (mode: string, tokenUrl?: string): Promise<{ ok: true; needsToken: boolean }> => {
-    if (mode !== 'compat' && mode !== 'advanced') throw new Error(`未知的桌面接入模式：${mode}`)
-    modePromptNeeded = false
-    if (mode === 'compat') {
-      const raw = (tokenUrl ?? '').trim()
-      const token = extractTokenFromUrl(raw)
-      if (raw !== '' && token === null) log('[mode] 未能识别 token：输入里没有 ?token= 参数，将按老版 dsh 直连（新版会 401）')
-      shellMode = 'compat'
-      if (token !== null) {
-        try {
-          const auth = await fetch(`http://127.0.0.1:${String(upstreamPort)}/?token=${token}`, { redirect: 'manual' })
-          const setCookies = (auth.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? []
-          cookie = setCookies[0]?.split(';')[0] ?? ''
-          serverOptions.cookie = cookie
-          log(`[mode] 兼容模式：auth ${String(auth.status)} | cookie = ${cookie === '' ? '(none)' : `${cookie.slice(0, 18)}…`}`)
-        } catch (error) {
-          log(`[mode] 兼容模式换 cookie 失败：${error instanceof Error ? error.message : String(error)}`)
-        }
-      }
-      state.pageUrl = token !== null ? `http://127.0.0.1:${String(upstreamPort)}/?token=${token}` : `http://127.0.0.1:${String(upstreamPort)}/`
-      state.mode = 'compat'
-      void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
-      resolveModeChoice('compat')
-      return { ok: true, needsToken: raw === '' }
-    }
-    // 高级：清场后由壳自己拉起
-    const freed = await stopPortOwner({ port: upstreamPort, log })
-    if (!freed) throw new Error('等待本地服务就绪超时，请查看下方日志输出并重试。')
-    await connect()
-    shellMode = 'advanced'
-    applyHost()
-    state.pageUrl = `${server.origin}/${token}/`
-    state.mode = 'advanced'
-    void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
-    resolveModeChoice('advanced')
-    return { ok: true, needsToken: false }
-  }
 
   // ---- 诊断快照（#220 日志与诊断）：一个 JSON 回答「哪版、哪个 profile、端口/pod、日志在哪」----
   const startedAt = new Date().toISOString()
@@ -960,11 +898,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       if (verdict.notify) notifier.notify(SCENARIO.SERVICE_HEALTH, `远程 dsh 不可达：${verdict.verbose}`)
       return
     }
-    if (verdict.kind === 'external-down') {
-      log(`[watchdog] 外部 dsh 实例不可达，未自动重启（那是用户的实例）`)
-      if (verdict.notify) notifier.notify(SCENARIO.SERVICE_HEALTH, '复用的外部 dsh 实例已停止，请手动重启服务')
-      return
-    }
+    // 兼容复用已移除（地图 #2）：壳不再认领「外部实例」；此裁决仅在宿主交接窗口瞬时可达，跳过本轮即可
+    if (verdict.kind === 'external-down') return
     if (verdict.kind === 'gave-up') {
       log('[watchdog] 连续自动恢复失败 3 次，停止自愈')
       notifier.notify(SCENARIO.SERVICE_HEALTH, 'dsh 服务异常：连续自动恢复失败，请手动重启')
@@ -1024,9 +959,6 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log }),
     downloadStatus: () => downloader.status(),
     download: (version, source) => downloader.start(version, source),
-    modePromptNeeded: () => modePromptNeeded,
-    chooseDesktopMode: chooseDesktopMode,
-    modeChosen,
     profileOp: async (request) => {
       if (request.op === 'create') {
         const name = request.target ?? ''
@@ -1080,12 +1012,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     },
     restartHost: async () => {
       if (stopping) return
-      // 设置面板切了 dsh 来源/运行时版本：这里重新解析选中项（同一个 paths 对象就地更新，
+      // 设置面板切了运行时版本：这里重新解析选中项（同一个 paths 对象就地更新，
       // 服务面、状态与命令表都以它为事实源），再杀宿主——守护器会带着新运行时重启。
       const next = layout({
         env,
         profile: paths.profile,
-        mode: liveSettings.dshMode,
         preferred: liveSettings.dshRuntime,
       })
       if (next.runtimeDir !== paths.runtimeDir) {
@@ -1151,8 +1082,6 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       log,
       settings: () => liveSettings,
       save: saveSettings,
-      modePrompt: () => modePromptNeeded,
-      chooseMode: (mode: string, tokenUrl?: string) => chooseDesktopMode(mode, tokenUrl),
       restartService: () => service.restartHost(),
       status: () => ({ ...state }),
       ports: () => ({ port: pagePort, lanePort }),

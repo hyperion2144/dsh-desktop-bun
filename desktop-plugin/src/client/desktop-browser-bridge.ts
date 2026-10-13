@@ -1,9 +1,9 @@
 /**
  * 侧边栏浏览器 guest 载体桥（#118/#134）。
  *
- * 壳 Rust 侧在本地 loopback 窗口注入了 `globalThis.dshDesktop`（protocolVersion 1）
- * 的惰性标记（见 desktop/src-tauri/src/ui/browser_guests/mod.rs 的
- * DESKTOP_CARRIER_INIT_SCRIPT）；dsh 的 ui-sidebar-browser 探测到载体后即切换为
+ * 壳在本地窗口经 preload 注入 `globalThis.dshDesktop`（protocolVersion 1）的惰性标记
+ * （desktop-electrobun/src/bun/carrier.ts 的 carrierScript）；dsh 的 ui-sidebar-browser
+ * 探测到载体后即切换为
  * guest 模式（ElectronWebviewImpl + <webview> 标签）。本文件提供标记背后的
  * 真实实现（`__dshShellBridgeImpl`）：
  *
@@ -308,7 +308,7 @@ interface BridgeImpl {
 
 /**
  * 安装桌面壳浏览器 guest 桥（幂等）。
- * 仅当壳 Rust 侧已注入 `globalThis.dshDesktop` 标记（本地 loopback 窗口）时生效。
+ * 仅当壳已注入 `globalThis.dshDesktop` 标记（本地窗口，preload 载体）时生效。
  */
 export function installDesktopBrowserBridge(): void {
   const g = globalThis as unknown as { dshDesktop?: unknown; __dshShellBridgeImpl?: BridgeImpl }
