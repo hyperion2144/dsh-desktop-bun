@@ -251,7 +251,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   if (purgedTrash > 0) log(`运行时回收站：清理 ${String(purgedTrash)} 项（上一次卸载的残留）`)
 
   // ---- 运行时下载安装：面板点「下载」→ 单飞装树（命令表只调 downloader，不自己 spawn）----
-  // pnpm.cjs 随内置树分发（`prepare-builtin-runtime.mjs` 装的 pnpm@11.16.0）；包管理器跑在**我们的 Bun** 上。
+  // pnpm.cjs 随内置树分发（prepare:bundle 按 builtin-runtime.json 声明物化，#16）；包管理器跑在**我们的 Bun** 上。
   const bunPath = process.execPath
   const builtinDir = resolveBuiltinRuntimeDir(env, { repoRoot: paths.repoRoot, resourcesDir: paths.resourcesDir })
   const pnpmCjs = resolvePnpmCjs({

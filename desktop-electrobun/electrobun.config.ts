@@ -86,8 +86,8 @@ export default {
       ...pluginCopy(desktopPluginDir, 'dsh-desktop-bun', desktopPluginFiles),
       ...pluginCopy(mobileAccessDir, 'dsh-mobile-access', mobileAccessFiles),
       ...pluginCopy(mobileLayoutDir, 'dsh-web-mobile', mobileLayoutFiles),
-      // 内置 dsh 运行时（随包发出，item 1）：prepare:bundle 把一棵可用的运行时树物化到
-      // builtin-runtime/（来源：仓内 Tauri 树 / 已下载运行时 / DSH_SHELL_BUILTIN_SOURCE）。
+      // 内置 dsh 运行时（随包发出，item 1）：prepare:bundle 按 builtin-runtime.json 声明物化一棵可用树到
+      // builtin-runtime/（声明版本下载 / 已就绪复用 / DSH_SHELL_BUILTIN_SOURCE 显式逃生口，#16）。
       // 只在真的物化成功时声明：Electrobun 的 copy 不会「源缺就跳过」，写死会 CopySourceMissing。
       ...(existsSync(join(import.meta.dir, 'builtin-runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
         ? { 'builtin-runtime': 'dsh' }
