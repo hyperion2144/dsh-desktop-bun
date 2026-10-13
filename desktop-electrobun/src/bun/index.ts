@@ -803,7 +803,9 @@ async function registerDshCliFromTray(): Promise<void> {
 
 // ---- 单实例：已有实例活着就不起第二份宿主，只请它把窗口带到前台 ----
 // （Electrobun 2.0.2 没有单实例 API，旧 Tauri 壳用的是 tauri-plugin-single-instance）
-// P2 测试钩子（旧壳 lib.rs:742-757）：DSH_DESKTOP_NO_SINGLETON=1 跳过单实例互斥（并行探针用）
+// P2 测试钩子（旧壳 lib.rs:742-757）：DSH_DESKTOP_NO_SINGLETON=1 只跳过这把壳层锁——
+// CEF 层的 Chromium ProcessSingleton（按 <identifier>/<channel>/CEF 数据目录加锁）不归它管；
+// 并行带窗双实例还要在构建期用 DSH_SHELL_DEV_IDENTIFIER 换 id（见 electrobun.config / README #38）。
 const instanceFile = join(appSupportDir(), 'shell-instance.json')
 const instance = acquireInstance(instanceFile, instanceProfile)
 const skipSingleton = (process.env.DSH_DESKTOP_NO_SINGLETON ?? '') !== ''

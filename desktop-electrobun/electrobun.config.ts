@@ -1,5 +1,6 @@
 import type { ElectrobunConfig } from 'electrobun'
 import { APP_NAME } from './src/shared/app.ts'
+import { bundleIdentifierOverride, resolveBundleIdentifier } from './src/shared/app-identity.ts'
 import { DEFAULT_UPDATE_BASE_URL } from './src/shared/update.ts'
 import { existsSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -46,10 +47,21 @@ const mobileAccessFiles = ['package.json', 'cordis.patch.yml', ...listFiles(mobi
 const mobileLayoutDir = join(repoDir, 'mobile', 'dsh-mobile-nav')
 const mobileLayoutFiles = ['package.json', 'cordis.patch.yml', 'README.md', ...listFiles(mobileLayoutDir, 'lib'), ...listFiles(mobileLayoutDir, 'assets')]
 
+// #38：dev 并行实例的构建期换 id 口子（DSH_SHELL_DEV_IDENTIFIER）。命中覆盖时大声提醒——
+// 这个变量漏进 canary/stable 构建会静默产出换 id 的正式包，签名与升级链都会错位。
+const identifierOverride = bundleIdentifierOverride()
+if (identifierOverride !== null) {
+  console.warn(
+    `[electrobun.config] DSH_SHELL_DEV_IDENTIFIER=${identifierOverride}：本次构建将覆盖 bundle id（并行测试实例专用，正式构建勿设）`,
+  )
+}
+
 export default {
   app: {
     name: APP_NAME,
-    identifier: 'com.hyperion.dsh-desktop-bun',
+    // bundle id：dev 并行第二实例用 DSH_SHELL_DEV_IDENTIFIER 换 id（#38），默认与既有产物一致；
+    // 它决定 CEF 数据目录（<id>/<channel>/CEF）与 Chromium ProcessSingleton 锁的归属。
+    identifier: resolveBundleIdentifier(),
     version: '0.1.0',
   },
   build: {
