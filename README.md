@@ -29,6 +29,7 @@ DeepSeek Harness 的原生桌面壳：**Electrobun（Bun 主进程）+ CEF（Bli
 依赖：[Bun](https://bun.sh) 1.4+、[hutch](https://hutch.blackboard.sh)（Electrobun CLI）；Windows 安装器另需 NSIS。
 
 ```bash
+git submodule update --init --recursive    # mobile/dsh-mobile-nav（手机布局插件 dsh-web-mobile）来自子模块，漏拉则构建断言失败
 bun install --frozen-lockfile
 node scripts/prepare-builtin-runtime.mjs --variant latest   # 装配随包 dsh 运行时
 cd desktop-electrobun

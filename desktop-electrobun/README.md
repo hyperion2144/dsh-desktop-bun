@@ -6,6 +6,7 @@
 ## 开发
 
 ```bash
+git submodule update --init --recursive          # 手机布局插件 dsh-web-mobile 来自 mobile/dsh-mobile-nav 子模块，漏拉则 dev 跳过、打包断言失败
 bun install                          # devDep 只有 @types/bun
 
 # 无窗口：只起服务面，stdout 打一行 SHELL-READY {json}（CI / 黑盒用）
