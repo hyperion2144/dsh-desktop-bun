@@ -5,7 +5,7 @@
 
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
-import { reconcileProfileTree } from './profile-tree.ts'
+import { reconcileProfileRuntimeTree } from './profile-tree.ts'
 import { scaffoldProfile } from './profile-scaffold.ts'
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
@@ -411,11 +411,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
 
   // ---- profile 依赖树：运行时树摊平（#209；官方打包态 core 物化的等价物）----
   const reconcileProfileFor = (profile: string): void => {
-    const modules = `${paths.home}/profiles/${profile}/node_modules`
-    mkdirSync(modules, { recursive: true })
-    reconcileProfileTree({
+    // #13：落点 = 共享池 profiles/node_modules（per-profile 池的壳遗留链接由入口前置清理）
+    reconcileProfileRuntimeTree({
+      home: paths.home,
+      profile,
       runtimeModules: `${paths.runtimeDir}/node_modules`,
-      profileModules: modules,
       onLog: log,
     })
   }
@@ -1094,6 +1094,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         )
       }
       Object.assign(paths, next)
+      // #13：运行时变了，共享池立即重指（全局一份，重指一次全部 profile 生效；迁移清理幂等）
+      reconcileProfileFor(paths.profile)
       serverOptions.distDir = paths.distDir
       state.runtimeDir = paths.runtimeDir
       state.distDir = paths.distDir
