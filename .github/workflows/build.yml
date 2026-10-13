@@ -273,9 +273,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dsh-desktop-shell-${{ matrix.label }}
+          # 只上传「交给人的交付物」：Windows = NSIS 安装程序，macOS = DMG，Linux = tar.gz。
+          # 更新链资产（*-update.json / *.app.tar.zst / Setup.tar.zst）留给将来的 release job，
+          # 不进 CI artifact——GitHub 会把 artifact 包成一层 zip，混进更新包就变成上 GB 的压缩包。
           path: |
-            desktop-electrobun/artifacts/**
-            desktop-electrobun/build/**/*.dmg
-            desktop-electrobun/build/**/Setup*.zip
-            desktop-electrobun/build/**/*.tar.gz
+            desktop-electrobun/artifacts/*-setup.exe
+            desktop-electrobun/artifacts/*.dmg
+            desktop-electrobun/artifacts/linux-*.tar.gz
           if-no-files-found: error
