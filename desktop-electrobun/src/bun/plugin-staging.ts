@@ -22,7 +22,8 @@ export const DESKTOP_PLUGIN_PACKAGE = 'dsh-desktop-bun'
 /** 手机访问插件（仓内 `mobile/dsh-mobile-access`）。 */
 export const MOBILE_ACCESS_PACKAGE = 'dsh-mobile-access'
 /** 移动布局插件（仓内 `mobile/dsh-mobile-nav`，上游 v2.3.0 起包名为 dsh-web-mobile）。 */
-export const MOBILE_LAYOUT_REPO_DIR = 'dsh-mobile-nav'
+export const MOBILE_ACCESS_REPO_DIR = 'plugins/dsh-mobile-access'
+export const MOBILE_LAYOUT_REPO_DIR = 'mobile/dsh-mobile-nav'
 
 export interface PluginPaths {
   /** 仓库根（开发态） */
@@ -70,7 +71,7 @@ export function desktopPluginDir(paths: PluginPaths, env: Record<string, string 
 export function mobilePackageDir(paths: PluginPaths, name: string, rel: string): string | null {
   const candidates = [
     paths.resourcesDir === null ? '' : join(paths.resourcesDir, 'plugins', name),
-    join(paths.repoRoot, 'mobile', rel),
+    join(paths.repoRoot, rel),
   ]
   return locatePackage(candidates)
 }
@@ -123,7 +124,7 @@ export function stagePlugins(options: {
   }
 
   stage(DESKTOP_PLUGIN_PACKAGE, desktopPluginDir(options.paths, env))
-  stage(MOBILE_ACCESS_PACKAGE, mobilePackageDir(options.paths, MOBILE_ACCESS_PACKAGE, MOBILE_ACCESS_PACKAGE))
+  stage(MOBILE_ACCESS_PACKAGE, mobilePackageDir(options.paths, MOBILE_ACCESS_PACKAGE, MOBILE_ACCESS_REPO_DIR))
   stage(
     'dsh-web-mobile',
     mobilePackageDir(options.paths, 'dsh-web-mobile', MOBILE_LAYOUT_REPO_DIR) ??
