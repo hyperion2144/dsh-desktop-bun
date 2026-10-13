@@ -115,6 +115,9 @@ export function createMobileAccessService(opts = {}) {
       // 由 routePairing 先于转发处理；打到这里的一律要求 cookie，杜绝「前缀豁免 +
       // 上游路径归一化」绕过。命名空间外的一切路径（含 dsh 自有路由）原样透传，不做白名单。
       const cookie = parseCookie(req.headers.cookie, 'dsh_mobile_session');
+      // PWA 清单放行（精确路径）：浏览器对 <link rel=manifest> 的获取不保证携带会话 cookie，
+      // 401 会把「桌面通知」等面板卡在加载中；清单非敏感，透传上游即可（#43）。
+      if ((req.url ?? '').split('?')[0] === '/manifest.webmanifest') return { ok: true };
       // 顺手把该设备的最新 UA/IP/接入路径刷新下来（#145 延伸）：
       // ①已配对的老设备（早先只存了名字）不用重新配对就能被富化；
       // ②同一台设备换入口（局域网↔隧道）时面板能跟上。
