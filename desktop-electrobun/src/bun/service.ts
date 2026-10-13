@@ -18,7 +18,7 @@ import { portOpen, stopPortOwner } from './port-owner.ts'
 import { startHost } from './host.ts'
 import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-shell-env.ts'
 import type { ShellStage } from './stages.ts'
-import { layout, resolveBuiltinRuntimeDir, type ShellLayout } from './runtime.ts'
+import { dshHome, layout, resolveBuiltinRuntimeDir, type ShellLayout } from './runtime.ts'
 import { startShellServer, type BootPayload, type ShellServer, type ShellServerOptions } from './shell-server.ts'
 import { readHostRecords, sweepStaleHosts, upsertHostRecord, writeHostRecords } from './host-registry.ts'
 import { createRestartLedger } from './supervisor.ts'
@@ -192,7 +192,9 @@ export interface ShellService {
 
 export async function startService(options: ServiceOptions): Promise<ShellService> {
   const env = options.env ?? process.env
-  const home = env.DSH_HOME ?? join(env.HOME ?? '.', '.dsh')
+  // #1：home 统一走 dshHome()（DSH_HOME → homedir()/.dsh）；Windows 没有 HOME，
+  // 旧实现 env.HOME 兜 '.' 的写法会退化成相对路径 .dsh，shell.log/settings 全落进 bin\.dsh。
+  const home = dshHome(env)
   const logFile = env.DSH_SHELL_LOG ?? join(home, 'shell.log')
   const webviewLogFile = join(home, 'dsh-desktop-webview.log')
   const stateFile = env.DSH_SHELL_STATE_FILE ?? join(home, 'shell-state.json')
