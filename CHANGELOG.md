@@ -3,6 +3,7 @@
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
 ## Unreleased
+- **Agent skills 配置**：初始化 mattpocock 技能套件的仓库配置——`docs/agents/issue-tracker.md`（GitHub Issues + `gh` 约定，PRs 不作 triage 请求面）、`docs/agents/triage-labels.md`（triage 五角色默认映射）、`docs/agents/domain.md`（single-context：全仓共用根目录 `CONTEXT.md`，ADR 放 `docs/adr/`，与套件模板 GLOSSARY.md 的命名差异已注记）；`AGENTS.md` 增 `## Agent skills` 块；GitHub 仓库补齐标签（triage 五角色 + wayfinder 五标签，`wontfix` 原有）。
 
 - **A8 迁移**：壳整体从 hyperion2144/dsh-desktop-tauriapp 迁入独立仓 `dsh-desktop-bun`（PR #222 不合入，旧仓保留 Tauri 壳作回退）。桌面插件改名 `dsh-desktop-tauriapp` → `dsh-desktop-bun`（A10）；`bun-preload.mjs` 与图标单一来源随仓 `resources/`；内置运行时装配脚本重写为独立仓版（装进 `resources/builtin/`，无 Node sidecar）；更新基址切到本仓 releases。旧设置键 `dsh-desktop-tauriapp:` 保留只读识别。
 ### 桌面壳（Electrobun）

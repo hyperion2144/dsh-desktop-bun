@@ -8,3 +8,17 @@
 - 契约红线：设置文件键名、`/api` 与 `/plugins` 的 no-store、页面 token 路径前缀准入、
   CEF 三处开关（config bundleCEF / defaultRenderer / 每窗 renderer:'cef'）与启动断言，
   缺一即回归（#220 规格）。
+
+## Agent skills
+
+### Issue tracker
+
+本仓库的 issue 与 spec 统一走 GitHub Issues（hyperion2144/dsh-desktop-bun，`gh` CLI 操作；PRs 不作为 triage 请求面）。See `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+使用默认五个 triage 角色：`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`；`/wayfinder` 另用 `wayfinder:map` / `research` / `prototype` / `grilling` / `task`。See `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+single-context：一个仓库共用一份根目录的 `CONTEXT.md`，架构决定放 `docs/adr/`。See `docs/agents/domain.md`。
