@@ -200,6 +200,7 @@ describe('宿主停止：等到真退出，超时就升级 SIGKILL', () => {
     return {
       home: dir,
       profile: 'desktop',
+    profileDir: `${dir}/profiles/desktop`,
       appSupport: dir,
       runtimeDir: dir,
       dshLibDir: dir,

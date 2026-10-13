@@ -12,7 +12,7 @@ import type { ProxyEnv } from './proxy-env.ts'
 // 迁移后壳自己拿这个值（app 版本），不再依赖运行时环境里恰好有。
 
 export const CLIENT_VERSION_KEY = 'DSH_CLIENT_VERSION'
-export const REQUIRED_ENV_KEYS = [CLIENT_VERSION_KEY, 'DSH_PROFILE', 'DSH_HOME'] as const
+export const REQUIRED_ENV_KEYS = [CLIENT_VERSION_KEY, 'DSH_PROFILE'] as const
 
 /** 端口合法性（子进程只认正经端口；坏值宁可不下发，让宿主插件用它的默认值）。 */
 function isValidPortNumber(value: number): boolean {
@@ -51,7 +51,7 @@ export interface ChildEnvInput {
   base: Record<string, string | undefined>
   clientVersion: string
   profile: string
-  home: string
+  home?: string | undefined
   profileDir?: string | undefined
   preloadTrees?: string | undefined
   /** 插件解析回退：运行时树的 node_modules（Bun 下装不了 Node resolver hooks，见 #209） */
@@ -79,7 +79,10 @@ export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
   }
   env[CLIENT_VERSION_KEY] = input.clientVersion
   env.DSH_PROFILE = input.profile
-  env.DSH_HOME = input.home
+  // DSH_HOME 只透传调用方显式给的（测试隔离用 CI 的 env）；不再由壳自设——
+  // 官方桌面不设这个变量，dsh 按自己的 home-paths 逻辑解析（实机反馈：设置里 home 被钉死）。
+  if (input.home !== undefined) env.DSH_HOME = input.home
+  else delete env.DSH_HOME
   if (input.profileDir !== undefined) env.DSH_PROFILE_DIR = input.profileDir
   else delete env.DSH_PROFILE_DIR
   if (input.preloadTrees !== undefined) env.DSH_BUN_PRELOAD_TREES = input.preloadTrees

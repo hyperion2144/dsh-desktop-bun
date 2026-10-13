@@ -5,6 +5,7 @@
 // 显式覆盖 > 外部 CLI（mode=external）> 偏好/最高已下载版本 > 随包内置；两套目录布局
 // 都要认（appSupport/runtimes 是 root 布局，外部 CLI 是包根布局）。
 
+import { profileDirOf } from './profile-scaffold.ts'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -27,6 +28,8 @@ export interface ShellLayout {
   /** ~/.dsh 或 DSH_HOME */
   home: string
   profile: string
+  /** profile 目录绝对路径（<home>/profiles/<name>，宿主 argv 用） */
+  profileDir: string
   /** 应用支持目录（运行时树所在） */
   appSupport: string
   /** 运行时来源：override=env 指定 / external=外部 dsh CLI 树 / installed=已下载 / builtin=随包 */
@@ -334,6 +337,7 @@ export function layout(input: LayoutInput = {}): ShellLayout {
   const result: ShellLayout = {
     home,
     profile,
+    profileDir: profileDirOf(home, profile),
     appSupport: appSupportDir(env),
     runtimeKind: selection.kind,
     runtimeDir,

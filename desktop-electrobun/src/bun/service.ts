@@ -3,6 +3,10 @@
 // 这一层**不 import electrobun**，所以缝 ① 的黑盒测试与「无窗口启动契约」可以直接用
 // 普通 bun 跑（无显示器、无 CEF 的 CI 也能跑），窗口是 index.ts 的事。
 
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
+import { reconcileProfileTree } from './profile-tree.ts'
+import { scaffoldProfile } from './profile-scaffold.ts'
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { choosePort, claimFor, parseClaims, pruneClaims, releaseClaim, upsertClaim } from '../shared/ports.ts'
@@ -14,14 +18,12 @@ import { portOpen, stopPortOwner } from './port-owner.ts'
 import { startHost } from './host.ts'
 import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-shell-env.ts'
 import type { ShellStage } from './stages.ts'
-import { reconcileProfileTree } from './profile-tree.ts'
 import { layout, resolveBuiltinRuntimeDir, type ShellLayout } from './runtime.ts'
 import { startShellServer, type BootPayload, type ShellServer, type ShellServerOptions } from './shell-server.ts'
 import { readHostRecords, sweepStaleHosts, upsertHostRecord, writeHostRecords } from './host-registry.ts'
 import { createRestartLedger } from './supervisor.ts'
 import type { ContextMenuRequest } from './context-menu.ts'
 import { loadSettings } from './settings-store.ts'
-import { scaffoldProfile } from './profile-scaffold.ts'
 import { isValidProfileName, isSelfMigrate } from './profile-dialog.ts'
 import type { ProfileOpRequest, ProfileOpResult } from './profile-dialog.ts'
 export type { ProfileOpRequest, ProfileOpResult } from './profile-dialog.ts'
@@ -286,20 +288,6 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     log,
   })
 
-  // ---- profile 树 reconcile：空 DSH_HOME 下也把运行时树摊进 profile（#209）----
-  const reconcileProfileFor = (profile: string): void => {
-    const modules = `${paths.home}/profiles/${profile}/node_modules`
-    mkdirSync(modules, { recursive: true })
-    reconcileProfileTree({
-      runtimeModules: `${paths.runtimeDir}/node_modules`,
-      profileModules: modules,
-      onLog: log,
-    })
-  }
-  const reconcileProfile = (): void => reconcileProfileFor(paths.profile)
-  // 已有 profile 就先摊平；空的留给 dsh 自己脚手架（它要求目标目录不存在），首启完成后再摊。
-  if (existsSync(`${paths.home}/profiles/${paths.profile}/package.json`)) reconcileProfile()
-
   // ---- 页面 origin 端口：固定 + 被占顺延（origin 是 localStorage 的隔离键）----
   const readClaims = async (): Promise<string> => {
     try {
@@ -395,16 +383,42 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // ---- profile 脚手架 + 插件 staging（都必须在起宿主之前，这次 spawn 就要能看到）----
   // ① profile：上游 `loadProfile()` 只认「目录里已有 package.json」的 profile，缺了就报
   //    `dsh: profile "desktop" does not exist`——全新 DSH_HOME 能起壳就是因为这一步。
-  const scaffold = scaffoldProfile(home, paths.profile)
-  if (scaffold.created.length > 0) {
-    log(`profile 脚手架：写入 ${scaffold.created.join('、')}（${paths.profile}）`)
+  // 官方对齐（分两层）：
+  // ① profile 目录初始化 = dsh 自己的 initProfile（apps/desktop/src/project-manager.ts 的
+  //    createPluginProfile 同款，bundles 与 web 一致）；壳不再手写四份模板。
+  // ② 依赖物化：官方打包态会把 core 依赖物化进 profile（createRuntimeProjectMetadata +
+  //    包管理器）；Bun 下没有等价 loader（#209），所以沿用「运行时树摊平」物化。
+
+  // dsh 自己的 profile 初始化（apps/desktop createPluginProfile 同款）：目录缺 package.json
+  // 时用 boot.initProfile 落 dsh 的标准 profile，而不是壳手写的脚手架。
+  const ensureProfileInitialised = (layout: ShellLayout): void => {
+    const profileDir = `${layout.home}/profiles/${layout.profile}`
+    if (existsSync(`${profileDir}/package.json`)) return
+    try {
+      const require = createRequire(join(layout.dshLibDir, 'bin.js'))
+      const bootUrl = pathToFileURL(require.resolve('@deepseek-ai/dsh-app-boot')).href
+      // 动态 import 拿不到具名导出时静默退回（宿主脚本里还有同款兜底）
+      void import(bootUrl).then((boot) => {
+        boot.initProfile(profileDir, ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
+        log(`profile 初始化（dsh initProfile）：${profileDir}`)
+      }).catch(() => {})
+    } catch {
+      // 运行时树还没就绪等场景：宿主脚本启动时会再兜底一次
+    }
   }
-  // 新 profile 的依赖树：dsh 自己不会装（它只组合 bundles），所以按 #209 的做法把
-  // 运行时树的模块摊进 profile——否则首启后插件会整片 failed to import。
-  if (scaffold.created.includes('package.json')) {
-    reconcileProfile()
-    log(`profile 依赖树：已按运行时树摊平（${paths.profile}）`)
+
+  // ---- profile 依赖树：运行时树摊平（#209；官方打包态 core 物化的等价物）----
+  const reconcileProfileFor = (profile: string): void => {
+    const modules = `${paths.home}/profiles/${profile}/node_modules`
+    mkdirSync(modules, { recursive: true })
+    reconcileProfileTree({
+      runtimeModules: `${paths.runtimeDir}/node_modules`,
+      profileModules: modules,
+      onLog: log,
+    })
   }
+  ensureProfileInitialised(paths)
+  reconcileProfileFor(paths.profile)
 
   // ---- 防休眠（#186）：纯裁决 + tick 循环；忙状态由宿主插件 POST /notify 上报 ----
   // 旧壳把通知口跑在独立随机端口上（notify.rs），端口与令牌经环境变量交给 dsh 侧插件；
@@ -552,8 +566,6 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       ) {
         throw error
       }
-      log('首次启动：profile 已建立但依赖树为空，摊平 profile 树后重试')
-      reconcileProfile()
       host = await startHost({
         layout: paths,
         clientVersion: options.clientVersion,

@@ -64,7 +64,9 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
     base: input.env ?? process.env,
     clientVersion: input.clientVersion,
     profile,
-    home: layout.home,
+    // DSH_HOME 不再由壳自设：官方桌面不注入它，dsh 按自己的 home-paths 解析。
+    // profileDir 显式传给宿主（argv），两侧行为一致不靠猜。
+    home: (input.env ?? process.env).DSH_HOME,
     profileDir: `${layout.home}/profiles/${profile}`,
     preloadTrees: layout.runtimeDir,
     nodePath: `${layout.runtimeDir}/node_modules`,
@@ -85,6 +87,7 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
     layout.preloadFile,
     layout.hostScript,
     layout.dshLibDir,
+    layout.profileDir,
     profile,
     input.mode ?? 'existing',
   ]

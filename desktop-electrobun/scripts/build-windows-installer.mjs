@@ -17,7 +17,7 @@
  */
 import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { execSync, spawnSync } from 'node:child_process'
 
 const projectRoot = resolve(import.meta.dir, '..')
 const buildRoot = join(projectRoot, 'build')
@@ -100,9 +100,86 @@ if (!existsSync(iconPath)) {
   process.exit(1)
 }
 
-// 应用目录可能上万文件（CEF），逐条 File /r 会爆命令行：改成在 NSIS 里对整目录 /r 递归。
 // OutFile 固定落 artifacts/（与 mac dmg 同一个交付目录）。
 const outFile = join(projectRoot, 'artifacts', 'windows-x64-DeepSeekHarnessDesktopBUN-setup.exe')
+// NSIS 的 File /r 在 Windows 上打不开超过 MAX_PATH（260）的源文件——CI 的构建根
+// （D:\a\...\build\stable-win-x64\...）叠上 dsh 依赖树里的长文件名就会爆。
+// 解法：打包前把整棵应用树 robocopy 到超短路径（C:\dsh-pkg\App），NSI 从那里打包。
+
+// ── 打包期载荷解压：setup 装完即可直接用，双击 launcher 不再二次解压 ──
+// 用户实机反馈（m23622）：NSIS 只装「launcher + payload 归档」，首跑 launcher 还要自解压一遍
+// （等于装两次）。所以在打包时就把 Resources/<hash>.tar.zst 解开并并回应用树，随后从安装树里
+// 删掉归档；.installer 改名行也随之不需要（extractFromSelf 找不到相邻归档 → 直接正常启动）。
+const payloadResDir = join(appDir, 'Resources')
+const payloadArchiveName = existsSync(payloadResDir)
+  ? readdirSync(payloadResDir).find((name) => name.endsWith('.tar.zst'))
+  : undefined
+let payloadPreExtracted = false
+if (payloadArchiveName !== undefined) {
+  const toolsDir = join(projectRoot, 'build', 'installer-tools')
+  mkdirSync(toolsDir, { recursive: true })
+  const zstdZip = join(toolsDir, 'zstd.zip')
+  const zstdExePath = join(toolsDir, 'zstd.exe')
+  if (!existsSync(zstdExePath)) {
+    execSync(
+      `curl -fsSL -o ${JSON.stringify(zstdZip)} https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-v1.5.6-win64.zip`,
+      { stdio: 'inherit' },
+    )
+    execSync(`powershell -NoProfile -Command "Expand-Archive -Path '${zstdZip}' -DestinationPath '${toolsDir}' -Force"`, { stdio: 'inherit' })
+  }
+  let resolvedZstd = zstdExePath
+  if (!existsSync(resolvedZstd)) {
+    // Expand-Archive 会保留 zip 内层目录（zstd-v1.5.6-win64/zstd.exe），递归找
+    const found = readdirSync(toolsDir, { recursive: true }).find((name) => name === 'zstd.exe' || name.endsWith('\\zstd.exe'))
+    if (found === undefined) {
+      console.error('[installer] zstd.exe 下载/展开失败，无法在打包期解载荷')
+      process.exit(1)
+    }
+    resolvedZstd = join(toolsDir, found)
+  }
+  const stageTar = join(toolsDir, 'payload.tar')
+  execSync(`${JSON.stringify(resolvedZstd)} -d -f ${JSON.stringify(join(payloadResDir, payloadArchiveName))} -o ${JSON.stringify(stageTar)}`, { stdio: 'inherit' })
+  const stageDir = join(toolsDir, 'payload')
+  rmSync(stageDir, { recursive: true, force: true })
+  mkdirSync(stageDir, { recursive: true })
+  execSync(`tar -xf ${JSON.stringify(stageTar)} -C ${JSON.stringify(stageDir)}`, { stdio: 'inherit' })
+  // 归档根目录 = 应用目录名；把它的内容并回 appDir（覆盖式）
+  const extractedRoot = join(stageDir, appDirName)
+  const mergeFrom = existsSync(extractedRoot) ? extractedRoot : stageDir
+  cpSync(mergeFrom, appDir, { recursive: true, force: true })
+  rmSync(join(payloadResDir, payloadArchiveName), { force: true })
+  payloadPreExtracted = true
+  // 诊断：bin/ 里必须落着 bun.exe（冒烟与首启都靠它）；不在就打印两边目录找差异
+  const mergedBin = join(appDir, 'bin')
+  const binEntries = existsSync(mergedBin) ? readdirSync(mergedBin) : []
+  console.log(`[installer] 合并后 bin/：${binEntries.join(', ') || '(空)'}`)
+  const stageBin = join(stageDir, appDirName, 'bin')
+  if (!binEntries.includes('bun.exe')) {
+    const stageBinEntries = existsSync(stageBin) ? readdirSync(stageBin) : []
+    console.log(`[installer] 解包暂存 bin/：${stageBinEntries.join(', ') || '(空)'}`)
+    const payloadBin = join(stageDir, appDirName, 'Resources', 'app', 'bun')
+    if (existsSync(payloadBin)) {
+      console.log(`[installer] Resources/app/bun/：${readdirSync(payloadBin).slice(0, 10).join(', ')}`)
+    }
+  }
+  console.log('[installer] 载荷已在打包期解并（setup 装完即用，首启不再自解压）')
+}
+
+let packDir = appDir
+if (process.platform === 'win32' && appDir.length > 80) {
+  const shortRoot = 'C:\\dsh-pkg'
+  const shortDir = join(shortRoot, 'App')
+  rmSync(shortRoot, { recursive: true, force: true })
+  mkdirSync(shortRoot, { recursive: true })
+  const copied = spawnSync('robocopy', [appDir, shortDir, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP'], { stdio: 'ignore' })
+  // robocopy 的退出码 0-7 都是成功（1=有文件复制）；≥8 才是失败
+  if ((copied.status ?? 8) > 7) {
+    console.error(`[installer] robocopy 到短路径失败：status = ${copied.status}`)
+    process.exit(1)
+  }
+  packDir = shortDir
+  console.log(`[installer] 应用树已复制到短路径（源路径 ${appDir.length} 字符）：${shortDir}`)
+}
 const nsiTemplate = `
 ; Unicode true：快捷方式名里的中文（卸载）必须走 Unicode 安装器，否则开始菜单乱码
 Unicode true
@@ -129,7 +206,7 @@ UninstPage instfiles
 
 Section "install"
   SetOutPath "$INSTDIR\\@@APP_DIR_NAME@@"
-  File /r "${nsiEscape(appDir)}\\*.*"
+  File /r "${nsiEscape(packDir)}\\*.*"
   @@PAYLOAD_RENAME@@  ; Windows 自解压约定：<launcher 同目录>/.installer/<stem>.tar.zst + <stem>.metadata.json
   WriteUninstaller "$INSTDIR\\@@APP_DIR_NAME@@\\uninstall.exe"
   WriteRegStr HKCU "Software\\@@APP_ID@@" "InstallDir" $INSTDIR

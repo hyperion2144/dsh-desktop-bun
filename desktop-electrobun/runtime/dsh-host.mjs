@@ -11,13 +11,14 @@
 // 环境：DSH_HOME 由壳注入（buildChildEnv），另有 DSH_CLIENT_VERSION 等（见 src/shared/child-env.ts）
 
 import { createRequire } from 'node:module'
+import { existsSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { watchParent } from './parent-watch.mjs'
 
-const [libDir, profileName = 'desktop', mode = 'existing'] = process.argv.slice(2)
-if (libDir === undefined) {
-  console.error('[host] 缺少 dsh lib 目录参数')
+const [libDir, profileDir, profileName = 'desktop', mode = 'existing'] = process.argv.slice(2)
+if (libDir === undefined || profileDir === undefined) {
+  console.error('[host] 缺少参数：dsh-host.mjs <dshLibDir> <profileDir> [profile] [mode]')
   process.exit(2)
 }
 
@@ -27,6 +28,10 @@ const require = createRequire(join(libDir, 'bin.js'))
 
 const boot = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-app-boot')).href)
 const { runProfile } = await import(pathToFileURL(join(libDir, 'profile-boot.js')).href)
+
+// 官方对齐（apps/desktop/src/project-manager.ts）：desktop profile 的 bundles 与 web 一致，
+// 首次创建用 dsh 自己的 initProfile（profile 目录不存在 package.json 时），不再由壳手写脚手架。
+const WEB_PROFILE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
 
 /** 壳交给我们的 `--patch` 清单（冒号分隔；空串 = 无注入）。 */
 function patchFiles() {
@@ -42,10 +47,20 @@ function patchFiles() {
 console.log(
   `[host] bun = ${process.versions.bun} | profile = ${profileName} | DSH_HOME = ${process.env.DSH_HOME ?? '(unset)'} | DSH_CLIENT_VERSION = ${process.env.DSH_CLIENT_VERSION ?? '(unset)'}`,
 )
+// 官方对齐（apps/desktop-host/src/index.ts）：loadProfileDirectory → reportSkippedBundles →
+// runProfile 带 resolvedProfile。bundle 一律经 installAnchor 从运行时树解析，profile 目录
+// 不需要装依赖——这正是官方 profile「看起来是空的也能跑」的原因。
+if (!existsSync(join(profileDir, 'package.json'))) {
+  boot.initProfile(profileDir, WEB_PROFILE_BUNDLES)
+  console.log(`[host] profile 初始化（dsh 自己的逻辑）：${profileDir}`)
+}
+const loadedProfile = boot.loadProfileDirectory('dsh', profileDir, installAnchor)
+boot.reportSkippedBundles('dsh', loadedProfile)
+if (mode !== 'existing') console.log(`[host] 启动模式：${mode}（seed 语义已废弃，交给 dsh initProfile）`)
 const application = runProfile({
   environment: boot.loadLayeredEnv('dsh'),
   profile: profileName,
-  ...(mode === 'fresh' ? { fromDefaultProfile: 'web' } : {}),
+  resolvedProfile: { profile: loadedProfile, installAnchor },
   // 注入清单：壳写好的 `--patch` 覆盖层（connection inject / 网关心跳 / 壳插件行）。
   // 旧壳把同一份文件交给 dsh CLI 的 `--patch`；这里走 runProfile 的 patchFiles 入口。
   patchFiles: patchFiles(),
