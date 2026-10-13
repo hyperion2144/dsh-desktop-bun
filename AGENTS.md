@@ -7,7 +7,7 @@
   `## Unreleased`；PR 优先，未经维护者允许不合并。
 - 契约红线：设置文件键名、`/api` 与 `/plugins` 的 no-store、页面 token 路径前缀准入、
   CEF 三处开关（config bundleCEF / defaultRenderer / 每窗 renderer:'cef'）与启动断言，
-  缺一即回归（#220 规格）。
+  缺一即回归。
 
 ## Agent skills
 
