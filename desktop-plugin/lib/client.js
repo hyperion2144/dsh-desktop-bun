@@ -1,10 +1,9 @@
 window.__ModuleLoader__.load({
-  id: "dsh-desktop-tauriapp",
+  id: "dsh-desktop-bun",
   factory: (require) => {
 var module = { exports: {} };
 var exports = module.exports;
 
-"use strict";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
