@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: "dsh-desktop-tauriapp",
+  id: "dsh-desktop-bun",
   factory: (require) => {
 var module = { exports: {} };
 var exports = module.exports;
