@@ -212,7 +212,8 @@ jobs:
           # 包内 bun 跑 Resources/main.js」，与 mac launcher 的引导语义一致，覆盖安装器 + 载荷 + 服务面。
           $payloadRes = Join-Path $appRoot.FullName 'Resources'
           # 载荷解压：不依赖上游自解压器（本 payload 上会卡死），用 zstd + tar 自行解开
-          $zst = Get-ChildItem $payloadRes -Filter *.tar.zst | Select-Object -First 1
+          # 安装器把载荷改名进了 bin\.installer（自解压约定位），全树搜
+          $zst = Get-ChildItem $appRoot.FullName -Recurse -Filter *.tar.zst | Select-Object -First 1
           if ($null -eq $zst) { throw '安装树里没有载荷归档（*.tar.zst）' }
           $zstdDir = Join-Path $env:RUNNER_TEMP 'zstd'
           $zip = Join-Path $zstdDir 'zstd.zip'
