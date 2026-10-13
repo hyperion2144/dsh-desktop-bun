@@ -379,6 +379,10 @@ export function createRewriteProxy(opts) {
         const h = loopbackAuthority({ ...req.headers }, upHost, upPort);
         upstreamAuth?.applyTo(h);
         stripHopByHop(h); // 连接语义由本代理与上游之间重新协商
+        // #42：文档导航强制 identity——上游对 HTML 也 gzip，压缩响应无法注入
+        //（OWNS_HOST/POLYFILL 等缺席 → 远程页被判非 loopback，settings/提供商目录全拒）。
+        // API/资产请求保留压缩协商，不白费移动带宽。
+        if (/text\/html/i.test(String(req.headers.accept ?? ''))) h['accept-encoding'] = 'identity';
         return h;
       };
       const targetPath = lb ? lb.path : normalizeRemotePath(req.url);
