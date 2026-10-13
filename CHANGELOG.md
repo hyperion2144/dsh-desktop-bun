@@ -29,6 +29,7 @@
 
 ### Fixed
 
+- 端口三类混显、只有上游可设（#22）：Profile 端口表只显一列「启动端口」（实为页面 origin 口）却拿它当上游输入框占位，lane 口只读、页面口无设置项、壳级转发器口写死 3091——dsh 实例上游口 / 页面口（loopback）/ lane（手机代理）三类口互相混淆。行契约改显式 page_port / upstream_port / lane_port 三列（台账补记 dataPort=上游口激活避让；未运行 profile 显配置/公式期望值，页面口显上次台账值或「启动时分配」）；三类口全部可设置：上游 profile_ports.<name>（既有）、页面口 profile_page_ports.<name>（新键，语义对齐 env DSH_SHELL_PAGE_PORT——请求值被占顺延，保存二次确认 + 常驻警示「换口＝换浏览器本地存储」）、lane profile_lane_ports.<name>（既有键改可编辑）、壳级转发器 lane_forwarder_port（新键，缺省回退遗留 lane_port 再缺省 3091，重启壳生效）；另修面板点号键 patch 新壳静默丢失（旧壳 Rust 会展开）：updateSettings 补 expandDottedPatch。
 - 手机布局插件未进 dev 与打包（#20）：mobile/dsh-mobile-nav 子模块未拉取时插件池缺 dsh-web-mobile，staging 只在汇总行尾部带一句「缺包跳过」纯静默——新增独立警告通道（缺包时单独一行点名缺的包与 `git submodule update --init` 补救命令，经壳 `console.warn` 输出）；assert-artifact 把 `plugins/dsh-web-mobile/package.json` 列入必带清单（漏拉子模块的构建硬失败）；README 两处补子模块拉取步骤；CI Checkout 已带 `submodules: recursive`（44f2c53）。
 - CI 检查覆盖面（#18）：check.yml 并入桌面插件门禁——`test:client`（含 main 已重写指向新壳 `carrier.ts` 的载体断言段）+ 全量 `tsc`（tsconfig strict 覆盖 src/client 全部 14 文件，契约补 `ctx.effect`、disposer 用类型谓词收窄，零豁免）；新增 Windows 兜底 job（壳 `bun test` + 插件 `test:client` 双平台可跑性），首跑即抓到 `test-client.mjs` 裸路径动态 import 的移植性 bug（`pathToFileURL` 修复），POSIX-only 用例按平台条件 skip 并在票内留档清单；同步修正 `desktop-plugin/README.md` 旧壳构建/发布链说明；`build:client` 定性为构建产出、不进检查门禁。
 - Windows 安装版启动失败（#1）：DSH_HOME 缺省改走 `dshHome()`（Windows 无 HOME 时旧写法退化成相对路径 `.dsh`，日志/设置落进安装目录）；profile 依赖摊平改用 `lstatSync` 判存在——悬空链接不再撞 EEXIST，被旧版本真实目录占住的运行时包就地替换；指错方向的链接（含旧壳残留，不分公司）一律删掉重指到当前运行时树。

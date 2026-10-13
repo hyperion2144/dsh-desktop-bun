@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { startShellServer } from '../src/bun/shell-server.ts'
 import { createCommandTable, type CommandDeps } from '../src/bun/commands.ts'
 import { createRpcRouter, dispatchRpc, parseRpcRequest, rpcCommands, type RpcContext } from '../src/bun/rpc.ts'
-import { defaultSettings, type DesktopSettings } from '../src/shared/settings.ts'
+import { defaultSettings, profileLanePort, profilePort, type DesktopSettings } from '../src/shared/settings.ts'
 import { resolveProxyEnv } from '../src/shared/proxy-env.ts'
 import { loadSettings, saveSettings, updateSettings } from '../src/bun/settings-store.ts'
 
@@ -47,7 +47,7 @@ function harness(overrides: Partial<CommandDeps> = {}): {
       calls.restarts += 1
     },
     status: () => ({ origin: 'http://127.0.0.1:6390', pageUrl: 'http://127.0.0.1:6390/tok/', upstreamPort: 3081 }),
-    ports: () => ({ port: 6390, lanePort: 3092 }),
+    ports: () => ({ port: 6390, upstreamPort: 3081, lanePort: 3092 }),
     openExternal: (url) => calls.external.push(url),
     closeWindow: () => {
       calls.closed += 1
@@ -375,26 +375,35 @@ describe('命令表', () => {
 describe('多窗口的数据面（列表类命令要看到别的 profile / 正在跑的运行时）', () => {
   test('list_profile_ports：行来自磁盘 profile ∪ 共享台账，自己那行用活值且排最前', async () => {
     const h = harness({
-      ports: () => ({ port: 6393, lanePort: 6397 }),
+      ports: () => ({ port: 6393, upstreamPort: 3081, lanePort: 6397 }),
       profiles: () => ['desktop', 'mobile', 'web'],
       portClaims: async () => [
-        { profile: 'desktop', port: 6391, lanePort: 6398, pid: process.pid, startedAt: '2026-10-11T00:00:00.000Z' },
-        { profile: 'web', port: 6391, lanePort: 6398, pid: process.pid, startedAt: '2026-10-11T00:00:00.000Z' },
+        { profile: 'desktop', port: 6391, dataPort: 3081, lanePort: 6398, pid: process.pid, startedAt: '2026-10-11T00:00:00.000Z' },
+        { profile: 'web', port: 6391, dataPort: 3080, lanePort: 6398, pid: process.pid, startedAt: '2026-10-11T00:00:00.000Z' },
         { profile: 'ghost', port: 6500, lanePort: 6501, pid: 999_999, startedAt: '2026-10-11T00:00:00.000Z' },
       ],
     })
     try {
+      // 未运行 profile 的期望值路径：面板存过显配置 ⇒ 行里显示配置值
+      await h.table.save_desktop_settings?.({ patch: { profilePorts: { mobile: 3085 }, profileLanePorts: { mobile: 3095 }, profilePagePorts: { mobile: 6395 } } })
       const rows = (await h.table.list_profile_ports?.({})) as Array<Record<string, unknown>>
       // 自己（desktop）在最前，且端口用本份服务面的活值，不是台账里的旧值
-      expect(rows[0]).toEqual({ profile: 'desktop', port: 6393, lane_port: 6397, running: true })
+      expect(rows[0]).toEqual({ profile: 'desktop', page_port: 6393, upstream_port: 3081, lane_port: 6397, running: true })
       // 兄弟 profile 从台账里读，还活着 ⇒ running（顺序按名字，所以按 profile 查而不是按位置）
       const web = rows.find((row) => row.profile === 'web')
-      expect(web).toEqual({ profile: 'web', port: 6391, lane_port: 6398, running: true })
+      expect(web).toEqual({ profile: 'web', page_port: 6391, upstream_port: 3080, lane_port: 6398, running: true })
       // 线程目录里没有的 profile 也要能被选中
       expect(rows.map((row) => row.profile)).toContain('mobile')
+      // 没有台账记录 ⇒ 三类口都显配置期望值；页面口没配过的 profile 才显 0（「启动时分配」）
+      const mobile = rows.find((row) => row.profile === 'mobile')
+      expect(mobile).toEqual({ profile: 'mobile', page_port: 6395, upstream_port: 3085, lane_port: 3095, running: false })
       // 台账里 pid 已死的照样列出来，但标成没在跑
       const ghost = rows.find((row) => row.profile === 'ghost')
       expect(ghost?.running).toBe(false)
+      expect(ghost?.page_port).toBe(6500)
+      expect(ghost?.lane_port).toBe(6501)
+      // 旧台账记录没有 dataPort ⇒ 上游口回退到公式期望值
+      expect(ghost?.upstream_port).toBe(profilePort(loadSettings({ home: h.home }).settings, 'ghost'))
     } finally {
       h.cleanup()
     }

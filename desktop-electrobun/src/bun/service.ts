@@ -316,7 +316,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 页面 origin 的认定 key：切 profile 不换 origin（localStorage 的隔离键就是它）
   const claimProfile = paths.profile
   const pagePort = choosePort({
-    requested: Number(env.DSH_SHELL_PAGE_PORT ?? '') || undefined,
+    requested: Number(env.DSH_SHELL_PAGE_PORT ?? '') || settings.profilePagePorts?.[paths.profile],
     lastClaimed: previous?.port,
     isFree: portFree,
   })
@@ -698,10 +698,10 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   const server = startShellServer(serverOptions)
   options.onStage?.('server')
   bootPayload.injections = [...hostInjections]
-  // 手机稳定接入点（旧壳 forwarder.rs #94）：监听遗留 lane 端口（settings.lanePort，默认 3091），
+  // 手机稳定接入点（旧壳 forwarder.rs #94）：监听遗留 lane 端口（laneForwarderPort > lanePort > 3091），
   // 新连接落本实例的 lane；外部 dsh 占了端口时退场（手机直连它即可）。多实例下只有先起的那份
   // 服务面拿得到转发器（同端口第二绑定必失败），index.ts 的焦点切换会找到它更新目标。
-  const forwarder = startLaneForwarder({ port: settings.lanePort ?? 3091, log })
+  const forwarder = startLaneForwarder({ port: settings.laneForwarderPort ?? settings.lanePort ?? 3091, log })
   forwarder?.setTarget(lanePort)
   const pageUrl = `${server.origin}/${token}/`
 
@@ -711,6 +711,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     const merged = upsertClaim(onDisk, {
       profile: claimProfile,
       port: pagePort,
+      dataPort: upstreamPort,
       lanePort,
       pid: process.pid,
       startedAt: new Date().toISOString(),
@@ -1088,7 +1089,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       save: saveSettings,
       restartService: () => service.restartHost(),
       status: () => ({ ...state }),
-      ports: () => ({ port: pagePort, lanePort }),
+      ports: () => ({ port: pagePort, upstreamPort, lanePort }),
       // 设置面板的 Profile 端口表要看到所有 profile（多窗口）：行来自共享台账 + 磁盘 profile 目录
       portClaims: async () => pruneClaims(parseClaims(await readClaims()), isAlivePid),
       profiles: () => listProfiles(home, paths.profile),

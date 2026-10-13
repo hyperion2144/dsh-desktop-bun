@@ -8,7 +8,7 @@ import type { DesktopSettings, RuntimeSource } from '../shared/settings.ts'
 import type { DownloadManager } from './downloads.ts'
 import type { RuntimeDownloadStatus } from './runtime-install.ts'
 import type { CatalogEntry, InstalledRuntime } from '../shared/runtime-catalog.ts'
-import { NOTIFICATION_GROUPS, NOTIFICATION_SCENARIOS, serializeSettings } from '../shared/settings.ts'
+import { NOTIFICATION_GROUPS, NOTIFICATION_SCENARIOS, profileLanePort, profilePort, serializeSettings } from '../shared/settings.ts'
 import { argNumber, argString, type RpcContext, type RpcHandler } from './rpc.ts'
 import type { GuestCommands } from './guest-manager.ts'
 import type { GuestPush } from '../shared/guest-policy.ts'
@@ -34,8 +34,8 @@ export interface CommandDeps {
   restartService?: () => Promise<void>
   /** dsh 服务面状态快照（`get_dsh_status`） */
   status?: () => Record<string, unknown>
-  /** 壳当前占用的端口（`list_profile_ports` 用） */
-  ports?: () => { port: number; lanePort: number } | undefined
+  /** 壳当前占用的端口（`list_profile_ports` 用：页面口/上游口/lane 口） */
+  ports?: () => { port: number; upstreamPort: number; lanePort: number } | undefined
   /** 共享端口台账（多窗口：每份 profile 的服务面都往同一个文件里记自己那行） */
   portClaims?: () => Promise<PortClaim[]>
   /** 磁盘上已知的 profile 名（`list_profile_ports` 的行来源之一） */
@@ -348,32 +348,39 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
 
     // 多窗口：设置面板每份窗口各问一次壳，但端口表要覆盖所有 profile。
     // 行来源＝磁盘上已知的 profile 名 ∪ 共享台账里的行；自己那行用本份服务面的活值。
+    // 行字段三类口分列：page_port（loopback 页面口）/ upstream_port（dsh 实例上游口）/ lane_port（手机代理口）。
     list_profile_ports: async () => {
       const local = profileOf(deps)
+      const settings = deps.settings()
       const ports = deps.ports?.()
       const claims = (await deps.portClaims?.()) ?? []
       const names = deps.profiles?.() ?? [local]
-      const rows = new Map<string, { profile: string; port: number; lane_port: number; running: boolean }>()
-      for (const profile of names) rows.set(profile, { profile, port: 0, lane_port: 0, running: false })
+      const rows = new Map<string, { profile: string; page_port: number; upstream_port: number; lane_port: number; running: boolean }>()
+      for (const profile of names) {
+        rows.set(profile, { profile, page_port: settings.profilePagePorts?.[profile] ?? 0, upstream_port: profilePort(settings, profile), lane_port: profileLanePort(settings, profile), running: false })
+      }
       for (const claim of claims) {
         const alive = pidAlive(claim.pid)
         const existing = rows.get(claim.profile)
         if (existing === undefined) {
           rows.set(claim.profile, {
             profile: claim.profile,
-            port: claim.port,
-            lane_port: claim.lanePort ?? 0,
+            page_port: claim.port,
+            upstream_port: claim.dataPort ?? profilePort(settings, claim.profile),
+            lane_port: claim.lanePort ?? profileLanePort(settings, claim.profile),
             running: alive,
           })
         } else {
-          existing.port = claim.port
-          existing.lane_port = claim.lanePort ?? 0
+          existing.page_port = claim.port
+          existing.upstream_port = claim.dataPort ?? existing.upstream_port
+          existing.lane_port = claim.lanePort ?? existing.lane_port
           existing.running = alive
         }
       }
       const own = rows.get(local)
       if (own !== undefined) {
-        own.port = ports?.port ?? own.port
+        own.page_port = ports?.port ?? own.page_port
+        own.upstream_port = ports?.upstreamPort ?? own.upstream_port
         own.lane_port = ports?.lanePort ?? own.lane_port
         own.running = true
       }
