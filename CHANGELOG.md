@@ -18,6 +18,7 @@
 - 应用内更新检查（Electrobun 更新器，基址为本仓 Releases）。
 - 页面右键菜单补齐（#21）：在既有系统 role 项与链接项之上，新增工作区文件行「打开」、文件夹行「打开文件夹」（dsh ui-sidebar-files 的 data-files-entry/data-files-path 稳定标记 → Utils.openPath，路径只认绝对路径）；dev 构建（未打包）菜单垫底「打开 DevTools」（BrowserView.openDevTools），release 不出现；「刷新页面」更名「刷新」。
 - CI 每日定时全量兜底（#8）：build.yml 新增 schedule（UTC 18:30 = 北京 02:30）；main 打包链（三平台打包 / NSIS / 断言 / 冒烟）由每日自动验证，防 hutch 与 runner 镜像漂移导致的静默腐坏。
+- loopback 数据面聚合（#54）：壳新增 `/__shell__/batch` 批量转发端点（一次 POST 携 ≤32 个子请求，并发转发按序聚合，单个失败不拖垮整批，整包 no-store）与相同 method+path+query 并发 GET 的单飞合并（≤256KB 且带 content-length 的响应共享给并发等待者，流式/大响应不缓冲）；`/__shell__/health` 新增 `proxiedInFlight`/`coalesced` 字段；proxy 慢请求日志由单段 ttfb 拆为 `ttfb`/`total` 两段（total 含流式体传输）。
 
 ### Changed
 - CI 触发策略分流（#7）：push/PR 只跑检查（typecheck + test，新增 Check workflow）；完整构建（三平台 + 断言 + 冒烟 + 上传）仅由 workflow_dispatch 与 tag push 触发。
@@ -26,10 +27,12 @@
 - 导航守卫在原生层评估（`navigationRules`），仅放行页面 origin，站外一律系统浏览器。
 - 移除外部 DSH CLI 支持：运行时只认随包内置或已下载版本；dsh 来源固定内置，历史配置 `dsh_mode=external` 静默回退（设置键保留），托盘/设置面板/命令面不再出现外部选项。
 - 移除兼容模式：端口被本壳旧实例或外部 dsh web 占用时自动清场后由壳自拉（不再弹「兼容 / 高级」选择框）；陌生程序占用且清理失败仍报错。壳 RPC 与页面环境载荷不再携带 mode 字段。
+- 页面 console 镜像与壳日志批量刷盘（#54）：桌面插件 client 的 console 镜像改攒批上报（新命令 `log_console_batch`，≤20 条/100ms 合并一次 RPC，旧壳自动回退逐条，guest/remote 白名单同步放行）；LogSink 新增 `bufferMs`（本壳 shell.log 与 dsh-desktop-webview.log 均 100ms 合并落盘，退出钩子同步 flush，崩溃最多丢一个缓冲窗口；行序/行格式/轮转/路径契约不变，不开缓冲仍逐行同步写）。
 
 ### Fixed
 
-- 手动「重启 dsh 服务」升级为完整重启、宿主停止升级为进程树级（#60）：托盘重启后 billion-context 会话代理失效的根因，是旧宿主被杀后其伴生进程（第三方插件的共享代理等）成孤儿，新宿主在秒级重启窗口 attach 上垂死的旧伴生（watcher 注册失败 → 模型流量静默直连；退出应用再启动不复现）。三层修复：新增 process-tree 模块（ps / PowerShell CIM 进程表枚举 + 树级停止编排：杀前枚举→同批 SIGTERM→宽限→SIGKILL 幸存者→有界确认树灭，超时放行并记日志，不阻塞重启）；host.stop() 按树级契约停止并暴露宿主生前树快照，守护器自愈在退避睡眠期间并行清扫崩溃残留孤儿（自愈节奏与退避策略不变）；托盘与设置面板「重启 dsh 服务」改为完整重启语义（退出级 teardown → 树灭确认 → 全新启动，等效退出应用再启动）。机制按「宿主进程树」通用概念实现，不点名任何插件或端口段。
+- 手动「重启 dsh 服务」升级为 DSH 完整重启、宿主停止升级为进程树级（#60）：托盘重启后 billion-context 会话代理失效的根因，是旧宿主被杀后其伴生进程（第三方插件的共享代理等）成孤儿，新宿主在秒级重启窗口 attach 上垂死的旧伴生（watcher 注册失败 → 模型流量静默直连；退出应用再启动不复现）。三层修复：新增 process-tree 模块（ps / PowerShell CIM 进程表枚举 + 树级停止编排：杀前枚举→同批 SIGTERM→宽限→SIGKILL 幸存者→有界确认树灭，超时放行并记日志，不阻塞重启）；host.stop() 按树级契约停止并暴露宿主生前树快照，守护器自愈在退避睡眠期间并行清扫崩溃残留孤儿（自愈节奏与退避策略不变）；托盘与设置面板「重启 dsh 服务」改为 DSH 完整重启语义（服务面树级停止 → 树灭确认 → 全新拉起新宿主，壳/托盘/窗口不动，窗口重载新会话）。机制按「宿主进程树」通用概念实现，不点名任何插件或端口段。
+- BUN 桌面「NodeJS 诊断」面板全白（#61）：Bun 的 node:inspector CDP 面太窄（官方兼容表 🟡，Runtime.evaluate / HeapProfiler.* 一律 -32601 wasn't found），DevTools 前端拿不到求值结果，底部面板整块空白（快捷键 Ctrl/Cmd+Shift+.）。bun-preload 新增 Patch 13/14：worker 侧在 HostInspectorSession.request()（五条宿主后端共用的唯一 session.post 落点）命中桥方法时经 hostSourcePort 转给主线程执行（node:vm.runInThisContext 按 CDP 原始 script 完成值语义求值 + WeakRef 对象表 + util.inspect 有界预览 + awaitPromise 服务端补 await），堆快照用主线程 v8.getHeapSnapshot() 读成分块经合成事件 HeapProfiler.addHeapSnapshotChunk 推回客户端；未命中方法照旧透传原生，typeof Bun 守卫下 Node 零变化。Sources/Debugger（断点）依赖 Bun 转发丢结果的协议面，本补丁不覆盖。PATCH_REV 7→8。
 - CI job 无超时兑底（#51）：hutch 首次构建要下载 cottontail/Electrobun/CEF/bun 四件套，下载器无超时无重试，偶发半开连接时进程挂死不退出（run 38493719636 实证 macOS job 占 runner 85 分钟；正常 3.5 分钟）。build.yml job 加 `timeout-minutes: 40`（全量正常 ~15 分钟）、check.yml 两 job 各加 `timeout-minutes: 20`，再挂自动失败不占 runner。
 - 侧栏 header 错层（#44）：壳侧骨架期红绿灯让位注入（padding-top:28px + body 平台标记）在桌面插件接管后未退役，叠在官方 alpha 前端的 darwin 顶带布局上，logo 被折叠按钮顶下一层（官方 Desktop.app 的视觉是 logo 与折叠按钮同行）。退役骨架注入；插件 CSS 把 topStrip 浮到 logoRow 行、logoRow 顶回红绿灯让位带下方，还原单行几何；data-platform 信号保留（折叠全隐/红绿灯旁座位按钮依赖它）。随票修复 PR #48 合入时 CHANGELOG 残留的一处未解冲突标记。
 

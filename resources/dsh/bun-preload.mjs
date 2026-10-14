@@ -11,6 +11,8 @@
  * 7. node-pty dispatcher + Bun.Terminal shim (see Patch 7 below)
  * 8. @xterm/headless synchronous write (Bun fires the deferred write after DSH serializes the buffer)
  * 9. node-addon-require-builtin dispatcher — the stub must exist in worker contexts too (#205)
+ * 10. Patch 13/14: inspector CDP 桥（#61）——worker 侧把 Runtime 求值族与 HeapProfiler 堆快照
+ *     转给主线程的 vm/v8 服务端，DevTools 面板在 Bun 下可用；全部 typeof Bun 守卫，Node 零变化
  *
  * 补丁落盘策略（#210）：物化后**不还原**，带 rev 指纹幂等——运行时树是被多个 dsh 进程共享的，
  * 任何进程退出时回写原文件都会把别的进程正在用的补丁抹掉（实测会把终端与 inspector 打回失败态）。
@@ -309,7 +311,7 @@ process.env.DSH_BUN_COMPAT_DISABLE_HMR = "1";
 // 抹掉——实测：黑盒测试宿主退出后，运行中的窗口终端立刻变回「进程已退出（1）」、inspector
 // 也起不来。改为「打上就不动」：目标文件是 dispatcher 形态（Bun 走 shim、其它运行时转
 // index.original.js），对 Node 无害；每条补丁带 rev 指纹，rev 变了才重写。
-const PATCH_REV = 7;
+const PATCH_REV = 8;
 const REV_MARK = `bun-preload-rev:${PATCH_REV}`;
 /** 已处理的文件，仅用于结尾汇总日志。 */
 const _patches = new Set();
@@ -794,4 +796,396 @@ for (const target of packageTargets('@deepseek-ai/dsh-experimental-inspector/lib
   console.log(`[bun-preload] Patch 12: fetch 访问器归一 applied${spreadFixed ? '（含 spread 修复）' : ''} to ${target}`);
 }
 
-console.log(`[bun-preload] ${REV_MARK} 应用完成：stripTypeScriptTypes / node-addon-require-builtin 桩 / HMR 关闭 / Bun.Terminal PTY / xterm 同步写 / 插件展示元数据解析 / 插件说明符 baseUrl 解析 / inspector fetch 归一+spread 修复（不还原）`);
+/** inspector CDP 桥两补丁共用：mark 命中（产物已是我们写的）→ 刷 rev 指纹，幂等不重打。 */
+function refreshBridgeFingerprint(label, target, source) {
+	const refreshed = bumpRev(source);
+	if (refreshed === source) {
+		console.log(`[bun-preload] ${label}: ${REV_MARK} 已就位 ${target}`);
+		return;
+	}
+	writePatch(target, refreshed);
+	console.log(`[bun-preload] ${label}: ${REV_MARK} 指纹已刷新 ${target}`);
+}
+
+// ── Patch 13: inspector worker 的宿主 CDP 桥（#61：Bun 下「NodeJS 诊断」面板全白）──
+// Bun 的 node:inspector CDP 面太窄（官方兼容表 🟡）：Runtime.evaluate、HeapProfiler.*
+// 等命令一律 -32601 wasn't found ⇒ DevTools 前端拿不到求值结果 ⇒ 面板整块空白。
+// HostInspectorSession.request() 是五条宿主后端（Runtime/Console/Sources/Debugger/
+// nativeDomains）共用的唯一 session.post 落点：命中桥方法时不碰 session.post，改经既有
+// hostSourcePort 把请求转给主线程执行（Patch 14 的服务端）；堆快照以合成事件
+// HeapProfiler.addHeapSnapshotChunk 经 session.listeners 推回客户端（nativeDomains 的
+// 转发管道天然放行）。未命中的方法照旧走原生——Bun 报什么就透什么，不掩盖上游缺口。
+// 运行时以 typeof Bun 守卫：同一份 bundle 被 Node 跑时零变化。worker 入口的
+// hostSourcePort.on("message") 先认领桥响应帧，防止未知帧落进 sources.receive 把
+// Host source 误判断连。
+const INSPECTOR_WORKER_BRIDGE_MARK = 'bun-preload: inspector CDP 桥（worker 侧）';
+const INSPECTOR_WORKER_REQUEST_FROM = [
+	'\trequest(method, params) {',
+	'\t\tconst failure = this.connect();',
+].join('\n');
+const INSPECTOR_WORKER_REQUEST_TO = [
+	`\trequest(method, params) { // ${REV_MARK} ${INSPECTOR_WORKER_BRIDGE_MARK}`,
+	'\t\tif (typeof Bun !== "undefined") {',
+	'\t\t\tconst bridged = __dshInspectorCdpBridge(this, method, params);',
+	'\t\t\tif (bridged !== void 0) return bridged;',
+	'\t\t}',
+	'\t\tconst failure = this.connect();',
+].join('\n');
+const INSPECTOR_WORKER_ENTRY_FROM =
+	'\t\tif (!hostQueries.receive(value)) sources.receive(hostConnection, value);';
+const INSPECTOR_WORKER_ENTRY_TO = [
+	`\t\tif (__dshCdpBridgeReceive(value)) return; // ${REV_MARK} ${INSPECTOR_WORKER_BRIDGE_MARK}`,
+	'\t\tif (!hostQueries.receive(value)) sources.receive(hostConnection, value);',
+].join('\n');
+const INSPECTOR_WORKER_BRIDGE_SOURCE = [
+	`// ${REV_MARK} ${INSPECTOR_WORKER_BRIDGE_MARK}`,
+	'// 初始化顺序说明：worker 入口在模块求值中途就会收到主线程的 source/open 帧，',
+	'// 桥全用 function/var（可提升）+ typeof 守卫，模块初始化完成前一律不接管、放行原流。',
+	'var DSH_CDP_BRIDGE_REQUEST = "dsh-cdp/request";',
+	'var DSH_CDP_BRIDGE_RESPONSE = "dsh-cdp/response";',
+	'var DSH_CDP_BRIDGE_METHODS = new Set([',
+	'\t"Runtime.evaluate",',
+	'\t"Runtime.callFunctionOn",',
+	'\t"Runtime.awaitPromise",',
+	'\t"Runtime.getProperties",',
+	'\t"Runtime.globalLexicalScopeNames",',
+	'\t"Runtime.releaseObject",',
+	'\t"Runtime.releaseObjectGroup"',
+	']);',
+	'var DSH_CDP_BRIDGE_PENDING = new Map();',
+	'var DSH_CDP_BRIDGE_SEQ = 0;',
+	'function __dshCdpBridgeReceive(value) {',
+	'\tif (typeof DSH_CDP_BRIDGE_RESPONSE === "undefined") return false;',
+	'\tif (typeof value !== "object" || value === null || value.t !== DSH_CDP_BRIDGE_RESPONSE) return false;',
+	'\tif (!DSH_CDP_BRIDGE_PENDING) return true;',
+	'\tconst pending = DSH_CDP_BRIDGE_PENDING.get(value.requestId);',
+	'\tif (pending === void 0) return true;',
+	'\tDSH_CDP_BRIDGE_PENDING.delete(value.requestId);',
+	'\tif (value.ok) pending.resolve(value.payload === void 0 ? {} : value.payload);',
+	'\telse pending.reject(new Error(`inspector host bridge: ${value.error ?? "unknown error"}`));',
+	'\treturn true;',
+	'}',
+	'function __dshCdpBridgeCall(op, params) {',
+	'\tif (!DSH_CDP_BRIDGE_PENDING) return Promise.reject(new Error("inspector host bridge: not ready"));',
+	'\treturn new Promise((resolve, reject) => {',
+	'\t\tconst requestId = `dsh-cdp-bridge-${++DSH_CDP_BRIDGE_SEQ}`;',
+	'\t\tconst timer = setTimeout(() => { DSH_CDP_BRIDGE_PENDING.delete(requestId); reject(new Error(`inspector host bridge: ${op} timed out after 30000ms`)); }, 30000);',
+	'\t\tDSH_CDP_BRIDGE_PENDING.set(requestId, { resolve: (value) => { clearTimeout(timer); resolve(value); }, reject: (error) => { clearTimeout(timer); reject(error); } });',
+	'\t\tboot.hostSourcePort.postMessage({ v: 0, t: DSH_CDP_BRIDGE_REQUEST, requestId, op, params: params ?? {} });',
+	'\t});',
+	'}',
+	'async function __dshInspectorCdpBridge(session, method, params) {',
+	'\tif (typeof DSH_CDP_BRIDGE_METHODS === "undefined") return void 0;',
+	'\tif (DSH_CDP_BRIDGE_METHODS.has(method)) return __dshCdpBridgeCall(method.slice("Runtime.".length), params);',
+	'\tif (method === "HeapProfiler.enable" || method === "HeapProfiler.disable") return {};',
+	'\tif (method === "HeapProfiler.takeHeapSnapshot" || method === "HeapProfiler.getHeapSnapshot") {',
+	'\t\tconst response = await __dshCdpBridgeCall("takeHeapSnapshot", {});',
+	'\t\tfor (const chunk of response.chunks ?? []) {',
+	'\t\t\tconst notification = { method: "HeapProfiler.addHeapSnapshotChunk", params: { chunk } };',
+	'\t\t\tfor (const listener of [...session.listeners]) { try { listener(notification); } catch {} }',
+	'\t\t}',
+	'\t\treturn {};',
+	'\t}',
+	'\tif (method === "HeapProfiler.collectGarbage") { try { globalThis.gc?.(); } catch {} return {}; }',
+	'\treturn void 0;',
+	'}',
+	''
+].join('\n');
+for (const target of packageTargets('@deepseek-ai/dsh-experimental-inspector/lib/worker.js')) {
+	if (hasCurrentRev(target)) {
+		console.log(`[bun-preload] Patch 13: ${REV_MARK} 已就位 ${target}`);
+		continue;
+	}
+	const source = readFileSync(target, 'utf8');
+	// 已是我们写过的产物（rev 指纹陈旧）：刷指纹，不重打。
+	if (source.includes(INSPECTOR_WORKER_BRIDGE_MARK)) {
+		refreshBridgeFingerprint('Patch 13', target, source);
+		continue;
+	}
+	if (!source.includes(INSPECTOR_WORKER_REQUEST_FROM) || !source.includes(INSPECTOR_WORKER_ENTRY_FROM)) {
+		console.warn(`[bun-preload] Patch 13: 未找到上游 request/worker-entry 文本，跳过 ${target}（上游版本不符）`);
+		continue;
+	}
+	const next = source
+		.replace(INSPECTOR_WORKER_REQUEST_FROM, INSPECTOR_WORKER_REQUEST_TO)
+		.replace(INSPECTOR_WORKER_ENTRY_FROM, INSPECTOR_WORKER_ENTRY_TO);
+	writePatch(target, `${next}\n${INSPECTOR_WORKER_BRIDGE_SOURCE}`);
+	console.log(`[bun-preload] Patch 13: inspector CDP 桥（worker 侧）applied to ${target}`);
+}
+
+// ── Patch 14: inspector 主线程的 CDP 桥服务端（#61，与 Patch 13 配对）──
+// HostInspectorSource 的 port1 消息泵在 queries.receive 之前认领桥请求帧。服务端在主线程
+// 用 node:vm.runInThisContext 把 expression 直接当 script 跑（script 完成值=最后一个
+// 表达式的值，与 Chrome CDP 原始语义一致；不能包 IIFE——函数体裸表达式语句不产生
+// 返回值）；thenable 且请求带 awaitPromise 时由服务端补 await（30s 封顶）。
+// 预览用 util.inspect 有界序列化；堆快照用 v8.getHeapSnapshot() 读成 UTF-8 分块数组一次
+// 回传，由 Patch 13 在 worker 侧转成 addHeapSnapshotChunk 事件流。
+// 同文件多补丁：Patch 12 先写过 index.js，文件里已有 rev 指纹，所以这里只认自己的 mark，
+// 不用 hasCurrentRev 判幂等（否则被 Patch 12 的指纹短路，永远打不上）。
+const INSPECTOR_HOST_BRIDGE_MARK = 'bun-preload: inspector CDP 桥（主线程侧）';
+const INSPECTOR_HOST_DISPATCH_FROM = '\t\t\t\tif (this.queries.receive(value)) return;';
+const INSPECTOR_HOST_DISPATCH_TO = [
+	`\t\t\t\tif (__dshInspectorCdpBridgeServe(value, this)) return; // ${REV_MARK} ${INSPECTOR_HOST_BRIDGE_MARK}`,
+	'\t\t\t\tif (this.queries.receive(value)) return;',
+].join('\n');
+const INSPECTOR_HOST_BRIDGE_SOURCE = [
+	`// ${REV_MARK} ${INSPECTOR_HOST_BRIDGE_MARK}`,
+	'const DSH_CDP_BRIDGE_HOST = {',
+	'\tframeRequest: "dsh-cdp/request",',
+	'\tframeResponse: "dsh-cdp/response",',
+	'\tobjects: new Map(),',
+	'\tgroups: new Map(),',
+	'\tseq: 0,',
+	'\tvmModule: void 0,',
+	'\tutilModule: void 0,',
+	'\treceive(value, source) {',
+	'\t\tif (typeof value !== "object" || value === null || value.t !== this.frameRequest) return false;',
+	'\t\tthis.serve(value).then(',
+	'\t\t\t(payload) => source.port.postMessage({ v: 0, t: this.frameResponse, requestId: value.requestId, ok: true, payload }),',
+	'\t\t\t(error) => source.port.postMessage({ v: 0, t: this.frameResponse, requestId: value.requestId, ok: false, error: error instanceof Error ? error.message : String(error) })',
+	'\t\t);',
+	'\t\treturn true;',
+	'\t},',
+	'\tasync serve(request) {',
+	'\t\tconst params = request.params ?? {};',
+	'\t\tswitch (request.op) {',
+	'\t\t\tcase "evaluate": return await this.evaluate(params);',
+	'\t\t\tcase "callFunctionOn": return await this.callFunctionOn(params);',
+	'\t\t\tcase "awaitPromise": return await this.awaitPromise(params);',
+	'\t\t\tcase "getProperties": return this.getProperties(params);',
+	'\t\t\tcase "globalLexicalScopeNames": return { result: [] };',
+	'\t\t\tcase "releaseObject":',
+	'\t\t\t\tthis.objects.delete(params.objectId);',
+	'\t\t\t\treturn {};',
+	'\t\t\tcase "releaseObjectGroup": {',
+	'\t\t\t\tconst bucket = this.groups.get(params.objectGroup);',
+	'\t\t\t\tif (bucket !== void 0) { this.groups.delete(params.objectGroup); for (const objectId of bucket) this.objects.delete(objectId); }',
+	'\t\t\t\treturn {};',
+	'\t\t\t}',
+	'\t\t\tcase "takeHeapSnapshot": return await this.takeHeapSnapshot();',
+	'\t\t\tdefault: throw new Error(`unsupported bridge op: ${request.op}`);',
+	'\t\t}',
+	'\t},',
+	'\tasync load(name) {',
+	'\t\tif (name === "vm") return this.vmModule ??= await import("node:vm");',
+	'\t\tif (name === "util") return this.utilModule ??= await import("node:util");',
+	'\t\tif (name === "v8") return await import("node:v8");',
+	'\t\tthrow new Error(`bridge module: ${name}`);',
+	'\t},',
+	'\tasync withTimeout(task, ms, label) {',
+	'\t\tlet timer;',
+	'\t\ttry {',
+	'\t\t\treturn await Promise.race([task, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms); })]);',
+	'\t\t} finally { clearTimeout(timer); }',
+	'\t},',
+	'\tasync evaluate(params) {',
+	'\t\tconst expression = typeof params.expression === "string" ? params.expression : "";',
+	'\t\tif (expression === "") throw new Error("bridge evaluate: expression is required");',
+	'\t\tlet task;',
+	'\t\ttry {',
+	'\t\t\tconst vm = await this.load("vm");',
+	'\t\t\t// 直接当 script 跑：script 完成值=最后一个表达式的值，与 Chrome CDP 原始语义一致；',
+	'\t\t\t// 不能包 IIFE——函数体里的裸表达式语句不产生返回值（曾误诊为 Bun vm 丢值）。',
+	'\t\t\ttask = vm.runInThisContext(expression, { timeout: 4000 });',
+	'\t\t} catch (error) {',
+	'\t\t\treturn this.thrown(error);',
+	'\t\t}',
+	'\t\ttry {',
+	'\t\t\tconst thenable = task !== void 0 && task !== null && typeof task.then === "function";',
+	'\t\t\tconst value = thenable && params.awaitPromise === true ? await this.withTimeout(task, 30000, "bridge evaluate") : task;',
+	'\t\t\tconst result = { result: this.remoteObject(value) };',
+	'\t\t\tif (params.generatePreview === true && result.result.type === "object") {',
+	'\t\t\t\tconst inner = this.lookup(result.result.objectId);',
+	'\t\t\t\tif (inner !== void 0) result.result.preview = this.preview(inner);',
+	'\t\t\t}',
+	'\t\t\treturn result;',
+	'\t\t} catch (error) {',
+	'\t\t\treturn this.thrown(error);',
+	'\t\t}',
+	'\t},',
+	'\tasync callFunctionOn(params) {',
+	'\t\tconst declaration = typeof params.functionDeclaration === "string" ? params.functionDeclaration : "";',
+	'\t\tif (declaration === "") throw new Error("bridge callFunctionOn: functionDeclaration is required");',
+	'\t\tconst receiver = this.lookup(params.objectId);',
+	'\t\tif (receiver === void 0) throw new Error("bridge callFunctionOn: unknown objectId");',
+	'\t\tlet fn;',
+	'\t\ttry {',
+	'\t\t\tconst vm = await this.load("vm");',
+	'\t\t\tfn = vm.runInThisContext(`(${declaration})`, { timeout: 4000 });',
+	'\t\t} catch (error) {',
+	'\t\t\treturn this.thrown(error);',
+	'\t\t}',
+	'\t\tif (typeof fn !== "function") return this.thrown(new Error("bridge callFunctionOn: declaration is not a function"));',
+	'\t\ttry {',
+	'\t\t\tconst args = (Array.isArray(params.arguments) ? params.arguments : []).map((argument) => this.argumentValue(argument));',
+	'\t\t\tconst value = await this.withTimeout(Promise.resolve(fn.apply(receiver, args)), 30000, "bridge callFunctionOn");',
+	'\t\t\treturn { result: params.returnByValue === true ? this.byValue(value) : this.remoteObject(value) };',
+	'\t\t} catch (error) {',
+	'\t\t\treturn this.thrown(error);',
+	'\t\t}',
+	'\t},',
+	'\tasync awaitPromise(params) {',
+	'\t\tconst target = this.lookup(params.promiseObjectId);',
+	'\t\tif (target === void 0) throw new Error("bridge awaitPromise: unknown objectId");',
+	'\t\ttry {',
+	'\t\t\tconst value = await this.withTimeout(Promise.resolve(target), 30000, "bridge awaitPromise");',
+	'\t\t\treturn { result: params.returnByValue === true ? this.byValue(value) : this.remoteObject(value) };',
+	'\t\t} catch (error) {',
+	'\t\t\treturn this.thrown(error);',
+	'\t\t}',
+	'\t},',
+	'\tgetProperties(params) {',
+	'\t\tconst target = this.lookup(params.objectId);',
+	'\t\t// 已回收/未知句柄报错而不是伪装空对象，让 DevTools 刷新它的句柄表。',
+	'\t\tif (target === void 0) throw new Error("bridge getProperties: unknown objectId");',
+	'\t\tconst accessorsOnly = params.accessorPropertiesOnly === true;',
+	'\t\tconst records = [];',
+	'\t\tfor (const name of Reflect.ownKeys(target)) {',
+	'\t\t\tlet descriptor;',
+	'\t\t\ttry { descriptor = Reflect.getOwnPropertyDescriptor(target, name); } catch { continue; }',
+	'\t\t\tif (descriptor === void 0) continue;',
+	'\t\t\tconst isAccessor = descriptor.get !== void 0 || descriptor.set !== void 0;',
+	'\t\t\tif (accessorsOnly && !isAccessor) continue;',
+	'\t\t\tconst record = {',
+	'\t\t\t\tname: typeof name === "symbol" ? name.description ?? "" : String(name),',
+	'\t\t\t\tconfigurable: descriptor.configurable === true,',
+	'\t\t\t\tenumerable: descriptor.enumerable === true',
+	'\t\t\t};',
+	'\t\t\tif (!isAccessor) record.value = this.remoteObject(descriptor.value);',
+	'\t\t\tif (descriptor.get !== void 0) record.get = this.remoteObject(descriptor.get);',
+	'\t\t\tif (descriptor.set !== void 0) record.set = this.remoteObject(descriptor.set);',
+	'\t\t\tif (typeof name === "symbol") record.symbol = this.remoteObject(name);',
+	'\t\t\tif (params.generatePreview === true && record.value?.type === "object") {',
+	'\t\t\t\tconst inner = this.lookup(record.value.objectId);',
+	'\t\t\t\tif (inner !== void 0) record.value.preview = this.preview(inner);',
+	'\t\t\t}',
+	'\t\t\trecords.push(record);',
+	'\t\t}',
+	'\t\treturn { result: records };',
+	'\t},',
+	'\tasync takeHeapSnapshot() {',
+	'\t\tconst v8 = await this.load("v8");',
+	'\t\tconst chunks = [];',
+	'\t\tfor await (const chunk of v8.getHeapSnapshot()) chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));',
+	'\t\treturn { chunks };',
+	'\t},',
+	'\targumentValue(argument) {',
+	'\t\tif (argument === void 0 || argument === null) return void 0;',
+	'\t\tif (typeof argument.objectId === "string") {',
+	'\t\t\tconst target = this.lookup(argument.objectId);',
+	'\t\t\tif (target === void 0) throw new Error(`bridge argument: unknown objectId ${argument.objectId}`);',
+	'\t\t\treturn target;',
+	'\t\t}',
+	'\t\treturn argument.value;',
+	'\t},',
+	'\tregister(value, group) {',
+	'\t\tif (this.objects.size >= 4096) {',
+	'\t\t\t// 上界清扫：先剔死引用，仍超限则按插入序逐出最老句柄（长会话防无界增长）。',
+	'\t\t\tfor (const [objectId, entry] of this.objects) { if (entry.ref.deref() === void 0) this.objects.delete(objectId); }',
+	'\t\t\tfor (const objectId of this.objects.keys()) { if (this.objects.size < 4096) break; this.objects.delete(objectId); }',
+	'\t\t}',
+	'\t\tconst objectId = `dsh-bridge-object-${++this.seq}`;',
+	'\t\tthis.objects.set(objectId, { ref: new WeakRef(value), group: typeof group === "string" ? group : void 0 });',
+	'\t\tif (typeof group === "string") {',
+	'\t\t\tlet bucket = this.groups.get(group);',
+	'\t\t\tif (bucket === void 0) this.groups.set(group, bucket = new Set());',
+	'\t\t\tbucket.add(objectId);',
+	'\t\t}',
+	'\t\treturn objectId;',
+	'\t},',
+	'\tlookup(objectId) {',
+	'\t\tif (typeof objectId !== "string") return void 0;',
+	'\t\tconst entry = this.objects.get(objectId);',
+	'\t\tif (entry === void 0) return void 0;',
+	'\t\tconst target = entry.ref.deref();',
+	'\t\tif (target === void 0) { this.objects.delete(objectId); return void 0; }',
+	'\t\treturn target;',
+	'\t},',
+	'\tremoteObject(value) {',
+	'\t\tif (value === void 0) return { type: "undefined" };',
+	'\t\tif (value === null) return { type: "object", subtype: "null", value: null };',
+	'\t\tswitch (typeof value) {',
+	'\t\t\tcase "string": return { type: "string", value, description: value.length > 200 ? `${value.slice(0, 200)}…` : value };',
+	'\t\t\tcase "number": return { type: "number", value, description: String(value) };',
+	'\t\t\tcase "boolean": return { type: "boolean", value, description: String(value) };',
+	'\t\t\tcase "bigint": return { type: "bigint", value: value.toString(), unserializableValue: `${value}n`, description: `${value}n` };',
+	'\t\t\tcase "symbol": return { type: "symbol", description: value.toString() };',
+	'\t\t\tcase "function": return { type: "function", objectId: this.register(value), className: "Function", description: String(value).slice(0, 200) };',
+	'\t\t\tdefault: {',
+	'\t\t\t\tconst record = { type: "object", objectId: this.register(value), className: this.className(value), description: this.describe(value) };',
+	'\t\t\t\tif (Array.isArray(value)) record.subtype = "array";',
+	'\t\t\t\tif (value instanceof Error) record.subtype = "error";',
+	'\t\t\t\treturn record;',
+	'\t\t\t}',
+	'\t\t}',
+	'\t},',
+	'\tpreview(target) {',
+	'\t\tlet names;',
+	'\t\ttry { names = Reflect.ownKeys(target); } catch { names = []; }',
+	'\t\tconst properties = [];',
+	'\t\tlet overflow = false;',
+	'\t\tfor (const name of names) {',
+	'\t\t\tif (properties.length >= 50) { overflow = true; break; }',
+	'\t\t\tlet descriptor;',
+	'\t\t\ttry { descriptor = Reflect.getOwnPropertyDescriptor(target, name); } catch { continue; }',
+	'\t\t\tif (descriptor === void 0 || descriptor.enumerable !== true) continue;',
+	'\t\t\tif ("value" in descriptor) {',
+	'\t\t\t\tconst item = this.remoteObject(descriptor.value);',
+	'\t\t\t\tconst slot = { name: String(name), type: item.type };',
+	'\t\t\t\tif (item.subtype !== void 0) slot.subtype = item.subtype;',
+	'\t\t\t\tif (item.className !== void 0) slot.className = item.className;',
+	'\t\t\t\tif (item.description !== void 0) slot.description = item.description;',
+	'\t\t\t\tproperties.push(slot);',
+	'\t\t\t} else {',
+	'\t\t\t\tproperties.push({ name: String(name), type: "accessor" });',
+	'\t\t\t}',
+	'\t\t}',
+	'\t\treturn { type: "object", description: this.describe(target), overflow, properties };',
+	'\t},',
+	'\tbyValue(value) {',
+	'\t\tconst record = this.remoteObject(value);',
+	'\t\tif (record.type === "object" && record.subtype !== "null" && record.subtype !== "error") {',
+	'\t\t\ttry { record.value = JSON.parse(JSON.stringify(value)); } catch {}',
+	'\t\t}',
+	'\t\treturn record;',
+	'\t},',
+	'\tthrown(error) {',
+	'\t\treturn { result: { type: "undefined" }, exceptionDetails: { exceptionId: 1, text: "Uncaught", lineNumber: 0, columnNumber: 0, exception: this.remoteObject(error) } };',
+	'\t},',
+	'\tclassName(value) {',
+	'\t\tif (Array.isArray(value)) return "Array";',
+	'\t\tconst constructor = value.constructor;',
+	'\t\treturn typeof constructor === "function" && constructor.name !== "" ? constructor.name : "Object";',
+	'\t},',
+	'\tdescribe(value) {',
+	'\t\ttry { return this.utilModule.inspect(value, { depth: 1, maxArrayLength: 40, breakLength: 120, getters: false }); } catch {}',
+	'\t\ttry { return String(value); } catch {}',
+	'\t\treturn Object.prototype.toString.call(value);',
+	'\t}',
+	'};',
+	'let __dshInspectorCdpBridgeReady = void 0;',
+	'function __dshInspectorCdpBridgeServe(value, source) {',
+	'\tif (typeof Bun === "undefined") return false;',
+	'\t// 只认领桥请求帧：worker 的 query 应答与 source 帧必须原样放行给原消息泵。',
+	'\tif (typeof value !== "object" || value === null || value.t !== DSH_CDP_BRIDGE_HOST.frameRequest) return false;',
+	'\t__dshInspectorCdpBridgeReady ??= Promise.all([DSH_CDP_BRIDGE_HOST.load("vm"), DSH_CDP_BRIDGE_HOST.load("util")]).then(() => void 0);',
+	'\t__dshInspectorCdpBridgeReady.then(() => { DSH_CDP_BRIDGE_HOST.receive(value, source); });',
+	'\treturn true;',
+	'}',
+	''
+].join('\n');
+for (const target of packageTargets('@deepseek-ai/dsh-experimental-inspector/lib/index.js')) {
+	const source = readFileSync(target, 'utf8');
+	if (source.includes(INSPECTOR_HOST_BRIDGE_MARK)) {
+		refreshBridgeFingerprint('Patch 14', target, source);
+		continue;
+	}
+	if (!source.includes(INSPECTOR_HOST_DISPATCH_FROM)) {
+		console.warn(`[bun-preload] Patch 14: 未找到上游 port1 消息泵文本，跳过 ${target}（上游版本不符）`);
+		continue;
+	}
+	writePatch(target, `${source.replace(INSPECTOR_HOST_DISPATCH_FROM, INSPECTOR_HOST_DISPATCH_TO)}\n${INSPECTOR_HOST_BRIDGE_SOURCE}`);
+	console.log(`[bun-preload] Patch 14: inspector CDP 桥（主线程侧）applied to ${target}`);
+}
+
+console.log(`[bun-preload] ${REV_MARK} 应用完成：stripTypeScriptTypes / node-addon-require-builtin 桩 / HMR 关闭 / Bun.Terminal PTY / xterm 同步写 / 插件展示元数据解析 / 插件说明符 baseUrl 解析 / inspector fetch 归一+spread 修复 / inspector CDP 桥（不还原）`);

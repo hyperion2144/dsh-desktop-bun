@@ -188,3 +188,61 @@ describe('日志写入（真文件）', () => {
     }
   })
 })
+
+describe('日志写入：批量缓冲（#54，bufferMs>0 才启用）', () => {
+  test('默认（不开缓冲）写后立即可读——旧行为不回归', () => {
+    const dir = tempDir()
+    try {
+      const file = join(dir, 'shell.log')
+      const sink = createLogSink({ file, stdout: () => {} })
+      sink.write('a\n')
+      expect(readFileSync(file, 'utf8')).toBe('a\n')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('开缓冲：write 立即返回不落盘，flush() 落盘且行序保持', () => {
+    const dir = tempDir()
+    try {
+      const file = join(dir, 'shell.log')
+      const sink = createLogSink({ file, bufferMs: 30, stdout: () => {} })
+      sink.write('第一行\n')
+      sink.write('第二行\n')
+      expect(existsSync(file)).toBe(false)
+      sink.flush()
+      expect(readFileSync(file, 'utf8')).toBe('第一行\n第二行\n')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('开缓冲：到期自动落盘；tail/size 把缓冲行算进去', async () => {
+    const dir = tempDir()
+    try {
+      const file = join(dir, 'shell.log')
+      const sink = createLogSink({ file, bufferMs: 30, stdout: () => {} })
+      sink.write('自动\n')
+      expect(sink.tail(5)).toEqual(['自动'])
+      expect(sink.size()).toBe(Buffer.byteLength('自动\n'))
+      await Bun.sleep(120)
+      expect(readFileSync(file, 'utf8')).toBe('自动\n')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('开缓冲：轮转前先 flush——缓冲行不跨份', () => {
+    const dir = tempDir()
+    try {
+      const file = join(dir, 'shell.log')
+      const sink = createLogSink({ file, maxBytes: 30, keep: 2, bufferMs: 60_000, stdout: () => {} })
+      sink.write(`${'a'.repeat(20)}\n`)
+      sink.rotate()
+      expect(existsSync(file)).toBe(false)
+      expect(readFileSync(join(dir, 'shell.log.1'), 'utf8')).toBe(`${'a'.repeat(20)}\n`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

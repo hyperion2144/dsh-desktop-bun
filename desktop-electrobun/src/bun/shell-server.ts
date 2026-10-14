@@ -91,6 +91,11 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
   const authority = new URL(options.upstreamOrigin).host
   let served = 0
   let proxied = 0
+  // 数据面在飞计数（#54）：loopback 反代与批量端点子请求共用一个计数，health 暴露，
+  // 用来在 Windows 上区分「壳还在处理请求」与「壳已经闲着」。
+  let inFlight = 0
+  // 单飞合并省掉的重复上游 GET 数（#54）：health 暴露，验证合并是否生效。
+  let coalesced = 0
 
   /**
    * 每视图授权：页面桥带 `x-dsh-shell-view` 回来。missing/未登记 —— 拒绝；
@@ -147,14 +152,178 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
     return `${html.slice(0, insertAt)}${BOOT_LINE}${html.slice(insertAt)}`
   }
 
+  /** 单飞共享的已完成响应：整条缓冲（只有 ≤256KB 且带 content-length 的 GET 才走这条路）。 */
+  interface SharedGet {
+    status: number
+    headers: Headers
+    body: ArrayBuffer
+  }
+  /** 在飞中的领头 GET：等待者搭车拿 SharedGet；null = 领头失败/不可共享，各自打上游。 */
+  interface InflightGet {
+    done: boolean
+    buffered: Promise<SharedGet | null>
+    resolve: (value: SharedGet | null) => void
+  }
+  /** 超过这个体积的 GET 不做单飞（大响应/流式响应绝不缓冲，避免内存与背压问题）。 */
+  const SINGLEFLIGHT_MAX_BYTES = 262_144
+  const inflightGets = new Map<string, InflightGet>()
+
+  /**
+   * 流式回传 + 完成结算（#54）：pull 式逐 chunk 转发（保背压），done / 上游出错 / 页面取消
+   * 三个终点都恰好结算一次——在飞计数不泄漏，SLOW 日志能拿到 total（含流式体传输时间）。
+   */
+  function trackedResponse(input: {
+    status: number
+    headers: Headers
+    body: ReadableStream<Uint8Array>
+    method: string
+    pathname: string
+    ttfbMs: number
+    t0: number
+    onSettled: () => void
+  }): Response {
+    const reader = input.body.getReader()
+    let settledOnce = false
+    const finish = (totalMs: number): void => {
+      if (settledOnce) return
+      settledOnce = true
+      input.onSettled()
+      // P1（旧壳 stream_proxy.rs:456 SLOW 口径）：任一段 ≥2s 记一条。ttfb=「发 fetch → 上游
+      // 响应头」（读作上游慢或壳进程堵），total=整条响应（读作传输/排队慢）。
+      if (input.ttfbMs >= 2_000 || totalMs >= 2_000) {
+        log(`[proxy] SLOW ttfb=${input.ttfbMs}ms total=${totalMs}ms ${input.method} ${input.pathname} -> ${input.status}`)
+      }
+    }
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read()
+          if (done) {
+            controller.close()
+            finish(Math.round(performance.now() - input.t0))
+          } else {
+            controller.enqueue(value)
+          }
+        } catch (error) {
+          controller.error(error)
+          finish(Math.round(performance.now() - input.t0))
+        }
+      },
+      cancel(reason) {
+        void reader.cancel(reason).catch(() => {})
+        finish(Math.round(performance.now() - input.t0))
+      },
+    })
+    return new Response(stream, { status: input.status, headers: input.headers })
+  }
+
+  // ---- 批量转发端点（#54 数据面聚合）：一次 POST 携 N 个子请求，并发转发、按序聚合 ----
+  const BATCH_MAX_ITEMS = 32
+  interface BatchSubResponse {
+    status: number
+    contentType: string | null
+    body: string
+    ttfbMs: number
+    error?: string
+  }
+
+  function subRequestHeaders(raw: unknown): Headers | null {
+    if (raw === undefined || raw === null) return new Headers()
+    if (typeof raw !== 'object' || Array.isArray(raw)) return null
+    const out = new Headers()
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof value !== 'string') return null
+      out.set(key, value)
+    }
+    return out
+  }
+
+  async function forwardBatchItem(item: unknown): Promise<BatchSubResponse> {
+    const invalid = (): BatchSubResponse => ({ status: 400, contentType: null, body: 'bad sub-request', ttfbMs: 0, error: 'invalid sub-request' })
+    if (typeof item !== 'object' || item === null) return invalid()
+    const row = item as { method?: unknown; path?: unknown; query?: unknown; body?: unknown; headers?: unknown }
+    if (typeof row.path !== 'string' || !row.path.startsWith('/')) return invalid()
+    const method = (typeof row.method === 'string' && row.method !== '' ? row.method : 'GET').toUpperCase()
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'POST' && method !== 'PUT' && method !== 'PATCH' && method !== 'DELETE') return invalid()
+    let query = typeof row.query === 'string' ? row.query : ''
+    if (query.startsWith('?')) query = query.slice(1)
+    const rawHeaders = subRequestHeaders(row.headers)
+    if (rawHeaders === null) return invalid()
+    const hasBody = method !== 'GET' && method !== 'HEAD'
+    const body = hasBody && typeof row.body === 'string' ? row.body : undefined
+    const target = `${options.upstreamOrigin}${row.path}${query === '' ? '' : `?${query}`}`
+    proxied += 1
+    inFlight += 1
+    const t0 = performance.now()
+    try {
+      const upstream = await fetch(target, {
+        method,
+        headers: scrubRequestHeaders(rawHeaders, { cookie: options.cookie, authority }),
+        body,
+        redirect: 'manual',
+      })
+      const ttfbMs = Math.round(performance.now() - t0)
+      const text = await upstream.text()
+      inFlight = Math.max(0, inFlight - 1)
+      return { status: upstream.status, contentType: upstream.headers.get('content-type'), body: text, ttfbMs }
+    } catch (error) {
+      inFlight = Math.max(0, inFlight - 1)
+      return { status: 502, contentType: null, body: 'upstream unreachable', ttfbMs: Math.round(performance.now() - t0), error: String(error) }
+    }
+  }
+
   async function proxy(request: Request, pathname: string, search: string): Promise<Response> {
     proxied += 1
+    const method = request.method.toUpperCase()
+    const key = `${pathname}${search}`
+
+    // ---- GET 单飞（#54）：并发同 URL 搭领头请求的车，不重复打上游 ----
+    const joined = method === 'GET' ? inflightGets.get(key) : undefined
+    if (joined !== undefined && !joined.done) {
+      coalesced += 1
+      inFlight += 1
+      const t0 = performance.now()
+      const shared = await joined.buffered
+      inFlight = Math.max(0, inFlight - 1)
+      if (shared !== null) {
+        // 缓冲路径：拿到共享响应即整条完成（body ≤256KB 才会走到这）
+        const totalMs = Math.round(performance.now() - t0)
+        if (totalMs >= 2_000) {
+          log(`[proxy] SLOW ttfb=${totalMs}ms total=${totalMs}ms ${method} ${pathname} -> ${shared.status}（单飞跟随）`)
+        }
+        return new Response(shared.body, { status: shared.status, headers: new Headers(shared.headers) })
+      }
+      // 领头失败/不可共享 ⇒ 落回自己打一次
+    }
+
+    inFlight += 1
     const target = `${options.upstreamOrigin}${pathname}${search}`
     const headers = scrubRequestHeaders(request.headers, { cookie: options.cookie, authority })
-    const method = request.method.toUpperCase()
     const hasBody = method !== 'GET' && method !== 'HEAD'
     let upstream: Response
     const t0 = performance.now()
+
+    // 领头占位：先登记再发上游，并发同 URL 才赶得上搭车
+    let entry: InflightGet | null = null
+    if (method === 'GET') {
+      const prior = inflightGets.get(key)
+      if (prior !== undefined && prior.done) inflightGets.delete(key)
+      if (!inflightGets.has(key)) {
+        let resolve!: (value: SharedGet | null) => void
+        const buffered = new Promise<SharedGet | null>((res) => { resolve = res })
+        entry = { done: false, buffered, resolve }
+        inflightGets.set(key, entry)
+      }
+    }
+
+    const releaseEntry = (): void => {
+      if (entry === null) return
+      entry.done = true
+      entry.resolve(null)
+      if (inflightGets.get(key) === entry) inflightGets.delete(key)
+      entry = null
+    }
+
     try {
       upstream = await fetch(target, {
         method,
@@ -163,15 +332,62 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
         redirect: 'manual',
       })
     } catch (error) {
+      inFlight = Math.max(0, inFlight - 1)
+      releaseEntry()
       log(`[shell] 转发失败 ${method} ${pathname}: ${String(error)}`)
       return new Response('upstream unreachable', { status: 502 })
     }
-    const outHeaders = scrubResponseHeaders(upstream.headers, { pathname })
     const ttfbMs = Math.round(performance.now() - t0)
-    // P1（旧壳 stream_proxy.rs:456 SLOW 口径）：慢请求照旧壳阈值记一条，不用逐请求刷屏
-    if (ttfbMs >= 2_000) log(`[proxy] SLOW ttfb=${ttfbMs}ms ${method} ${pathname} -> ${upstream.status}`)
+    const outHeaders = scrubResponseHeaders(upstream.headers, { pathname })
     if (upstream.status >= 500) log(`[proxy] 上游 ${upstream.status} ${method} ${pathname}（ttfb=${ttfbMs}ms）`)
-    return new Response(upstream.body, { status: upstream.status, headers: outHeaders })
+
+    // 可共享判定：只合并「带 content-length 且 ≤256KB」的 GET——大响应与流式（SSE/chunked）
+    // 一律不缓冲，避免内存膨胀与背压变化。
+    let shared: SharedGet | null = null
+    if (entry !== null && upstream.body !== null) {
+      const length = Number(upstream.headers.get('content-length'))
+      if (Number.isFinite(length) && length >= 0 && length <= SINGLEFLIGHT_MAX_BYTES) {
+        try {
+          shared = { status: upstream.status, headers: outHeaders, body: await upstream.arrayBuffer() }
+        } catch {
+          shared = null
+        }
+      }
+    }
+    if (entry !== null) {
+      const finished = entry
+      entry = null
+      finished.done = true
+      finished.resolve(shared)
+      if (inflightGets.get(key) === finished) inflightGets.delete(key)
+    }
+
+    const onSettled = (): void => {
+      inFlight = Math.max(0, inFlight - 1)
+    }
+
+    if (shared !== null) {
+      onSettled()
+      const totalMs = Math.round(performance.now() - t0)
+      if (ttfbMs >= 2_000 || totalMs >= 2_000) {
+        log(`[proxy] SLOW ttfb=${ttfbMs}ms total=${totalMs}ms ${method} ${pathname} -> ${shared.status}`)
+      }
+      return new Response(shared.body, { status: shared.status, headers: new Headers(shared.headers) })
+    }
+    if (upstream.body === null) {
+      onSettled()
+      return new Response(null, { status: upstream.status, headers: outHeaders })
+    }
+    return trackedResponse({
+      status: upstream.status,
+      headers: outHeaders,
+      body: upstream.body,
+      method,
+      pathname,
+      ttfbMs,
+      t0,
+      onSettled,
+    })
   }
 
   const server = Bun.serve<WsData, string>({
@@ -322,6 +538,17 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           })
           return Response.json(result)
         }
+        // 批量转发（#54 数据面聚合）：一次 POST 携 N 个子请求，壳并发转发、按序聚合返回；
+        // 单个子请求失败不拖垮整批（各自回状态码）。整包响应 no-store。
+        if (decision.rel === 'batch') {
+          if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
+          const parsed = (await request.json().catch(() => null)) as { requests?: unknown } | null
+          const items = Array.isArray(parsed?.requests) ? (parsed as { requests: unknown[] }).requests : null
+          if (items === null || items.length === 0) return new Response('bad batch', { status: 400 })
+          if (items.length > BATCH_MAX_ITEMS) return new Response('batch too large', { status: 413 })
+          const responses = await Promise.all(items.map((item) => forwardBatchItem(item)))
+          return Response.json({ responses }, { headers: { 'cache-control': 'no-store' } })
+        }
         return new Response('not found', { status: 404 })
       }
 
@@ -389,6 +616,8 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
       bootReady: boot !== null,
       served,
       proxied,
+      proxiedInFlight: inFlight,
+      coalesced,
       uptimeMs: Date.now() - startedAt,
     }
   }

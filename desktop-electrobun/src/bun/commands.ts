@@ -560,6 +560,21 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       else deps.log(`[page.${level}] ${msg}`)
       return {}
     },
+    // 批量版（#54 数据面聚合）：client 攒批后一次调用，壳侧逐条走与 log_console 完全相同的
+    // 落盘/镜像路径（顺序保持）。单条版保留不动（旧 client 与手工调用不受影响）。
+    log_console_batch: (args) => {
+      const items = Array.isArray(args.items) ? args.items : []
+      for (const item of items) {
+        if (typeof item !== 'object' || item === null) continue
+        const row = item as Record<string, unknown>
+        const level = argString(row, 'level', 'log')
+        const msg = argString(row, 'msg', '')
+        const pageUrl = argString(row, 'pageUrl', '')
+        if (deps.logPageConsole !== undefined) deps.logPageConsole({ level, msg, pageUrl })
+        else deps.log(`[page.${level}] ${msg}`)
+      }
+      return { count: items.length }
+    },
     log_diag: (args) => {
       deps.log(`[diag] ${argString(args, 'msg', '(empty)')}`)
       return {}

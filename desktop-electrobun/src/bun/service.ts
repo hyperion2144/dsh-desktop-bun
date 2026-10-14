@@ -196,11 +196,13 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 壳日志：本地时区时间戳 + 有界轮转（10 MB × 5 份；旧壳 KeepAll 实测堆了 90+ 份）。
   const shellLog = createLogSink({
     file: logFile,
+    // #54：批量异步刷盘——行进内存缓冲 100ms 合并落盘，不再逐行同步 I/O；退出钩子同步 flush
+    bufferMs: 100,
     stdout: (line) => console.log(line),
     onRotate: ({ moved, deleted }) => console.log(`[shell] 日志轮转：搬 ${String(moved)} 份、删 ${String(deleted)} 份`),
   })
   // 页面控制台另写一份（旧壳路径 `$DSH_HOME/dsh-desktop-webview.log`，不镜像到 stdout）。
-  const pageLog = createLogSink({ file: webviewLogFile })
+  const pageLog = createLogSink({ file: webviewLogFile, bufferMs: 100 })
 
   const log = (line: string): void => {
     shellLog.line(line)

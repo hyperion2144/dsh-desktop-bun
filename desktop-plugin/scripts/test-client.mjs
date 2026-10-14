@@ -187,6 +187,74 @@ assert.equal(kb.applyShortcutEdit(edited.document, { type: 'set', id: 'a', bindi
 assert.equal(kb.applyShortcutEdit(edited.document, { type: 'set', id: 'a', binding: null }, 'desktop:macos').ok, false, '非对象绑定拒绝')
 assert.equal(kb.applyShortcutEdit(edited.document, { type: 'nope' }, 'desktop:macos').ok, false, '未知编辑类型拒绝')
 
+// ── console-batch（#54）：页面 console 攒批上报 ──
+await build({
+  entryPoints: [join(root, 'src/client/console-batch.ts')],
+  outfile: join(tmp, 'console-batch.mjs'),
+  format: 'esm',
+  platform: 'node',
+  logLevel: 'silent',
+})
+const { createConsoleBatch } = await import(pathToFileURL(join(tmp, 'console-batch.mjs')).href)
+
+{
+  // maxItems 触发：攒满即发、顺序保持；未满不发；手动 flush 立即发；空 flush 不发空批
+  const sent = []
+  const batch = createConsoleBatch({
+    send: (items) => sent.push(items),
+    maxItems: 3,
+    flushMs: 3_600_000,
+    schedule: () => () => {},
+  })
+  batch.push({ level: 'log', msg: '一', pageUrl: 'p' })
+  batch.push({ level: 'error', msg: '二', pageUrl: 'p' })
+  assert.equal(sent.length, 0, '未攒满不发')
+  batch.push({ level: 'info', msg: '三', pageUrl: 'p' })
+  assert.equal(sent.length, 1, '攒满 maxItems 即发')
+  assert.deepEqual(
+    sent[0].map((item) => item.msg),
+    ['一', '二', '三'],
+    '整批按 push 顺序',
+  )
+  batch.push({ level: 'warn', msg: '四', pageUrl: 'p' })
+  batch.flush()
+  assert.deepEqual(sent[1].map((item) => item.msg), ['四'], 'flush 立即发掉手头批次')
+  batch.flush()
+  assert.equal(sent.length, 2, '空批次不产生空上报')
+}
+
+{
+  // 定时线触发：最老一条等满 flushMs 自动发
+  const sent = []
+  const batch = createConsoleBatch({ send: (items) => sent.push(items), flushMs: 20 })
+  batch.push({ level: 'log', msg: '慢线', pageUrl: 'p' })
+  assert.equal(sent.length, 0, '定时线未到不发')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  assert.equal(sent.length, 1, 'flushMs 到点自动发')
+  assert.deepEqual(sent[0].map((item) => item.level), ['log'])
+}
+
+{
+  // send 同步抛错：该批丢弃、后续批次不受影响（与旧「单条失败吞掉」同口径）
+  const sent = []
+  let boom = true
+  const batch = createConsoleBatch({
+    send: (items) => {
+      if (boom) throw new Error('send 炸了')
+      sent.push(items)
+    },
+    maxItems: 2,
+    flushMs: 3_600_000,
+    schedule: () => () => {},
+  })
+  batch.push({ level: 'log', msg: '会炸', pageUrl: 'p' })
+  batch.push({ level: 'log', msg: '也炸', pageUrl: 'p' })
+  boom = false
+  batch.push({ level: 'log', msg: '好的', pageUrl: 'p' })
+  batch.push({ level: 'log', msg: '也好', pageUrl: 'p' })
+  assert.deepEqual(sent[0].map((item) => item.msg), ['好的', '也好'], 'send 抛错只丢该批')
+}
+
 // ── 壳 preload 注入的 dshDesktop 载体脚本（desktop-electrobun/src/bun/carrier.ts，
 // 旧壳 Rust 版 DESKTOP_CARRIER_INIT_SCRIPT 的等价物）：esbuild 转译后在最小 DOM 桩里
 // 真跑一遍，锁住对外形状（幂等安装 / 惰性转发 / 轮询等待 / 平台标记）。
