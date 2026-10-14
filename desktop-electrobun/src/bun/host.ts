@@ -33,6 +33,10 @@ export interface StartHostInput {
   upstreamPort?: number | undefined
   /** 手机访问 lane 端口（旧壳 `DSH_MOBILE_LANE_PORT`） */
   lanePort?: number | undefined
+  /** 壳页面服务端口（#47 远程命令桥）：与 token 一起下发，缺一不下 */
+  shellPagePort?: number | undefined
+  /** remote 视图 token（#47）：壳铸给 mobile-access 的远程命令桥凭证 */
+  shellRpcViewToken?: string | undefined
   /** 代理注入（旧壳 `resolved_proxy_env`）；null/缺省 = 不注入 */
   proxy?: ProxyEnv | null
   /** cloudflared 可执行文件路径（旧壳 `DSH_CLOUDFLARED_BIN`，#164 隧道） */
@@ -73,6 +77,8 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
     parentPid: process.pid,
     patchFiles: input.patchFiles,
     notify: input.notify,
+    shellPagePort: input.shellPagePort,
+    shellRpcViewToken: input.shellRpcViewToken,
     upstreamPort: input.upstreamPort,
     lanePort: input.lanePort,
     proxy: input.proxy,

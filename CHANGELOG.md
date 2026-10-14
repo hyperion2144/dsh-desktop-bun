@@ -29,7 +29,9 @@
 
 ### Fixed
 
+<<<<<<< HEAD
 - 并行带窗 dev 实例被 CEF 单例顶掉（#38）：DSH_DESKTOP_NO_SINGLETON 只跳壳层 shell-instance.json 锁，真正拦第二实例的是 Chromium ProcessSingleton——按 `<identifier>/<channel>/CEF` 数据目录加锁，hutch 侧无环境口子可绕。新增构建期换 id：electrobun.config 的 app.identifier 改经 src/shared/app-identity.ts 的 resolveBundleIdentifier() 解析，`DSH_SHELL_DEV_IDENTIFIER` 非空（去首尾空白）则覆盖、默认与既有产物一致（正式构建/升级/签名链零感知）；README 环境表与钩子注释同步改诚实描述。
+- 配对远程页壳命令桥缺席（#47）：新壳对不可信 guest/远程视图零命令（#220 决策 12），配对远程设备被一并归零——远程页 `__TAURI_INTERNALS__.invoke` 全部 reject，设置面板「桌面通知」等 tab 恒「加载中」（旧壳 `remote-desktop.json` 有 74 条命令）。新增 `remote` 视图种类：壳铸 remote 视图 token 经宿主 env 下发给 mobile-access，桥给配对远程页注入与壳侧 tauri-ipc 逐字对齐的 invoke shim（经 /_loopback 达壳页面服务）；命令白名单 `REMOTE_ALLOWED_COMMANDS`（通知族 + 报日志，`get_desktop_client_environment` 刻意不在名单——不让远程浏览器画桌面 chrome），guest 不因 remote 多放一条。
 - 远程页桌面通知面板卡「加载中」（#43）：mobile-access 配对门禁对所有路径要求会话 cookie，而浏览器对 `<link rel=manifest>` 的获取不保证携带 cookie，manifest.webmanifest 恒 401 unpaired，前端桌面通知面板拿到 401 无兑底挂起。门禁对清单路径精确放行（非敏感 PWA 元数据，透传上游），其余路径门禁行为不变。
 - 手机访问必崩重启循环（#41）：壳在宿主 SHELL-READY 后 return 掉 stdout 的 for-await reader，Bun 会连带取消子进程管道读端——此后宿主任何 stdout 写都是 EPIPE（异步错误，插件侧 try/catch 捕不住），dsh 按 fatal load failure 退出；mobile-access 反代的 accessLog 是 ready 后唯一 stdout 写路径，故平时潜伏、手机一访问必崩（6 连崩复现，watchdog 自愈耗尽后服务彻底下线）。改为拿到 READY 后继续 drain 到流尾，宿主 stdout 日志全程可见。
 - 远程页设置/模型目录全拒（#42）：上游对 HTML 也 gzip，mobile-access 反代原样转发手机的压缩协商后，注入管线判 isCompressed 整体跳过（OWNS_HOST/POLYFILL 等补丁缺席）→ 页面被判非 loopback 远程浏览器，settings/提供商目录等特权 RPC 全拒（「settings are unavailable in this browser」）。修复：文档导航请求（Accept 含 text/html）对上游强制 Accept-Encoding: identity 保证可注入，API/资产保留压缩协商不白费移动带宽。

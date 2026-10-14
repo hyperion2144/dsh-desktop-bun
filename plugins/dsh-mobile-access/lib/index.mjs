@@ -3,7 +3,14 @@
 import http from 'node:http';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
-import { createRewriteProxy, POLYFILL, OWNS_HOST_PATCH, THEME_SYNC_PATCH, LOOPBACK_URL_PATCH } from './proxy.mjs';
+import {
+  createRewriteProxy,
+  POLYFILL,
+  OWNS_HOST_PATCH,
+  THEME_SYNC_PATCH,
+  LOOPBACK_URL_PATCH,
+  remoteInvokePatch as buildRemoteInvokePatch,
+} from './proxy.mjs';
 import { clientIp, entryKind } from './client-info.mjs';
 import { LANE_PREFIX, laneRoutePath } from './lane-routes.mjs';
 import { createDshUpstreamAuth } from './dshauth.mjs';
@@ -108,7 +115,12 @@ export function createMobileAccessService(opts = {}) {
     // LOOPBACK_URL_PATCH（#154）：远程页面上指向本机其它回环端口的绝对地址改写成映射路径
     // `/__dsh-mobile/loopback/<port>/…`（http/ws 同构），由反代转发到那个端口——于是「其它
     // 插件访问本机其它端口」在远程/手机侧也能工作（映射请求同样先过配对门禁）。
-    inject: [OWNS_HOST_PATCH, THEME_SYNC_PATCH, POLYFILL, LOOPBACK_URL_PATCH],
+    // REMOTE_INVOKE_PATCH（#47）：配对远程页的壳命令桥——壳经宿主 env 下发页面端口与
+    // remote 视图 token，两件齐才注入；命令白名单在壳侧 view-grant，这里不做过滤。
+    inject: [OWNS_HOST_PATCH, THEME_SYNC_PATCH, POLYFILL, LOOPBACK_URL_PATCH, buildRemoteInvokePatch(
+      process.env.DSH_SHELL_PAGE_PORT,
+      process.env.DSH_SHELL_RPC_VIEW_TOKEN,
+    )].filter(Boolean),
     auth: (req) => {
       // 配对门禁：所有到达反代本体的路径都必须是已配对设备（携带会话 cookie）。
       // lane 自有控制面住在保留命名空间（LANE_PREFIX/*，含冻结别名 /pair、/api/pair/*），

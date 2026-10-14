@@ -497,6 +497,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   let patchFiles = [staged.injectFile]
   let host: Awaited<ReturnType<typeof startHost>> | undefined
   let hostOrigin = ''
+  // remote 视图 token（#47）：铸给 mobile-access 远程命令桥；守护器重启宿主时沿用同一枚
+  let remoteViewToken: string | undefined
   let hostInjections: readonly unknown[] = []
   let cookie = ''
   // 起宿主 + 取 cookie。守护器重启时重复调这个（同一个 cookie 变量与服务面 options）。
@@ -538,6 +540,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       return
     }
     try {
+      remoteViewToken ??= options.views?.issue('remote', paths.profile, 'mobile-access 命令桥').token
       host = await startHost({
         layout: paths,
         clientVersion: options.clientVersion,
@@ -546,6 +549,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         onLog: log,
         patchFiles,
         upstreamPort,
+        shellPagePort: pagePort,
+        shellRpcViewToken: remoteViewToken,
         lanePort,
         proxy: childProxy(),
         cloudflaredBin: liveSettings.cloudflaredBin,
@@ -568,6 +573,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         onLog: log,
         patchFiles,
         upstreamPort,
+        shellPagePort: pagePort,
+        shellRpcViewToken: remoteViewToken,
         lanePort,
         proxy: childProxy(),
         cloudflaredBin: liveSettings.cloudflaredBin,

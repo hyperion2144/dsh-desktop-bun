@@ -12,6 +12,8 @@
 //   · 请求本身不合法（坏 JSON / 缺 cmd）→ 400，未知命令 → `ok:false` + 明确文案
 //     （面板会把它显示成「无 Tauri IPC / 命令不支持」，而不是永远转圈）。
 
+import type { ViewKind } from '../shared/view-grant.ts'
+
 /** 请求体上限：设置 patch 与快捷键文件都远小于它；超过就是有人在乱灌。 */
 export const MAX_RPC_BYTES = 1024 * 1024
 
@@ -27,7 +29,7 @@ export interface RpcRequest {
  * 关闭窗口/退出时也要按窗口批量回收。`grant` 为 null ＝ 该路径没开每视图校验（测试与旧调用点）。
  */
 export interface RpcCaller {
-  kind: 'shell' | 'guest'
+  kind: ViewKind
   profile: string
   label: string
 }

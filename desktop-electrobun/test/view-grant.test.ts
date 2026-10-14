@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import { startShellServer } from '../src/bun/shell-server.ts'
 import {
   GUEST_ALLOWED_COMMANDS,
+  REMOTE_ALLOWED_COMMANDS,
   VIEW_TOKEN_HEADER,
   createViewRegistry,
   denyReason,
@@ -59,6 +60,17 @@ describe('每视图授权：纯逻辑', () => {
     expect(denyReason('guest', 'save_desktop_settings')).toContain('save_desktop_settings')
     expect(denyReason('guest', 'save_desktop_settings')).toContain('guest')
   })
+
+  test('remote 视图（#47）：只放行配对远程白名单，guest 不因此多放', () => {
+    for (const command of REMOTE_ALLOWED_COMMANDS) expect(isCommandAllowed('remote', command)).toBe(true)
+    for (const command of ['download_runtime', 'save_desktop_settings', 'get_desktop_client_environment']) {
+      expect(isCommandAllowed('remote', command)).toBe(false)
+      // guest 是不可信视图：remote 的白名单对它不生效
+      expect(isCommandAllowed('guest', command)).toBe(false)
+    }
+    expect(denyReason('remote', 'download_runtime')).toContain('remote')
+  })
+
 
   test('台账：发 token、查表、撤销', () => {
     const views = createViewRegistry(sequenceTokens())
@@ -209,6 +221,22 @@ describe('每视图授权：壳端点', () => {
       const response = await rpc(h.origin, guest.token, 'log_console')
       expect(response.status).toBe(200)
       expect(h.calls).toEqual(['log_console'])
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('remote 视图（#47 配对远程）：白名单命令放行，其余拒', async () => {
+    const h = await harness()
+    try {
+      const remote = h.views.issue('remote', 'desktop', 'mobile-access 命令桥')
+      const allowed = await rpc(h.origin, remote.token, 'get_notifications_state')
+      expect(allowed.status).toBe(200)
+      expect(h.calls).toEqual(['get_notifications_state'])
+      const denied = await rpc(h.origin, remote.token, 'download_runtime')
+      expect(denied.status).toBe(403)
+      expect(((await denied.json()) as { error: string }).error).toContain('download_runtime')
+      expect(h.calls).toEqual(['get_notifications_state'])
     } finally {
       h.cleanup()
     }
