@@ -16,6 +16,7 @@ import { normalizeRemoteUrl, remoteDisplay, remoteHostPort, remoteOrigin } from 
 import { createWatchdogState, tickWatchdog, WATCHDOG_INTERVAL_MS } from '../shared/watchdog.ts'
 import { portOpen, stopPortOwner } from './port-owner.ts'
 import { startHost } from './host.ts'
+import { sweepProcessRemnants } from './process-tree.ts'
 import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-shell-env.ts'
 import type { ShellStage } from './stages.ts'
 import { dshHome, layout, resolveBuiltinRuntimeDir, type ShellLayout } from './runtime.ts'
@@ -91,6 +92,8 @@ export interface ServiceOptions {
   onHostRestart?: (state: ShellState) => void
   /** 宿主反复退出，守护器放弃（不再重启） */
   onHostGiveUp?: (state: ShellState, reason: string) => void
+  /** #60：手动「重启 dsh 服务」= DSH 树级完整重启（宿主+伴生树灭后全新拉起，壳/窗口不动）；缺省回落宿主级 restartHost（无窗口/测试） */
+  onFullRestart?: () => Promise<void>
   /** F9：托盘弹框的 profile 新建/迁移落地后（create → 开窗，migrate → 刷新托盘） */
   onProfileOpApplied?: (op: 'create' | 'migrate', profile: string) => void
   /** F12：页面内确认弹窗的回填（壳主进程的 pending-input 单槽） */
@@ -195,11 +198,13 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 壳日志：本地时区时间戳 + 有界轮转（10 MB × 5 份；旧壳 KeepAll 实测堆了 90+ 份）。
   const shellLog = createLogSink({
     file: logFile,
+    // #54：批量异步刷盘——行进内存缓冲 100ms 合并落盘，不再逐行同步 I/O；退出钩子同步 flush
+    bufferMs: 100,
     stdout: (line) => console.log(line),
     onRotate: ({ moved, deleted }) => console.log(`[shell] 日志轮转：搬 ${String(moved)} 份、删 ${String(deleted)} 份`),
   })
   // 页面控制台另写一份（旧壳路径 `$DSH_HOME/dsh-desktop-webview.log`，不镜像到 stdout）。
-  const pageLog = createLogSink({ file: webviewLogFile })
+  const pageLog = createLogSink({ file: webviewLogFile, bufferMs: 100 })
 
   const log = (line: string): void => {
     shellLog.line(line)
@@ -818,6 +823,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // ---- 宿主守护器：异常退出就退避重启，并把服务面切到新宿主（页面不再停在转发失败） ----
   const ledger = createRestartLedger()
   let stopping = false
+  // #60：崩溃自愈的伴生孤儿清扫。宿主死后直接子代被 init/launchd 收养（按 ppid 找不到），
+  // 只能靠宿主生前的树快照（host.lastTree()）定位；清扫与退避睡眠并行，树灭确认后才拉新宿主。
+  const sweepHostTree = (pids: number[]): Promise<number[]> => sweepProcessRemnants({ pids, onLog: log })
   const registerHost = (): void => {
     const records = upsertHostRecord(readHostRecords(hostRegistryFile), {
       hostPid: host?.pid ?? 0,
@@ -857,7 +865,14 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     }
     dshStatusCode = 4
     ledger.record(Date.now())
+    // #60 树灭前置清理：与退避睡眠并行（自愈节奏不变），sleep 回来等清扫收尾——
+    // 树灭确认才 connect() 拉新宿主；清扫超时放行（记日志），不阻塞自愈。
+    const treeSweep = sweepHostTree(host?.lastTree() ?? [])
     await Bun.sleep(decision.delayMs)
+    const treeLeftovers = await treeSweep
+    if (treeLeftovers.length > 0) {
+      log(`[shell] 伴生进程清扫超时，放行：${treeLeftovers.join(', ')}（不阻塞自愈）`)
+    }
     if (stopping) return
     try {
       await connect()
@@ -1097,7 +1112,15 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       log,
       settings: () => liveSettings,
       save: saveSettings,
-      restartService: () => service.restartHost(),
+      restartService: async () => {
+        // #60：面板「重启 dsh 服务」= 壳级完整重启（退出级 teardown → 全新启动，与托盘同语义）；
+        // 无窗口/测试没有壳 teardown 回调，回落宿主级 restartHost（已树安全）。
+        if (options.onFullRestart !== undefined) {
+          await options.onFullRestart()
+          return
+        }
+        await service.restartHost()
+      },
       status: () => ({ ...state }),
       ports: () => ({ port: pagePort, upstreamPort, lanePort }),
       // 设置面板的 Profile 端口表要看到所有 profile（多窗口）：行来自共享台账 + 磁盘 profile 目录

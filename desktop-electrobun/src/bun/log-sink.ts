@@ -18,6 +18,8 @@ export interface LogSinkOptions {
   onRotate?: (info: { moved: number; deleted: number }) => void
   /** 多久重新 stat 一次当前文件（默认 1000ms；测试传 0 关掉缓存） */
   statIntervalMs?: number
+  /** >0：批量缓冲——行先进内存，按该毫秒数（或攒满 64KB）合并刷盘，进程退出同步 flush；0/缺省=逐行同步（旧行为）。 */
+  bufferMs?: number
 }
 
 export interface LogSink {
@@ -29,6 +31,8 @@ export interface LogSink {
   size(): number
   tail(lines: number): string[]
   rotate(): void
+  /** 立即把缓冲刷盘（exit 钩子与测试用）；未开缓冲时是 no-op */
+  flush(): void
 }
 
 export function createLogSink(options: LogSinkOptions): LogSink {
@@ -62,6 +66,8 @@ export function createLogSink(options: LogSinkOptions): LogSink {
   }
 
   function rotate(): void {
+    // 先把缓冲落进当前份再轮转：缓冲行不跨份（flush 在缓冲为空时是 no-op）
+    flush()
     const plan = rotatePlan(base, siblings(), keep)
     let moved = 0
     let deleted = 0
@@ -82,7 +88,7 @@ export function createLogSink(options: LogSinkOptions): LogSink {
     size = 0
   }
 
-  const write = (text: string): void => {
+  const writeNow = (text: string): void => {
     const nowMs = Date.now()
     if (nowMs - statAt >= statIntervalMs) {
       size = currentSize()
@@ -97,6 +103,52 @@ export function createLogSink(options: LogSinkOptions): LogSink {
     } catch {}
   }
 
+  // ---- 批量缓冲（#54 卫生项，bufferMs>0 才启用）：write 立即返回，行攒在内存里，
+  // 到期或攒满一并落盘。行序/行格式/轮转与逐行写等价；崩溃最多丢一个缓冲窗口。
+  const bufferMs = options.bufferMs ?? 0
+  const FLUSH_BYTES = 64 * 1024
+  let buffer: string[] = []
+  let bufferedBytes = 0
+  let flushTimer: ReturnType<typeof setTimeout> | null = null
+
+  const flush = (): void => {
+    if (flushTimer !== null) {
+      clearTimeout(flushTimer)
+      flushTimer = null
+    }
+    if (buffer.length === 0) return
+    const batch = buffer.join('')
+    buffer = []
+    bufferedBytes = 0
+    writeNow(batch)
+  }
+
+  const scheduleFlush = (): void => {
+    if (flushTimer !== null) return
+    const timer = setTimeout(() => {
+      flushTimer = null
+      flush()
+    }, bufferMs)
+    // 别让刷盘定时器拖住进程退出（退出兜底靠 exit 钩子的同步 flush）
+    const unref = (timer as { unref?: () => void }).unref
+    if (typeof unref === 'function') unref.call(timer)
+    flushTimer = timer
+  }
+
+  const write = (text: string): void => {
+    if (bufferMs <= 0) {
+      writeNow(text)
+      return
+    }
+    if (text === '') return
+    buffer.push(text)
+    bufferedBytes += Buffer.byteLength(text)
+    if (bufferedBytes >= FLUSH_BYTES) flush()
+    else scheduleFlush()
+  }
+
+  if (bufferMs > 0) process.on('exit', flush)
+
   return {
     path: file,
     write,
@@ -107,20 +159,21 @@ export function createLogSink(options: LogSinkOptions): LogSink {
     },
     size() {
       size = currentSize()
-      return size
+      return size + bufferedBytes
     },
     tail(lines) {
       if (lines <= 0) return []
+      // 缓冲里还没落盘的行也算数（拼在文件内容后面，顺序不变）
+      let content = buffer.join('')
       try {
-        const content = readFileSync(file, 'utf8')
-        const all = content.split('\n')
-        if (all[all.length - 1] === '') all.pop()
-        return all.slice(-lines)
-      } catch {
-        return []
-      }
+        content = `${readFileSync(file, 'utf8')}${content}`
+      } catch {}
+      const all = content.split('\n')
+      if (all[all.length - 1] === '') all.pop()
+      return all.slice(-lines)
     },
     rotate,
+    flush,
   }
 }
 
