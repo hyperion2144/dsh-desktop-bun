@@ -1,7 +1,7 @@
 // 壳 ↔ 页面 的 RPC（旧壳 Tauri IPC 的等价物，规格决策 12「IPC 接线放弃改每视图 RPC」）。
 //
 // 为什么要有这一层：壳自己的客户端插件（`src/client/*`：设置面板、通知 tab、下载 tab、
-// 本地 chrome、平台键盘…）全部经 `__TAURI_INTERNALS__.invoke(cmd, args)` 与壳通信。
+// 本地 chrome、平台键盘…）全部经页面侧 invoke shim 与壳通信。
 // 新壳里没有 Tauri，插件于是在第一步 `get_desktop_client_environment` 就拿到 undefined
 // 并整片不激活——设置面板在实机上「消失」就是这么来的。
 //

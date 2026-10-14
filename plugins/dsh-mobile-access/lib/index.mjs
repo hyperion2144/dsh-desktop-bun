@@ -109,7 +109,7 @@ export function createMobileAccessService(opts = {}) {
     // POLYFILL：老内核补 crypto.randomUUID。
     // ⚠️ 不注入 desktopEnvPatchScript：对齐 pocket 行为——只在 DSH Desktop 壳内注入，
     // 给远程浏览器强制补 dsh-desktop-mode=compatibility 会让 dsh-plugin-desktop 等
-    // 走「桌面分支」假设 Tauri IPC、皮肤 mount 时序，远程浏览器没 __TAURI__ 也没准备好
+    // 走「桌面分支」假设原生桥 IPC、皮肤 mount 时序，远程浏览器没原生桥也没准备好
     // 的 DOM → classList null / 皮肤不加载（§2.2）。POLYFILL 单独无害。
 
     // LOOPBACK_URL_PATCH（#154）：远程页面上指向本机其它回环端口的绝对地址改写成映射路径

@@ -21,6 +21,7 @@ await build({
   outfile: join(tmp, 'download-intercept.mjs'),
   format: 'esm',
   platform: 'node',
+  bundle: true,
   target: 'node20',
   logLevel: 'silent',
 })
@@ -59,6 +60,7 @@ await build({
   outfile: join(tmp, 'platform-keyboard.mjs'),
   format: 'esm',
   platform: 'node',
+  bundle: true,
   target: 'node20',
   logLevel: 'silent',
 })
@@ -195,6 +197,7 @@ await build({
   outfile: join(tmp, 'carrier.mjs'),
   format: 'esm',
   platform: 'node',
+  bundle: true,
   target: 'node20',
   logLevel: 'silent',
 })
@@ -300,6 +303,7 @@ await build({
   outfile: join(tmp, 'composer-input-guard.mjs'),
   format: 'esm',
   platform: 'node',
+  bundle: true,
   target: 'node20',
   logLevel: 'silent',
 })
@@ -413,6 +417,118 @@ area.value = 'x\u001dy'
 gt.fire('input', mkEvent({ target: area, type: 'input' }))
 assert.equal(area.value, 'xy', '输入框 value 里的控制字符也被擦掉')
 
+
+
+// ── shell-rpc（#50）：统一传输层，三通道选择 / wire 协议 / 超时 / 窗口三键 ──
+await build({
+  entryPoints: [join(root, 'src/client/shell-rpc.ts')],
+  outfile: join(tmp, 'shell-rpc.mjs'),
+  format: 'esm',
+  platform: 'node',
+  bundle: true,
+  target: 'node20',
+  logLevel: 'silent',
+})
+const { createShellRpc, sendWindowAction } = await import(pathToFileURL(join(tmp, 'shell-rpc.mjs')).href)
+
+// 官方桥：捕获 postMessage 包形，回包经 receiveMessageFromHost 注入
+{
+  const sent = []
+  const globals = {
+    __electrobunHostBridge: { postMessage: (raw) => { sent.push(JSON.parse(raw)) } },
+    __electrobun: {},
+  }
+  const timers = []
+  const rpc = createShellRpc({
+    readGlobals: () => globals,
+    setTimeoutImpl: (fn, ms) => { timers.push({ fn, ms }); return timers.length },
+    clearTimeoutImpl: () => {},
+  })
+  const p = rpc.invoke('echo', { a: 1 })
+  assert.equal(sent.length, 1, '官方通道：请求经 __electrobunHostBridge.postMessage 发出')
+  assert.deepEqual(sent[0], { type: 'request', id: 1, method: 'echo', params: { a: 1 } }, '包形对齐官方 wire 协议')
+  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 1, success: true, payload: 'ok-echo' })
+  assert.equal(await p, 'ok-echo', '成功响应 resolve value')
+
+  const p2 = rpc.invoke('boom')
+  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 2, success: false, error: '炸了' })
+  await assert.rejects(p2, /炸了/, '业务失败 reject Error(error)')
+
+  const p3 = rpc.invoke('slow', {}, { timeoutMs: 50 })
+  timers[timers.length - 1].fn()
+  await assert.rejects(p3, /timed out/, '超时 reject，对齐官方默认语义')
+
+  assert.equal(rpc.available(), true, '有官方桥时 available()')
+}
+
+// 先期积压回包：接管接收面时排空（对齐官方 Electroview.init）
+{
+  const globals = {
+    __electrobunHostBridge: { postMessage: () => {} },
+    __electrobun: {},
+    __electrobunPendingHostMessages: [{ type: 'response', id: 9, success: true, payload: 'early' }],
+  }
+  const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
+  void rpc.invoke('x')
+  assert.deepEqual(globals.__electrobunPendingHostMessages, [], '接管后积压已排空')
+}
+
+// 中继通道（mobile-access 远程页）
+{
+  const globals = { __DSH_SHELL_RELAY__: { invoke: async (cmd, args) => ({ cmd, args }) } }
+  const rpc = createShellRpc({ readGlobals: () => globals })
+  assert.deepEqual(await rpc.invoke('get_notifications_state', { x: 1 }), { cmd: 'get_notifications_state', args: { x: 1 } }, '有中继无桥时走中继')
+}
+
+// 同源 fetch 兑底：带 token 头 + 请求体字形
+{
+  const calls = []
+  const fetchImpl = async (url, init) => { calls.push({ url, init }); return { ok: true, json: async () => ({ ok: true, value: { status: 2 } }) } }
+  const globals = { __DSH_SHELL_VIEW_TOKEN__: 'tok-1' }
+  const rpc = createShellRpc({ readGlobals: () => globals, fetchImpl })
+  assert.deepEqual(await rpc.invoke('get_dsh_status'), { status: 2 }, 'fetch 兑底解析 value')
+  assert.equal(calls[0].url, '/__shell__/rpc', '端点正确')
+  assert.equal(calls[0].init.headers['x-dsh-shell-view'], 'tok-1', '带每视图 token 头')
+  assert.deepEqual(JSON.parse(calls[0].init.body), { cmd: 'get_dsh_status', args: {} }, 'body 对齐旧 shim 协议')
+
+  const fetchErr = async () => ({ ok: true, json: async () => ({ ok: false, error: 'unsupported command: nope' }) })
+  const rpcE = createShellRpc({ readGlobals: () => globals, fetchImpl: fetchErr })
+  await assert.rejects(rpcE.invoke('nope'), /unsupported command/, 'fetch 业务失败可见')
+}
+
+// 无任何通道：available false + invoke reject
+{
+  const rpc = createShellRpc({ readGlobals: () => ({}) })
+  assert.equal(rpc.available(), false)
+  await assert.rejects(rpc.invoke('x'), /shell rpc unavailable/)
+}
+
+// 官方通道失败不回退 fetch（命令可能已生效，toggle 二次执行会翻转两次）
+{
+  let fetchCalls = 0
+  const fetchImpl = async () => { fetchCalls += 1; return { ok: true, json: async () => ({ ok: true, value: 1 }) } }
+  const globals = { __electrobunHostBridge: { postMessage: () => {} }, __electrobun: {}, __DSH_SHELL_VIEW_TOKEN__: 't3' }
+  const rpc = createShellRpc({ readGlobals: () => globals, fetchImpl, setTimeoutImpl: (fn) => { fn(); return 1 }, clearTimeoutImpl: () => {} })
+  await assert.rejects(rpc.invoke('x'), /timed out/)
+  assert.equal(fetchCalls, 0, '官方通道超时后不打 fetch 兑底')
+}
+
+// 窗口三键：官方通道 window_* 方法；无桥时 /__shell__/window 兑底
+{
+  const sent = []
+  const globals = { __electrobunHostBridge: { postMessage: (raw) => sent.push(JSON.parse(raw)) }, __electrobun: {} }
+  const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
+  const p = sendWindowAction('toggle-maximize', { rpc, readGlobals: () => globals })
+  assert.equal(sent[0].method, 'window_toggle_maximize', '三键走官方 RPC 方法')
+  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 1, success: true, payload: null })
+  await p
+
+  const calls = []
+  const fetchImpl = async (url, init) => { calls.push({ url, init }); return { ok: true } }
+  await sendWindowAction('minimize', { fetchImpl, readGlobals: () => ({ __DSH_SHELL_VIEW_TOKEN__: 't2' }) })
+  assert.equal(calls[0].url, '/__shell__/window', '无桥三键兑底到窗口端点')
+  assert.deepEqual(JSON.parse(calls[0].init.body), { action: 'minimize' })
+}
 
 rmSync(tmp, { recursive: true, force: true })
 console.log('client 纯函数测试：全部通过 ✓')

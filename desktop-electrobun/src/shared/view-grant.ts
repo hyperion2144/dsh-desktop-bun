@@ -2,7 +2,7 @@
  * 每视图授权（#220 决策 12 的「授权层重建」）。
  *
  * 问题：旧壳的 Tauri IPC 由 capability 文件按**窗口**发权限（`capabilities/default.json` 75 条 +
- * `remote-desktop.json` 74 条）。新壳把页面桥（`__TAURI_INTERNALS__.invoke`）统一接到
+ * `remote-desktop.json` 74 条）。新壳把页面 invoke 桥统一接到
  * `POST /__shell__/rpc`，而**所有窗口同源**（同一个 loopback origin）——只看 Origin 与 cookie
  * 分不出「这是主窗、还是我们贴进来的网页 guest」。
  *

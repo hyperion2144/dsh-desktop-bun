@@ -186,10 +186,11 @@ Unicode true
 !define APP_NAME "DeepSeek Harness Desktop BUN"
 !define APP_ID "DeepSeekHarnessDesktopBUN"
 !define APP_DIR_NAME "${nsiEscape(appDirName)}"
+!define INSTALL_ROOT "DSHDesktopBun"  ; 安装根目录名（比 APP_ID 短，给深层 node_modules 留 MAX_PATH 余量）
 
 Name "@@APP_NAME@@"
 OutFile "${nsiEscape(outFile)}"
-InstallDir "$LOCALAPPDATA\\@@APP_ID@@"
+InstallDir "$LOCALAPPDATA\\@@INSTALL_ROOT@@"
 InstallDirRegKey HKCU "Software\\@@APP_ID@@" "InstallDir"
 RequestExecutionLevel user
 ShowInstDetails show
@@ -204,18 +205,33 @@ Page instfiles
 UninstPage uninstConfirm
 UninstPage instfiles
 
+
+Function .onInit
+  ; 旧版双层布局（<APP_ID>\\<APP_ID>\\）会把 node_modules 深处的文件顶过 MAX_PATH(260)，
+  ; 安装器写不进去（Can't write）。检测到旧安装先清场：目录尽力删（个别超长文件删不动就残留，
+  ; 不阻塞新装），注册表 InstallDir 一并抹掉——否则 InstallDirRegKey 会把 $INSTDIR 拉回旧长路径。
+  ReadRegStr $R0 HKCU "Software\\@@APP_ID@@" "InstallDir"
+  IfErrors legacy_done
+  IfFileExists "$R0\\@@APP_ID@@\\bin\\launcher.exe" 0 legacy_done
+    IfSilent legacy_remove
+    MessageBox MB_OKCANCEL "@@APP_NAME@@$\\n检测到旧版安装（$R0）。$\\n将迁移到更短的安装目录（Windows 路径长度限制）并删除旧目录，继续？" IDOK legacy_remove IDCANCEL legacy_done
+  legacy_remove:
+  RMDir /r "$R0"
+  DeleteRegValue HKCU "Software\\@@APP_ID@@" "InstallDir"
+  legacy_done:
+FunctionEnd
 Section "install"
-  SetOutPath "$INSTDIR\\@@APP_DIR_NAME@@"
+  SetOutPath "$INSTDIR\\App"
   File /r "${nsiEscape(packDir)}\\*.*"
   @@PAYLOAD_RENAME@@  ; Windows 自解压约定：<launcher 同目录>/.installer/<stem>.tar.zst + <stem>.metadata.json
-  WriteUninstaller "$INSTDIR\\@@APP_DIR_NAME@@\\uninstall.exe"
+  WriteUninstaller "$INSTDIR\\App\\uninstall.exe"
   WriteRegStr HKCU "Software\\@@APP_ID@@" "InstallDir" $INSTDIR
   WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@" "DisplayName" "@@APP_NAME@@"
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@" "DisplayIcon" "$INSTDIR\\@@APP_DIR_NAME@@\\launcher.exe"
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@" "UninstallString" "$INSTDIR\\@@APP_DIR_NAME@@\\uninstall.exe"
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@" "DisplayIcon" "$INSTDIR\\App\\launcher.exe"
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@" "UninstallString" "$INSTDIR\\App\\uninstall.exe"
   CreateDirectory "$SMPROGRAMS\\@@APP_NAME@@"
-  CreateShortCut "$SMPROGRAMS\\@@APP_NAME@@\\@@APP_NAME@@.lnk" "$INSTDIR\\@@APP_DIR_NAME@@\\bin\\launcher.exe"
-  CreateShortCut "$SMPROGRAMS\\@@APP_NAME@@\\卸载.lnk" "$INSTDIR\\@@APP_DIR_NAME@@\\uninstall.exe"
+  CreateShortCut "$SMPROGRAMS\\@@APP_NAME@@\\@@APP_NAME@@.lnk" "$INSTDIR\\App\\bin\\launcher.exe"
+  CreateShortCut "$SMPROGRAMS\\@@APP_NAME@@\\卸载.lnk" "$INSTDIR\\App\\uninstall.exe"
 SectionEnd
 
 Section "un.install"
@@ -224,7 +240,7 @@ Section "un.install"
   Delete "$SMPROGRAMS\\@@APP_NAME@@\\@@APP_NAME@@.lnk"
   Delete "$SMPROGRAMS\\@@APP_NAME@@\\卸载.lnk"
   RMDir "$SMPROGRAMS\\@@APP_NAME@@"
-  RMDir /r "$INSTDIR\\@@APP_DIR_NAME@@"
+  RMDir /r "$INSTDIR\\App"
   DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@"
   DeleteRegKey HKCU "Software\\@@APP_ID@@"
 SectionEnd`
@@ -240,12 +256,12 @@ SectionEnd`
   } else if (payloadArchive !== undefined && payloadMetadata !== undefined) {
     const escapedPayload = nsiEscape(payloadArchive)
     payloadRename = [
-      `  CreateDirectory "$INSTDIR\\@@APP_DIR_NAME@@\\bin\\.installer"`,
-      `  Rename "$INSTDIR\\@@APP_DIR_NAME@@\\Resources\\${escapedPayload}" "$INSTDIR\\@@APP_DIR_NAME@@\\bin\\.installer\\launcher.tar.zst"`,
-      `  Rename "$INSTDIR\\@@APP_DIR_NAME@@\\Resources\\metadata.json" "$INSTDIR\\@@APP_DIR_NAME@@\\bin\\.installer\\launcher.metadata.json"`,
+      `  CreateDirectory "$INSTDIR\\App\\bin\\.installer"`,
+      `  Rename "$INSTDIR\\App\\Resources\\${escapedPayload}" "$INSTDIR\\App\\bin\\.installer\\launcher.tar.zst"`,
+      `  Rename "$INSTDIR\\App\\Resources\\metadata.json" "$INSTDIR\\App\\bin\\.installer\\launcher.metadata.json"`,
     ].join('\n')
   }
-const nsi = nsiTemplate.replaceAll('@@PAYLOAD_RENAME@@', payloadRename).replaceAll('@@APP_NAME@@', 'DeepSeek Harness Desktop BUN').replaceAll('@@APP_ID@@', 'DeepSeekHarnessDesktopBUN').replaceAll('@@APP_DIR_NAME@@', appDirName)
+const nsi = nsiTemplate.replaceAll('@@PAYLOAD_RENAME@@', payloadRename).replaceAll('@@APP_NAME@@', 'DeepSeek Harness Desktop BUN').replaceAll('@@APP_ID@@', 'DeepSeekHarnessDesktopBUN').replaceAll('@@APP_DIR_NAME@@', appDirName).replaceAll('@@INSTALL_ROOT@@', 'DSHDesktopBun')
 
 const nsiPath = join(projectRoot, 'build', 'installer-windows.nsi')
 // BOM 让 makensis 按 UTF-8 读脚本（中文快捷方式名不乱码）

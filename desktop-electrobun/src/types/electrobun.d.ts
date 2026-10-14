@@ -24,6 +24,8 @@ declare module 'electrobun/bun' {
     /** D1 原生导航守卫：glob 串数组，`^` 前缀 = 阻断，最后命中赢（见 src/shared/nav-rules.ts） */
     navigationRules?: string[] | null
     sandbox?: boolean
+    /** 官方 Typed RPC：`BrowserView.defineRPC({handlers})` 的返回值喂进来（#50） */
+    rpc?: unknown
   }
 
   /** 子 webview（guest）：Electrobun 的 `BrowserView`（旧壳 `add_child` 的等价物） */
@@ -51,6 +53,13 @@ declare module 'electrobun/bun' {
    /** 打开本视图的 DevTools/inspector（Electrobun `BrowserView.openDevTools`） */
    openDevTools(): void
     on(event: string, handler: (event: unknown) => void): void
+    /** 官方 Typed RPC：返回值直接作 `new BrowserWindow({ rpc })` 的选项（壳接命令表，见 rpc-bridge.ts） */
+    static defineRPC(config: {
+      maxRequestTime?: number
+      handlers: {
+        requests: Record<string, (method: string, params: unknown) => unknown>
+      }
+    }): unknown
   }
 
   export class BrowserWindow {

@@ -83,10 +83,21 @@ export function readWindowFrame(file: string): WindowFrame | null {
   }
 }
 
-export function writeWindowFrame(file: string, frame: WindowFrame): void {
+/** 文件里是否记着「最大化收场」（旧格式无该键 → false，向后兼容）。 */
+export function readWindowMaximized(file: string): boolean {
+  if (!existsSync(file)) return false
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'))
+    return typeof parsed === 'object' && parsed !== null && (parsed as Record<string, unknown>).maximized === true
+  } catch {
+    return false
+  }
+}
+
+export function writeWindowFrame(file: string, frame: WindowFrame, maximized = false): void {
   try {
     mkdirSync(dirname(file), { recursive: true })
-    writeFileSync(file, `${JSON.stringify(frame, null, 2)}\n`)
+    writeFileSync(file, `${JSON.stringify({ ...frame, maximized }, null, 2)}\n`)
   } catch {}
 }
 

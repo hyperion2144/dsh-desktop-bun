@@ -8,6 +8,7 @@ import { registerDesktopSettings } from './desktop-settings.tsx'
 import { registerNotificationsTab } from './notifications-tab.tsx'
 import { requestDesktopClientEnvironment } from './environment.ts'
 import { installDesktopPlatformBridge } from './platform-keyboard.ts'
+import { shellRpc } from './shell-rpc.ts'
 import { installComposerInputGuard } from './composer-input-guard.ts'
 
 export { applyAdvancedShell } from './advanced-shell.ts'
@@ -25,26 +26,17 @@ export const inject = [
 
 /**
  * 把 WebView 控制台（console.* / window.onerror / unhandledrejection）镜像到桌面壳的
- * `log_console` Tauri 命令，Rust 端追加到 `~/.dsh/dsh-desktop-webview.log`。
- * 失败（无 Tauri IPC、序列化抛错）一律吞掉，不阻塞页面。运行成本：每条 console
- * 多一次 `JSON.stringify` + 一次 IPC；warn/error 还会额外镜像到 dsh-desktop-tauriapp.log
+ * `log_console` 命令，壳端追加到 `~/.dsh/dsh-desktop-webview.log`。
+ * 失败（无壳通道、序列化抛错）一律吞掉，不阻塞页面。运行成本：每条 console
+ * 多一次 `JSON.stringify` + 一次 RPC；warn/error 还会额外镜像到 dsh-desktop-tauriapp.log
  * 便于交叉对比。装在 apply 头部，确保 dsh-desktop-tauriapp client 装载后所有插件的
  * console.* 都走这条路径（仅错过 dsh-desktop-tauriapp 装载完成前那几条启动日志，
  * 那些日志对前端 bug 定位价值不高）。
  */
 function installWebviewConsoleMirror(): void {
-  const w = window as unknown as {
-    __TAURI__?: { core?: { invoke?: (cmd: string, args: unknown) => Promise<void> } }
-    __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: unknown, opts?: unknown) => Promise<void> }
-  }
-  // 两条 invoke 通道：withGlobalTauri 注入的 __TAURI__（仅 tauri:// 域）+ Tauri 2 内部 IPC
-  // 通道 __TAURI_INTERNALS__（跨域也存在，capabilities 允许的命令即可）。两条都试，
-  // 至少一条能通就镜像成功；都不通则 no-op（保留原 console 行为）。
-  const invoke = (cmd: string, args: unknown): void => {
-    const a = w.__TAURI__?.core?.invoke
-    if (a) { a(cmd, args).catch(() => {}); return }
-    const b = w.__TAURI_INTERNALS__?.invoke
-    if (b) { b(cmd, args, undefined).catch(() => {}); return }
+  // 壳 RPC 统一通道（#50）：官方桥/中继/同源 fetch 三选一，均不通则 no-op（保留原 console 行为）。
+  const invoke = (cmd: string, args: Record<string, unknown>): void => {
+    shellRpc.invoke(cmd, args).catch(() => {})
   }
   const fwd = (level: string, args: unknown[]): void => {
     try {
