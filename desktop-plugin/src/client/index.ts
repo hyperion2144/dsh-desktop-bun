@@ -9,6 +9,7 @@ import { registerNotificationsTab } from './notifications-tab.tsx'
 import { requestDesktopClientEnvironment } from './environment.ts'
 import { installDesktopPlatformBridge } from './platform-keyboard.ts'
 import { installComposerInputGuard } from './composer-input-guard.ts'
+import { createConsoleBatch } from './console-batch.ts'
 
 export { applyAdvancedShell } from './advanced-shell.ts'
 export { parseDesktopClientEnvironment, requestDesktopClientEnvironment } from './environment.ts'
@@ -26,8 +27,8 @@ export const inject = [
 /**
  * 把 WebView 控制台（console.* / window.onerror / unhandledrejection）镜像到桌面壳的
  * `log_console` Tauri 命令，Rust 端追加到 `~/.dsh/dsh-desktop-webview.log`。
- * 失败（无 Tauri IPC、序列化抛错）一律吞掉，不阻塞页面。运行成本：每条 console
- * 多一次 `JSON.stringify` + 一次 IPC；warn/error 还会额外镜像到 dsh-desktop-tauriapp.log
+ * 失败（无 Tauri IPC、序列化抛错）一律吞掉，不阻塞页面。运行成本（#54 攒批后）：均摊
+ * 多条 console 一次 IPC；warn/error 还会额外镜像到 dsh-desktop-tauriapp.log
  * 便于交叉对比。装在 apply 头部，确保 dsh-desktop-tauriapp client 装载后所有插件的
  * console.* 都走这条路径（仅错过 dsh-desktop-tauriapp 装载完成前那几条启动日志，
  * 那些日志对前端 bug 定位价值不高）。
@@ -46,6 +47,33 @@ function installWebviewConsoleMirror(): void {
     const b = w.__TAURI_INTERNALS__?.invoke
     if (b) { b(cmd, args, undefined).catch(() => {}); return }
   }
+  // 攒批上报（#54 数据面聚合）：多条 console 合并成一次 RPC（log_console_batch），壳侧
+  // 逐条落盘路径不变；旧壳没有批量命令时（reject）自动退回逐条 log_console。
+  let batchSupported = true
+  const consoleBatch = createConsoleBatch({
+    send: (items) => {
+      const send = (cmd: string, args: unknown): Promise<void> | null => {
+        const a = w.__TAURI__?.core?.invoke
+        if (a) return a(cmd, args)
+        const b = w.__TAURI_INTERNALS__?.invoke
+        if (b) return b(cmd, args, undefined)
+        return null
+      }
+      const batched = batchSupported ? send('log_console_batch', { items }) : null
+      if (batched !== null) {
+        batched.then(
+          () => {},
+          () => {
+            // 旧壳没有 log_console_batch：本次与之后的批次都退回单条通道
+            batchSupported = false
+            for (const item of items) invoke('log_console', item)
+          },
+        )
+        return
+      }
+      for (const item of items) invoke('log_console', item)
+    },
+  })
   const fwd = (level: string, args: unknown[]): void => {
     try {
       const msg = args
@@ -60,7 +88,7 @@ function installWebviewConsoleMirror(): void {
         })
         .join(' ')
       const url = (typeof location !== 'undefined' && location.href) || '?'
-      invoke('log_console', { level, msg, pageUrl: url })
+      consoleBatch.push({ level, msg, pageUrl: url })
     } catch {
       // 镜像失败不影响原 console 行为
     }

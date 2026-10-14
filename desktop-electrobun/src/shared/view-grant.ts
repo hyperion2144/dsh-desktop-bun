@@ -29,7 +29,7 @@ export const VIEW_TOKEN_HEADER = 'x-dsh-shell-view'
  * guest 视图唯一放行的命令：报日志。
  * 其余一律拒绝——包括 `open_external` 这类看似无害的（外链有专门的端点，不走命令表）。
  */
-export const GUEST_ALLOWED_COMMANDS: readonly string[] = ['log_console', 'log_diag']
+export const GUEST_ALLOWED_COMMANDS: readonly string[] = ['log_console', 'log_console_batch', 'log_diag']
 
 /**
  * remote 视图（配对远程设备，#47）放行的命令白名单。
@@ -39,6 +39,7 @@ export const GUEST_ALLOWED_COMMANDS: readonly string[] = ['log_console', 'log_di
  */
 export const REMOTE_ALLOWED_COMMANDS: readonly string[] = [
   'log_console',
+  'log_console_batch',
   'log_diag',
   'get_notifications_state',
   'set_notifications_config',
