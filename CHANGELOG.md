@@ -29,6 +29,7 @@
 
 ### Fixed
 
+- 手动「重启 dsh 服务」升级为完整重启、宿主停止升级为进程树级（#60）：托盘重启后 billion-context 会话代理失效的根因，是旧宿主被杀后其伴生进程（第三方插件的共享代理等）成孤儿，新宿主在秒级重启窗口 attach 上垂死的旧伴生（watcher 注册失败 → 模型流量静默直连；退出应用再启动不复现）。三层修复：新增 process-tree 模块（ps / PowerShell CIM 进程表枚举 + 树级停止编排：杀前枚举→同批 SIGTERM→宽限→SIGKILL 幸存者→有界确认树灭，超时放行并记日志，不阻塞重启）；host.stop() 按树级契约停止并暴露宿主生前树快照，守护器自愈在退避睡眠期间并行清扫崩溃残留孤儿（自愈节奏与退避策略不变）；托盘与设置面板「重启 dsh 服务」改为完整重启语义（退出级 teardown → 树灭确认 → 全新启动，等效退出应用再启动）。机制按「宿主进程树」通用概念实现，不点名任何插件或端口段。
 - CI job 无超时兑底（#51）：hutch 首次构建要下载 cottontail/Electrobun/CEF/bun 四件套，下载器无超时无重试，偶发半开连接时进程挂死不退出（run 38493719636 实证 macOS job 占 runner 85 分钟；正常 3.5 分钟）。build.yml job 加 `timeout-minutes: 40`（全量正常 ~15 分钟）、check.yml 两 job 各加 `timeout-minutes: 20`，再挂自动失败不占 runner。
 - 侧栏 header 错层（#44）：壳侧骨架期红绿灯让位注入（padding-top:28px + body 平台标记）在桌面插件接管后未退役，叠在官方 alpha 前端的 darwin 顶带布局上，logo 被折叠按钮顶下一层（官方 Desktop.app 的视觉是 logo 与折叠按钮同行）。退役骨架注入；插件 CSS 把 topStrip 浮到 logoRow 行、logoRow 顶回红绿灯让位带下方，还原单行几何；data-platform 信号保留（折叠全隐/红绿灯旁座位按钮依赖它）。随票修复 PR #48 合入时 CHANGELOG 残留的一处未解冲突标记。
 

@@ -417,6 +417,8 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     onHostGiveUp: (state, reason) => {
       console.error(`[shell] 宿主守护器放弃重启（${reason}）；页面停在 ${state.pageUrl}`)
     },
+    // #60：面板「重启 dsh 服务」= DSH 树级完整重启（壳/窗口不动）；无窗口模式回落宿主级
+    onFullRestart: noWindow ? undefined : () => fullRestartShell(),
     notifier,
     // 同一个 UN 桥实例（状态与投递都走它；面板的权限徽标也从这里读）
     notifyBridge,
@@ -588,11 +590,61 @@ async function openProfileWindow(profile: string): Promise<void> {
   }
 }
 
-/** 托盘「重启 dsh 服务」：杀掉宿主，守护器带着同一份运行时把它拉起来。 */
+let restartingShell = false
+
+/**
+ * #60：手动「重启 dsh 服务」的完整重启语义——DSH 侧等效「退出应用再启动」：
+ * 宿主+伴生进程树整树灭确认后全新拉起；桌面壳本体（托盘/窗口/进程）不退出，窗口重载到新 pageUrl；
+ * 启动 profile 的服务面引用与实例锁回填换新。
+ */
+async function fullRestartShell(): Promise<void> {
+  if (restartingShell || quitting) return
+  restartingShell = true
+  try {
+    // #60 语义（维护者澄清）：「完整重启」= DSH 侧（宿主 + 全部伴生进程树）树灭后全新拉起；
+    // 桌面壳本体（托盘/窗口/进程）不退出——窗口等服务面回来后重载到新 pageUrl。
+    const restartProfiles = [...services.keys()]
+    const serviceCount = restartProfiles.length
+    console.log(`[shell] 完整重启：DSH 树级重启 ${String(serviceCount)} 份服务面（壳与窗口保持不动）`)
+    // ---- 阶段一：树级停止（host.stop 树级契约：伴生进程随宿主退场，树灭确认后才返回）----
+    await Promise.all(
+      restartProfiles.map(async (profile) => {
+        const svc = services.get(profile)
+        if (svc === undefined) return
+        try {
+          await svc.stop()
+        } catch (error) {
+          console.error(`[shell] 完整重启：停止服务面失败（${profile}）：${String(error)}`)
+        }
+        services.delete(profile)
+      }),
+    )
+    // ---- 阶段二：全新服务面（新宿主、新 token），起好后窗口重载到新 pageUrl ----
+    for (const profile of restartProfiles) {
+      const fresh = await ensureService(profile).catch(() => null)
+      if (fresh === null) {
+        console.error(`[shell] 完整重启：重启服务面失败（${profile}）`)
+        continue
+      }
+      if (profile === instanceProfile) {
+        // 启动 profile 的服务面引用要换新（uiService/托盘/实例锁都以它为事实源）
+        service = fresh
+        updateInstance(instanceFile, process.pid, { origin: fresh.state.origin, pageUrl: fresh.state.pageUrl })
+      }
+      reloadWindow(profile, fresh.state.pageUrl)
+    }
+    console.log(`[shell] 完整重启完成（服务面 ${String(serviceCount)} 份）`)
+  } finally {
+    restartingShell = false
+    refreshTray()
+  }
+}
+
+/** 托盘「重启 dsh 服务」：完整重启语义（#60）——等效退出应用再启动，伴生进程不跨重启残留。 */
 async function restartServiceFromTray(): Promise<void> {
   console.log('[shell] 托盘：重启 dsh 服务')
   try {
-    await uiService().restartHost()
+    await fullRestartShell()
   } catch (error) {
     console.error(`[shell] 重启 dsh 服务失败：${String(error)}`)
   }
