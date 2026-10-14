@@ -30,6 +30,15 @@ const ADVANCED_STYLES = `
 .dshDesktopStatusBar[data-dsh-exit-mode="hover"] { background: rgba(220, 38, 38, 0.16); color: #ef4444; font-weight: 600; }
 .dshDesktopExitBtn { padding: 3px 10px; border-radius: 6px; border: 1px solid rgba(239, 68, 68, 0.55); background: transparent; color: inherit; font-size: 11px; line-height: 1; cursor: default; flex: none; }
 .dshDesktopExitBtn:hover { filter: brightness(1.1); }
+/* 侧栏 header 单行化（#44）：官方 alpha 前端的 darwin 分支把折叠按钮独占一条 52px
+   顶带（topStrip），logo 落在下一行；官方 Desktop.app 与旧壳的实际视觉是 logo 与折叠
+   按钮同一行、红绿灯浮在其上方独立让位带。data-platform 本身保留（折叠全隐/座位
+   按钮依赖它），这里只用 CSS 还原单行几何：topStrip 浮到 logoRow 行高，logoRow 顶回
+   红绿灯让位带下方并左移让开红绿灯。选择器按 CSS-modules 词干匹配（hash 前缀随构建
+   变化，词干稳定）。 */
+html[data-platform='darwin'] [class*='_root']:has(> [class*='_topStrip']) { position: relative; }
+html[data-platform='darwin'] [class*='_topStrip'] { position: absolute; top: 32px; left: 0; right: 0; height: 28px; margin: 0; padding: 0 12px 0 0; }
+html[data-platform='darwin'] [class*='_topStrip'] + [class*='_logoRow'] { margin-top: 0; padding-top: 28px; padding-left: 64px; }
 `
 
 /** Install and remove the advanced shell's local-window-chrome styles. @returns the style disposer. */

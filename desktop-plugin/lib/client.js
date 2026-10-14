@@ -451,6 +451,15 @@ var ADVANCED_STYLES = `
 .dshDesktopStatusBar[data-dsh-exit-mode="hover"] { background: rgba(220, 38, 38, 0.16); color: #ef4444; font-weight: 600; }
 .dshDesktopExitBtn { padding: 3px 10px; border-radius: 6px; border: 1px solid rgba(239, 68, 68, 0.55); background: transparent; color: inherit; font-size: 11px; line-height: 1; cursor: default; flex: none; }
 .dshDesktopExitBtn:hover { filter: brightness(1.1); }
+/* \u4FA7\u680F header \u5355\u884C\u5316\uFF08#44\uFF09\uFF1A\u5B98\u65B9 alpha \u524D\u7AEF\u7684 darwin \u5206\u652F\u628A\u6298\u53E0\u6309\u94AE\u72EC\u5360\u4E00\u6761 52px
+   \u9876\u5E26\uFF08topStrip\uFF09\uFF0Clogo \u843D\u5728\u4E0B\u4E00\u884C\uFF1B\u5B98\u65B9 Desktop.app \u4E0E\u65E7\u58F3\u7684\u5B9E\u9645\u89C6\u89C9\u662F logo \u4E0E\u6298\u53E0
+   \u6309\u94AE\u540C\u4E00\u884C\u3001\u7EA2\u7EFF\u706F\u6D6E\u5728\u5176\u4E0A\u65B9\u72EC\u7ACB\u8BA9\u4F4D\u5E26\u3002data-platform \u672C\u8EAB\u4FDD\u7559\uFF08\u6298\u53E0\u5168\u9690/\u5EA7\u4F4D
+   \u6309\u94AE\u4F9D\u8D56\u5B83\uFF09\uFF0C\u8FD9\u91CC\u53EA\u7528 CSS \u8FD8\u539F\u5355\u884C\u51E0\u4F55\uFF1AtopStrip \u6D6E\u5230 logoRow \u884C\u9AD8\uFF0ClogoRow \u9876\u56DE
+   \u7EA2\u7EFF\u706F\u8BA9\u4F4D\u5E26\u4E0B\u65B9\u5E76\u5DE6\u79FB\u8BA9\u5F00\u7EA2\u7EFF\u706F\u3002\u9009\u62E9\u5668\u6309 CSS-modules \u8BCD\u5E72\u5339\u914D\uFF08hash \u524D\u7F00\u968F\u6784\u5EFA
+   \u53D8\u5316\uFF0C\u8BCD\u5E72\u7A33\u5B9A\uFF09\u3002 */
+html[data-platform='darwin'] [class*='_root']:has(> [class*='_topStrip']) { position: relative; }
+html[data-platform='darwin'] [class*='_topStrip'] { position: absolute; top: 32px; left: 0; right: 0; height: 28px; margin: 0; padding: 0 12px 0 0; }
+html[data-platform='darwin'] [class*='_topStrip'] + [class*='_logoRow'] { margin-top: 0; padding-top: 28px; padding-left: 64px; }
 `;
 function installAdvancedStyles() {
   const style = document.createElement("style");
