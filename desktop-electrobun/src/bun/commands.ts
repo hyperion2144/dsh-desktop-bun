@@ -30,7 +30,7 @@ export interface CommandDeps {
   settings: () => DesktopSettings
   /** 读改写设置（走 settings-store 的原子写） */
   save: (patch: Record<string, unknown>) => DesktopSettings
-  /** dsh 服务面：重启宿主（设置面板切 dsh 来源 / profile 后调它） */
+  /** dsh 服务面：重启（设置面板调；#60 起为壳级完整重启，缺省回落宿主级） */
   restartService?: () => Promise<void>
   /** dsh 服务面状态快照（`get_dsh_status`） */
   status?: () => Record<string, unknown>
@@ -338,7 +338,7 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       return { ok: true, version }
     },
 
-    // 设置面板切 dsh 来源 / profile 后的动作：重启宿主，页面由守护器回调自动重载
+    // 设置面板切 dsh 来源 / profile 后的动作：重启服务（#60 起为壳级完整重启，与托盘同语义）
     restart_dsh_service: async () => {
       if (deps.restartService === undefined) throw new Error('restart_dsh_service: 服务面不可用')
       deps.log('[rpc] 收到重启 dsh 服务请求')
