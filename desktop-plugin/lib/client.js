@@ -3700,6 +3700,49 @@ function installComposerInputGuard() {
   });
 }
 
+// src/client/console-batch.ts
+function createConsoleBatch(options) {
+  const maxItems = options.maxItems ?? 20;
+  const maxChars = options.maxChars ?? 16384;
+  const flushMs = options.flushMs ?? 100;
+  const now = options.now ?? (() => Date.now());
+  const schedule = options.schedule ?? ((fn, ms) => {
+    const timer = setTimeout(fn, ms);
+    return () => clearTimeout(timer);
+  });
+  let items = [];
+  let chars = 0;
+  let oldestAt = null;
+  let cancelTimer = null;
+  const dispatch = () => {
+    if (cancelTimer !== null) {
+      cancelTimer();
+      cancelTimer = null;
+    }
+    if (items.length === 0) return;
+    const batch = items;
+    items = [];
+    chars = 0;
+    oldestAt = null;
+    try {
+      options.send(batch);
+    } catch {
+    }
+  };
+  return {
+    push(item) {
+      items.push(item);
+      chars += item.msg.length + item.pageUrl.length + item.level.length + 16;
+      if (oldestAt === null) {
+        oldestAt = now();
+        cancelTimer = schedule(dispatch, flushMs);
+      }
+      if (items.length >= maxItems || chars >= maxChars) dispatch();
+    },
+    flush: dispatch
+  };
+}
+
 // src/client/index.ts
 var inject = [
   "slots",
@@ -3724,6 +3767,31 @@ function installWebviewConsoleMirror() {
       return;
     }
   };
+  let batchSupported = true;
+  const consoleBatch = createConsoleBatch({
+    send: (items) => {
+      const send = (cmd, args) => {
+        const a = w.__TAURI__?.core?.invoke;
+        if (a) return a(cmd, args);
+        const b = w.__TAURI_INTERNALS__?.invoke;
+        if (b) return b(cmd, args, void 0);
+        return null;
+      };
+      const batched = batchSupported ? send("log_console_batch", { items }) : null;
+      if (batched !== null) {
+        batched.then(
+          () => {
+          },
+          () => {
+            batchSupported = false;
+            for (const item of items) invoke6("log_console", item);
+          }
+        );
+        return;
+      }
+      for (const item of items) invoke6("log_console", item);
+    }
+  });
   const fwd = (level, args) => {
     try {
       const msg = args.map((a) => {
@@ -3739,7 +3807,7 @@ ${a.stack}` : a.message;
         return String(a);
       }).join(" ");
       const url = typeof location !== "undefined" && location.href || "?";
-      invoke6("log_console", { level, msg, pageUrl: url });
+      consoleBatch.push({ level, msg, pageUrl: url });
     } catch {
     }
   };

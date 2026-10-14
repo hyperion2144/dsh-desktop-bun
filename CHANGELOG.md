@@ -18,6 +18,7 @@
 - 应用内更新检查（Electrobun 更新器，基址为本仓 Releases）。
 - 页面右键菜单补齐（#21）：在既有系统 role 项与链接项之上，新增工作区文件行「打开」、文件夹行「打开文件夹」（dsh ui-sidebar-files 的 data-files-entry/data-files-path 稳定标记 → Utils.openPath，路径只认绝对路径）；dev 构建（未打包）菜单垫底「打开 DevTools」（BrowserView.openDevTools），release 不出现；「刷新页面」更名「刷新」。
 - CI 每日定时全量兜底（#8）：build.yml 新增 schedule（UTC 18:30 = 北京 02:30）；main 打包链（三平台打包 / NSIS / 断言 / 冒烟）由每日自动验证，防 hutch 与 runner 镜像漂移导致的静默腐坏。
+- loopback 数据面聚合（#54）：壳新增 `/__shell__/batch` 批量转发端点（一次 POST 携 ≤32 个子请求，并发转发按序聚合，单个失败不拖垮整批，整包 no-store）与相同 method+path+query 并发 GET 的单飞合并（≤256KB 且带 content-length 的响应共享给并发等待者，流式/大响应不缓冲）；`/__shell__/health` 新增 `proxiedInFlight`/`coalesced` 字段；proxy 慢请求日志由单段 ttfb 拆为 `ttfb`/`total` 两段（total 含流式体传输）。
 
 ### Changed
 - CI 触发策略分流（#7）：push/PR 只跑检查（typecheck + test，新增 Check workflow）；完整构建（三平台 + 断言 + 冒烟 + 上传）仅由 workflow_dispatch 与 tag push 触发。
@@ -26,6 +27,7 @@
 - 导航守卫在原生层评估（`navigationRules`），仅放行页面 origin，站外一律系统浏览器。
 - 移除外部 DSH CLI 支持：运行时只认随包内置或已下载版本；dsh 来源固定内置，历史配置 `dsh_mode=external` 静默回退（设置键保留），托盘/设置面板/命令面不再出现外部选项。
 - 移除兼容模式：端口被本壳旧实例或外部 dsh web 占用时自动清场后由壳自拉（不再弹「兼容 / 高级」选择框）；陌生程序占用且清理失败仍报错。壳 RPC 与页面环境载荷不再携带 mode 字段。
+- 页面 console 镜像与壳日志批量刷盘（#54）：桌面插件 client 的 console 镜像改攒批上报（新命令 `log_console_batch`，≤20 条/100ms 合并一次 RPC，旧壳自动回退逐条，guest/remote 白名单同步放行）；LogSink 新增 `bufferMs`（本壳 shell.log 与 dsh-desktop-webview.log 均 100ms 合并落盘，退出钩子同步 flush，崩溃最多丢一个缓冲窗口；行序/行格式/轮转/路径契约不变，不开缓冲仍逐行同步写）。
 
 ### Fixed
 
