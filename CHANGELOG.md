@@ -29,6 +29,7 @@
 
 ### Fixed
 
+- BUN 桌面「NodeJS 诊断」面板全白（#61）：Bun 的 node:inspector CDP 面太窄（官方兼容表 🟡，Runtime.evaluate / HeapProfiler.* 一律 -32601 wasn't found），DevTools 前端拿不到求值结果，底部面板整块空白（快捷键 Ctrl/Cmd+Shift+.）。bun-preload 新增 Patch 13/14：worker 侧在 HostInspectorSession.request()（五条宿主后端共用的唯一 session.post 落点）命中桥方法时经 hostSourcePort 转给主线程执行（node:vm.runInThisContext 按 CDP 原始 script 完成值语义求值 + WeakRef 对象表 + util.inspect 有界预览 + awaitPromise 服务端补 await），堆快照用主线程 v8.getHeapSnapshot() 读成分块经合成事件 HeapProfiler.addHeapSnapshotChunk 推回客户端；未命中方法照旧透传原生，typeof Bun 守卫下 Node 零变化。Sources/Debugger（断点）依赖 Bun 转发丢结果的协议面，本补丁不覆盖。PATCH_REV 7→8。
 - CI job 无超时兑底（#51）：hutch 首次构建要下载 cottontail/Electrobun/CEF/bun 四件套，下载器无超时无重试，偶发半开连接时进程挂死不退出（run 38493719636 实证 macOS job 占 runner 85 分钟；正常 3.5 分钟）。build.yml job 加 `timeout-minutes: 40`（全量正常 ~15 分钟）、check.yml 两 job 各加 `timeout-minutes: 20`，再挂自动失败不占 runner。
 - 侧栏 header 错层（#44）：壳侧骨架期红绿灯让位注入（padding-top:28px + body 平台标记）在桌面插件接管后未退役，叠在官方 alpha 前端的 darwin 顶带布局上，logo 被折叠按钮顶下一层（官方 Desktop.app 的视觉是 logo 与折叠按钮同行）。退役骨架注入；插件 CSS 把 topStrip 浮到 logoRow 行、logoRow 顶回红绿灯让位带下方，还原单行几何；data-platform 信号保留（折叠全隐/红绿灯旁座位按钮依赖它）。随票修复 PR #48 合入时 CHANGELOG 残留的一处未解冲突标记。
 
