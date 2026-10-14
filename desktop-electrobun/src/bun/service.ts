@@ -67,7 +67,7 @@ import {
   recordInstalledRuntime,
   trashInstalledRuntime,
 } from './runtime-store.ts'
-import { createRuntimeDownloader, ensureNodeShim, installRuntime, resolvePnpmCjs } from './runtime-install.ts'
+import { createRuntimeDownloader, ensureNodeShim, ensureShimDir, installRuntime, resolvePnpmCjs } from './runtime-install.ts'
 
 export interface ServiceOptions {
   /** 平台（命令表要回给页面；缺省 process.platform） */
@@ -282,6 +282,23 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     },
     log,
   })
+
+  // ---- 宿主 PATH 垫片（#70）：connect 时现算——切运行时/新下载后重连即拿到新 pnpm.cjs；
+  // pnpm.cjs 找不到时回 undefined，宿主 PATH 不动（启动不因此失败，插件安装维持旧行为报错）。----
+  // hasNode 口径沿用旧通道（探壳进程 PATH；startService 已把 login shell env 并入 process.env）。
+  const hostPathShimDir = (): string | undefined =>
+    ensureShimDir({
+      appSupport: paths.appSupport,
+      bunPath,
+      hasNode: Bun.which('node') !== null,
+      pnpmCjs: resolvePnpmCjs({
+        env,
+        runtimeRoot: paths.runtimeDir,
+        builtinDir: resolveBuiltinRuntimeDir(env, { repoRoot: paths.repoRoot, resourcesDir: paths.resourcesDir }),
+        appSupport: paths.appSupport,
+      }),
+      log,
+    }) ?? undefined
 
   // ---- 页面 origin 端口：固定 + 被占顺延（origin 是 localStorage 的隔离键）----
   const readClaims = async (): Promise<string> => {
@@ -559,6 +576,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         lanePort,
         proxy: childProxy(),
         cloudflaredBin: liveSettings.cloudflaredBin,
+        pathShimDir: hostPathShimDir(),
         notify: { port: notifyServer.port, token: notifyServer.token },
       })
     } catch (error) {
@@ -583,6 +601,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         lanePort,
         proxy: childProxy(),
         cloudflaredBin: liveSettings.cloudflaredBin,
+        pathShimDir: hostPathShimDir(),
         notify: { port: notifyServer.port, token: notifyServer.token },
       })
     }

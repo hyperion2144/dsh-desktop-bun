@@ -42,6 +42,8 @@ export interface StartHostInput {
   proxy?: ProxyEnv | null
   /** cloudflared 可执行文件路径（旧壳 `DSH_CLOUDFLARED_BIN`，#164 隧道） */
   cloudflaredBin?: string | undefined
+  /** PATH 垫片目录（#70）：非空则前置到宿主子进程 PATH 最前（内置 pnpm/node；service 现算传入） */
+  pathShimDir?: string | undefined
 }
 
 export interface HostHandle {
@@ -90,6 +92,7 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
     lanePort: input.lanePort,
     proxy: input.proxy,
     cloudflaredBin: input.cloudflaredBin,
+    pathPrepend: input.pathShimDir,
   })
   assertChildEnv(env)
 
