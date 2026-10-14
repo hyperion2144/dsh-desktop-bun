@@ -40,9 +40,9 @@ const config = (patch: Partial<NotificationsConfig> = {}): NotificationsConfig =
 })
 
 describe('notify-policy：场景表与映射', () => {
-  test('场景 id 与设置表一一对应（14 条，无错别字）', () => {
+  test('场景 id 与设置表一一对应（15 条，无错别字）', () => {
     const ids = Object.values(SCENARIO)
-    expect(ids).toHaveLength(14)
+    expect(ids).toHaveLength(15)
     for (const id of ids) {
       const meta = scenarioMetaOf(id)
       expect(meta?.id).toBe(id)

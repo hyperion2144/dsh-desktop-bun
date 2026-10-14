@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import {
   compareRuntimeVersions,
   mergeInstalled,
@@ -38,7 +38,15 @@ import {
   trashInstalledRuntime,
   writeInstalledManifest,
 } from '../src/bun/runtime-store.ts'
-import { resolveRuntimeSelection, runtimePathsOf } from '../src/bun/runtime.ts'
+import {
+  packagedResourcesFromLauncher,
+  packagedResourcesFromProcess,
+  packagedRootFromLauncher,
+  packagedRootFromProcess,
+  resolveLauncherExecutablePath,
+  resolveRuntimeSelection,
+  runtimePathsOf,
+} from '../src/bun/runtime.ts'
 
 const tempDirs: string[] = []
 
@@ -322,5 +330,122 @@ describe('运行时选中', () => {
   test('什么都没有时抛清楚的错（带两个可用环境变量）', () => {
     const appSupport = tempDir()
     expect(() => resolveRuntimeSelection({ env: {}, appSupport, builtinDir: null })).toThrow(/找不到可用的 dsh 运行时/)
+  })
+})
+
+describe('打包布局的运行进程锚定（#62）', () => {
+  const fileSet = (...paths: string[]) => {
+    const files = new Set(paths)
+    return (path: string) => files.has(path)
+  }
+
+  test('解压式自定义安装：<安装目录>/<应用树>/{bin/bun.exe + Resources/app/{runtime,plugins}}', () => {
+    const app = resolve('/opt/dsh/App')
+    const exe = join(app, 'bin', 'bun.exe')
+    const root = join(app, 'Resources', 'app')
+    const exists = fileSet(
+      exe,
+      join(root, 'runtime', 'dsh-host.mjs'),
+      join(root, 'plugins', 'dsh-desktop-bun', 'package.json'),
+    )
+    expect(packagedRootFromProcess(exe, exists)).toBe(root)
+    expect(packagedResourcesFromProcess(exe, exists)).toBe(root)
+  })
+
+  test('扁平树：bin 旁就是 runtime/plugins 也认', () => {
+    const tree = resolve('/srv/dsh')
+    const exe = join(tree, 'bin', 'bun.exe')
+    const exists = fileSet(
+      exe,
+      join(tree, 'runtime', 'dsh-host.mjs'),
+      join(tree, 'plugins', 'dsh-desktop-bun', 'package.json'),
+    )
+    expect(packagedRootFromProcess(exe, exists)).toBe(tree)
+    expect(packagedResourcesFromProcess(exe, exists)).toBe(tree)
+  })
+
+  test('dev 态（工具链 bun，祖先无标记）探测落空回 null，调用方回落 import.meta 链', () => {
+    const never = () => false
+    const exe = join(resolve('/Users/u/.hutch/toolchains/bun/1.4.0/macos-arm64'), 'bin', 'bun')
+    expect(packagedRootFromProcess(exe, never)).toBeNull()
+    expect(packagedResourcesFromProcess(exe, never)).toBeNull()
+  })
+
+  test('launcher 旁 bun 与 launcher 锚定：launcher 优先于进程锚（自定义安装目录说了算，#62）', () => {
+    const app = resolve('/opt/dsh/App')
+    const launcher = join(app, 'bin', 'launcher.exe')
+    const root = join(app, 'Resources', 'app')
+    const canonical = join(resolve('/opt/规范根/com.hyperion.dsh-desktop-bun/stable'), 'Resources', 'app')
+    const exists = fileSet(
+      launcher,
+      join(app, 'bin', 'bun.exe'),
+      join(root, 'runtime', 'dsh-host.mjs'),
+      join(root, 'plugins', 'dsh-desktop-bun', 'package.json'),
+      join(canonical, 'runtime', 'dsh-host.mjs'),
+    )
+    expect(packagedRootFromLauncher(launcher, exists)).toBe(root)
+    expect(packagedResourcesFromLauncher(launcher, exists)).toBe(root)
+    expect(packagedRootFromLauncher(null)).toBeNull()
+    expect(packagedRootFromLauncher(join(resolve('/opt/规范根/missing'), 'bin', 'launcher.exe'), exists)).toBeNull()
+  })
+})
+
+describe('launcher 可执行文件路径发现（#62）', () => {
+  test('无 ELECTROBUN_LAUNCHER_PID 且 ppid 无效 → null，不发起进程探测', () => {
+    let spawned = 0
+    const run = () => {
+      spawned += 1
+      return { status: 0, stdout: '' }
+    }
+    expect(resolveLauncherExecutablePath({}, 0, run, () => null, 'darwin')).toBeNull()
+    expect(spawned).toBe(0)
+  })
+
+  test('darwin：拿 PID 走 ps -o comm=，取首个非空行为 exe 路径', () => {
+    const out = resolveLauncherExecutablePath(
+      { ELECTROBUN_LAUNCHER_PID: '4242' },
+      0,
+      () => ({ status: 0, stdout: '  /opt/dsh/App/bin/launcher  \n' }),
+      () => null,
+      'darwin',
+    )
+    expect(out).toBe('/opt/dsh/App/bin/launcher')
+  })
+
+  test('linux：读 /proc/<pid>/exe 的 readlink 结果', () => {
+    const out = resolveLauncherExecutablePath(
+      { ELECTROBUN_LAUNCHER_PID: '9' },
+      0,
+      () => ({ status: 1, stdout: '' }),
+      (path) => (path === '/proc/9/exe' ? '/opt/dsh/App/bin/launcher' : null),
+      'linux',
+    )
+    expect(out).toBe('/opt/dsh/App/bin/launcher')
+  })
+
+  test('win32：走 PowerShell CIM 拿 ExecutablePath', () => {
+    const seen: string[][] = []
+    const out = resolveLauncherExecutablePath(
+      { ELECTROBUN_LAUNCHER_PID: '11' },
+      0,
+      (argv) => {
+        seen.push(argv)
+        return { status: 0, stdout: 'C:\\App\\bin\\launcher.exe\r\n' }
+      },
+      () => null,
+      'win32',
+    )
+    expect(out).toBe('C:\\App\\bin\\launcher.exe')
+    expect(seen[0]?.[0]).toBe('powershell')
+    expect(seen[0]?.join(' ')).toContain('ProcessId=11')
+  })
+
+  test('探测失败（非零退出/空输出）→ null，调用方逐级兑底', () => {
+    expect(
+      resolveLauncherExecutablePath({ ELECTROBUN_LAUNCHER_PID: '7' }, 0, () => ({ status: 1, stdout: '' }), () => null, 'darwin'),
+    ).toBeNull()
+    expect(
+      resolveLauncherExecutablePath({ ELECTROBUN_LAUNCHER_PID: '7' }, 0, () => ({ status: 0, stdout: '\n' }), () => null, 'darwin'),
+    ).toBeNull()
   })
 })

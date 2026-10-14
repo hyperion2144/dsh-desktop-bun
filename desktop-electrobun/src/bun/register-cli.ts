@@ -21,6 +21,13 @@ import {
   describeRegisterState,
   extractLastNonEmptyLine,
   parseUserShell,
+  linuxRegistrationScript,
+  linuxRegistrationTarget,
+  parseWindowsPathRegQuery,
+  windowsPathHasEntry,
+  windowsPathWriteScript,
+  windowsUserPathEntries,
+  windowsUserPathWrite,
   registrationScript,
   shimPathOf,
   shimScript,
@@ -94,11 +101,13 @@ export function createRegisterCli(options: RegisterCliOptions): RegisterCli {
     const argv = options.shellCommand()
     if (argv === null || argv.length === 0) return { path: shimPath, verdict: 'absent' }
     const expected = shimScript(platform, argv)
-    const verdict = classifyShim(readText(shimPath), expected)
-    if (verdict === 'ours') return { path: shimPath, verdict }
+    const existing = readText(shimPath)
+    const verdict = classifyShim(existing, expected)
+    // shim 文件在本壳私有的 appSupport 目录里：只要内容不是最新就对账重写——旧版本写坏的
+    // 入口路径没带标记注释，也不会被误判成「别人占位」（#62 PR 实测：旧 dsh.cmd 一直占着坑）。
+    if (existing === expected) return { path: shimPath, verdict: 'ours' }
     if (verdict === 'foreign') {
-      options.log(`[register] shim 位置被别的程序占着，不覆盖：${shimPath}`)
-      return { path: shimPath, verdict }
+      options.log(`[register] shim 位置发现非本壳内容，按本壳目录回收重写：${shimPath}`)
     }
     try {
       writeText(shimPath, expected, 0o755)
@@ -126,10 +135,21 @@ export function createRegisterCli(options: RegisterCliOptions): RegisterCli {
   /** 解析用户环境里的 dsh；`undefined` = 探测不确定（超时/失败），调用方保持旧缓存。 */
   function resolveInUserEnv(): string | null | undefined {
     if (platform === 'win32') {
+      // 新终端按注册表用户 PATH 解析：先看本壳入口在不在（权威）。
+      const query = run(['reg', 'query', 'HKCU\\Environment', '/v', 'Path'], { timeoutMs: DETECT_TIMEOUT_MS })
+      const parsed = query.status === 0 ? parseWindowsPathRegQuery(query.stdout) : null
+      const entries = parsed !== null ? windowsUserPathEntries(parsed.raw) : null
+      if (entries !== null && windowsPathHasEntry(entries, dirname(shimPath))) return shimPath
+      // `where dsh` 走进程 PATH 启动快照，会命中旧安装残留（PR #67 实测）；只用来发现「别人」。
       const out = run(['where', 'dsh'], { timeoutMs: DETECT_TIMEOUT_MS })
-      if (out.status !== 0 && out.stdout.trim() === '') return null
-      const first = out.stdout.split(/\r?\n/).find((line) => line.trim() !== '')
-      return first === undefined ? null : first.trim()
+      const first = out.status === 0 ? out.stdout.split(/\r?\n/).find((line) => line.trim() !== '') : undefined
+      const hit = first !== undefined && first.trim() !== '' ? first.trim() : null
+      if (hit !== null) {
+        options.log(`[register] where dsh → ${hit}（注册表用户 PATH 里没有本壳入口）`)
+        return hit
+      }
+      if (parsed === null) options.log(`[register] 注册表用户 PATH 读取失败（exit ${String(query.status)}），按未注册处理`)
+      return null
     }
     const shell = userShell()
     const out = run([shell, '-ilc', DETECT_COMMAND], { env: DETECT_ENV, timeoutMs: DETECT_TIMEOUT_MS })
@@ -183,6 +203,48 @@ export function createRegisterCli(options: RegisterCliOptions): RegisterCli {
     const shim = ensureShim()
     if (shim.verdict === 'absent') {
       return { ok: false, code: 'error', message: `shim 没写成功：${shimPath}` }
+    }
+    if (platform === 'linux') {
+      const home = options.home ?? env.HOME ?? ''
+      if (home === '') return { ok: false, code: 'error', message: '拿不到用户主目录（$HOME 为空），注册不了' }
+      const target = linuxRegistrationTarget(home)
+      const script = linuxRegistrationScript({ shim: shimPath, home, force: registerOptions.force === true })
+      const out = run(['/bin/sh', '-c', script], { timeoutMs: 30_000 })
+      void refresh({ force: true })
+      if (out.status === 0) return { ok: true, message: `已注册：${target} → ${shimPath}` }
+      if (out.stderr.includes(CONFLICT_MARKER)) {
+        return {
+          ok: false,
+          code: 'conflict',
+          message: `${target} 已存在且不是本壳入口——再点一次会强制覆盖（原来的会带时间戳备份）`,
+        }
+      }
+      return { ok: false, code: 'error', message: `注册脚本执行失败：${out.stderr.trim() || `exit ${String(out.status)}`}` }
+    }
+    if (platform === 'win32') {
+      const shimDir = dirname(shimPath)
+      const query = run(['reg', 'query', 'HKCU\\Environment', '/v', 'Path'], { timeoutMs: 15_000 })
+      if (query.status !== 0) {
+        return { ok: false, code: 'error', message: `读取用户 PATH 失败：${query.stderr.trim() || `exit ${String(query.status)}`}` }
+      }
+      const parsed = parseWindowsPathRegQuery(query.stdout)
+      if (parsed === null) return { ok: false, code: 'error', message: '用户 PATH 注册表值解析失败（HKCU\\Environment\\Path）' }
+      const entries = windowsUserPathEntries(parsed.raw)
+      if (!windowsPathHasEntry(entries, shimDir)) {
+        const script = windowsPathWriteScript(
+          windowsUserPathWrite(entries, shimDir, registerOptions.force === true),
+          parsed.type,
+        )
+        const out = run(
+          ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+          { timeoutMs: 30_000 },
+        )
+        if (out.status !== 0) {
+          return { ok: false, code: 'error', message: `写入用户 PATH 失败：${out.stderr.trim() || `exit ${String(out.status)}`}` }
+        }
+      }
+      void refresh({ force: true })
+      return { ok: true, message: `已把 ${shimDir} 加进用户 PATH——已开的终端不会热更新，新开终端生效` }
     }
     if (platform !== 'darwin') {
       return {

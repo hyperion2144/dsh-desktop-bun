@@ -21,6 +21,11 @@ import { resolve, dirname, join, delimiter } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 
+// 信息性日志（每个补丁的「已就位/applied」）默认静默：dsh 命令行每次跑 preload 都会打出十几行
+// [bun-preload] Patch N 噪声（#62 PR 实测）；排障时设 DSH_SHELL_PRELOAD_DEBUG=1 打开。
+const _trace = (...args) => {
+  if (process.env.DSH_SHELL_PRELOAD_DEBUG === "1") console.log(...args);
+};
 // ── Helper: resolve bare specifier through node_modules with exports support ──
 function _resolveBare(specifier, parentURL, H) {
   const { join, dirname, resolve, fileURLToPath, pathToFileURL, existsSync, readFileSync } = H;
@@ -339,7 +344,7 @@ const PTC_IMPORT_FROM = 'import { stripTypeScriptTypes } from "node:module";';
 const PTC_IMPORT_TO = `// ${REV_MARK}\nimport { Module } from "node:module"; const stripTypeScriptTypes = Module.stripTypeScriptTypes;`;
 for (const target of packageTargets('@deepseek-ai/dsh-ptc-runtime-node/lib/index.js')) {
   if (hasCurrentRev(target)) {
-    console.log(`[bun-preload] Patch 5: ${REV_MARK} 已就位 ${target}`);
+    _trace(`[bun-preload] Patch 5: ${REV_MARK} 已就位 ${target}`);
     continue;
   }
   const src = readFileSync(target, 'utf8');
@@ -347,14 +352,14 @@ for (const target of packageTargets('@deepseek-ai/dsh-ptc-runtime-node/lib/index
     // 已经是我们写过的形态（只是 rev 指纹陈旧）⇒ 刷新指纹，不要误报「上游版本不符」
     if (src.includes('const stripTypeScriptTypes = Module.stripTypeScriptTypes;')) {
       writePatch(target, src.replace(/\/\/ bun-preload-rev:\d+/g, `// ${REV_MARK}`));
-      console.log(`[bun-preload] Patch 5: ${REV_MARK} 已就位（刷新指纹）${target}`);
+      _trace(`[bun-preload] Patch 5: ${REV_MARK} 已就位（刷新指纹）${target}`);
       continue;
     }
     console.warn(`[bun-preload] Patch 5: 上游版本不符（找不到具名导入）：${target}`);
     continue;
   }
   writePatch(target, src.replace(PTC_IMPORT_FROM, PTC_IMPORT_TO));
-  console.log(`[bun-preload] Patch 5: stripTypeScriptTypes 具名导入改写 applied to ${target}`);
+  _trace(`[bun-preload] Patch 5: stripTypeScriptTypes 具名导入改写 applied to ${target}`);
 }
 
 // ── Patch 6: Disable koffi (dsh-win32-process) on Bun ──
@@ -366,7 +371,7 @@ const KOFFI_GUARD_FROM = 'function loadWin32ProcessBindings() {\n';
 const KOFFI_GUARD_TO = `function loadWin32ProcessBindings() { if (typeof Bun !== 'undefined') throw new Error('koffi not available on Bun runtime'); // ${REV_MARK}\n`;
 for (const target of packageTargets('@deepseek-ai/dsh-win32-process/lib/index.js')) {
   if (hasCurrentRev(target)) {
-    console.log(`[bun-preload] Patch 6: ${REV_MARK} 已就位 ${target}`);
+    _trace(`[bun-preload] Patch 6: ${REV_MARK} 已就位 ${target}`);
     continue;
   }
   const src = readFileSync(target, 'utf8');
@@ -374,14 +379,14 @@ for (const target of packageTargets('@deepseek-ai/dsh-win32-process/lib/index.js
     // 同上：已是打过补丁的形态，只刷新 rev 指纹
     if (src.includes('koffi not available on Bun runtime')) {
       writePatch(target, bumpRev(src));
-      console.log(`[bun-preload] Patch 6: ${REV_MARK} 已就位（刷新指纹）${target}`);
+      _trace(`[bun-preload] Patch 6: ${REV_MARK} 已就位（刷新指纹）${target}`);
       continue;
     }
     console.warn(`[bun-preload] Patch 6: 上游版本不符（找不到 loadWin32ProcessBindings）：${target}`);
     continue;
   }
   writePatch(target, src.replace(KOFFI_GUARD_FROM, KOFFI_GUARD_TO));
-  console.log(`[bun-preload] Patch 6: koffi 禁用 applied to ${target}`);
+  _trace(`[bun-preload] Patch 6: koffi 禁用 applied to ${target}`);
 }
 
 // ── Patch 4: module.register no-op shim ──
@@ -501,7 +506,7 @@ for (const target of packageTargets('node-pty/lib/index.js')) {
   const originalPath = join(directory, 'index.original.js');
   const shimPath = join(directory, 'bun-shim.js');
   if (hasCurrentRev(shimPath) && hasCurrentRev(target)) {
-    console.log(`[bun-preload] Patch 7: ${REV_MARK} 已就位 ${target}`);
+    _trace(`[bun-preload] Patch 7: ${REV_MARK} 已就位 ${target}`);
     continue;
   }
   // A dispatcher left behind by an earlier run still holds the real addon next to it.
@@ -510,7 +515,7 @@ for (const target of packageTargets('node-pty/lib/index.js')) {
   if (!dispatched) writePatch(originalPath, original);
   writePatch(shimPath, PTY_SHIM_SOURCE);
   writePatch(target, PTY_DISPATCHER_SOURCE);
-  console.log(`[bun-preload] Patch 7: node-pty shim applied to ${target}`);
+  _trace(`[bun-preload] Patch 7: node-pty shim applied to ${target}`);
 }
 
 // ── Patch 8: xterm.js headless sync write fix ──
@@ -521,7 +526,7 @@ const XTERM_SYNC_WRITE_FROM = 'setTimeout((()=>this._innerWrite()))}this._pendin
 const XTERM_SYNC_WRITE_TO = '0}this._pendingData+=e.length,this._writeBuffer.push(e),this._callbacks.push(t),this._innerWrite()}_innerWrite';
 for (const target of packageTargets('@xterm/headless/lib-headless/xterm-headless.js')) {
   if (hasCurrentRev(target)) {
-    console.log(`[bun-preload] Patch 8: ${REV_MARK} 已就位 ${target}`);
+    _trace(`[bun-preload] Patch 8: ${REV_MARK} 已就位 ${target}`);
     continue;
   }
   const source = readFileSync(target, 'utf8');
@@ -530,14 +535,14 @@ for (const target of packageTargets('@xterm/headless/lib-headless/xterm-headless
     // 早期版本打过补丁但没留指纹（或者上游换了写法）：能认出已是补丁体就补写指纹
     if (source.includes(XTERM_SYNC_WRITE_TO)) {
       writePatch(target, `${source}\n/* ${REV_MARK} */\n`);
-      console.log(`[bun-preload] Patch 8: 已是同步写形态，补写 ${REV_MARK} 指纹 ${target}`);
+      _trace(`[bun-preload] Patch 8: 已是同步写形态，补写 ${REV_MARK} 指纹 ${target}`);
     } else {
       console.warn(`[bun-preload] Patch 8: 目标里没有可替换的写入模式（上游版本变了？）${target}`);
     }
     continue;
   }
   writePatch(target, `${patched}\n/* ${REV_MARK} */\n`);
-  console.log(`[bun-preload] Patch 8: xterm.js sync write applied to ${target}`);
+  _trace(`[bun-preload] Patch 8: xterm.js sync write applied to ${target}`);
 }
 
 // ── Patch 9: node-addon-require-builtin dispatcher (works in every context) ──
@@ -581,7 +586,7 @@ const ADDON_DISPATCHER_SOURCE = [
 ].join('\n');
 for (const target of packageTargets('node-addon-require-builtin/lib/index.js')) {
   if (hasCurrentRev(target)) {
-    console.log(`[bun-preload] Patch 9: ${REV_MARK} 已就位 ${target}`);
+    _trace(`[bun-preload] Patch 9: ${REV_MARK} 已就位 ${target}`);
     continue;
   }
   const directory = dirname(target);
@@ -590,7 +595,7 @@ for (const target of packageTargets('node-addon-require-builtin/lib/index.js')) 
   const original = readFileSync(dispatched ? originalPath : target, 'utf8');
   if (!dispatched) writePatch(originalPath, original);
   writePatch(target, ADDON_DISPATCHER_SOURCE);
-  console.log(`[bun-preload] Patch 9: node-addon-require-builtin stub applied to ${target}`);
+  _trace(`[bun-preload] Patch 9: node-addon-require-builtin stub applied to ${target}`);
 }
 
 // ── Patch 10: 插件展示元数据（名称/描述/图标）在 Bun 下解析不到 ──
@@ -654,7 +659,7 @@ for (const target of packageTargets('@deepseek-ai/dsh-app-boot/lib/index.js')) {
   const source = readFileSync(target, 'utf8');
   if (source.includes('pluginResourceFallback')) {
     if (!hasCurrentRev(target)) writePatch(target, bumpRev(source));
-    console.log(`[bun-preload] Patch 10: ${REV_MARK} 已就位 ${target}`);
+    _trace(`[bun-preload] Patch 10: ${REV_MARK} 已就位 ${target}`);
     continue;
   }
   if (!source.includes(APP_BOOT_RESOLVER_FROM)) {
@@ -662,7 +667,7 @@ for (const target of packageTargets('@deepseek-ai/dsh-app-boot/lib/index.js')) {
     continue;
   }
   writePatch(target, source.replace(APP_BOOT_RESOLVER_FROM, APP_BOOT_RESOLVER_TO));
-  console.log(`[bun-preload] Patch 10: 插件展示元数据解析兜底 applied to ${target}`);
+  _trace(`[bun-preload] Patch 10: 插件展示元数据解析兜底 applied to ${target}`);
 }
 
 // ── Patch 11: 插件说明符按 Loader 的 baseUrl 解析（Bun 没有 Node 内部 loader）──
@@ -711,7 +716,7 @@ for (const target of packageTargets('@deepseek-ai/cordis-plugin-loader/lib/index
   const source = readFileSync(target, 'utf8');
   if (source.includes('__bunResolveFromBase')) {
     if (!hasCurrentRev(target)) writePatch(target, bumpRev(source));
-    console.log(`[bun-preload] Patch 11: ${REV_MARK} 已就位 ${target}`);
+    _trace(`[bun-preload] Patch 11: ${REV_MARK} 已就位 ${target}`);
     continue;
   }
   if (!source.includes(LOADER_RESOLVE_IMPORT_FROM) || !source.includes(LOADER_URL_IMPORT_FROM)) {
@@ -722,7 +727,7 @@ for (const target of packageTargets('@deepseek-ai/cordis-plugin-loader/lib/index
     .replace(LOADER_URL_IMPORT_FROM, LOADER_URL_IMPORT_TO)
     .replace(LOADER_RESOLVE_IMPORT_FROM, LOADER_RESOLVE_IMPORT_TO);
   writePatch(target, `${patched}\n${LOADER_RESOLVE_HELPER}`);
-  console.log(`[bun-preload] Patch 11: 插件说明符按 baseUrl 解析 applied to ${target}`);
+  _trace(`[bun-preload] Patch 11: 插件说明符按 baseUrl 解析 applied to ${target}`);
 }
 
 // ── Patch 12: experimental-inspector 容忍 fetch 访问器 ──
@@ -756,7 +761,7 @@ const INSPECTOR_FETCH_SPREAD_FROM = '\t} : {\n\t\t...descriptor,\n\t\tvalue: obs
 const INSPECTOR_FETCH_SPREAD_TO = '\t} : {\n\t\tvalue: observedFetch,\n\t\twritable: true,\n\t\tconfigurable: true\n\t});';
 for (const target of packageTargets('@deepseek-ai/dsh-experimental-inspector/lib/index.js')) {
   if (hasCurrentRev(target)) {
-    console.log(`[bun-preload] Patch 12: ${REV_MARK} 已就位 ${target}`);
+    _trace(`[bun-preload] Patch 12: ${REV_MARK} 已就位 ${target}`);
     continue;
   }
   const source = readFileSync(target, 'utf8');
@@ -772,10 +777,10 @@ for (const target of packageTargets('@deepseek-ai/dsh-experimental-inspector/lib
   } else if (source.includes(INSPECTOR_FETCH_MARK)) {
     const refreshed = bumpRev(source);
     if (refreshed === source) {
-      console.log(`[bun-preload] Patch 12: ${REV_MARK} 已就位 ${target}`);
+      _trace(`[bun-preload] Patch 12: ${REV_MARK} 已就位 ${target}`);
     } else {
       writePatch(target, refreshed);
-      console.log(`[bun-preload] Patch 12: ${REV_MARK} 指纹已刷新 ${target}`);
+      _trace(`[bun-preload] Patch 12: ${REV_MARK} 指纹已刷新 ${target}`);
     }
     continue;
   } else {
@@ -791,7 +796,7 @@ for (const target of packageTargets('@deepseek-ai/dsh-experimental-inspector/lib
     console.warn(`[bun-preload] Patch 12: 未找到上游 spread 定义文本，跳过 spread 修复 ${target}（上游版本不符）`);
   }
   writePatch(target, next);
-  console.log(`[bun-preload] Patch 12: fetch 访问器归一 applied${spreadFixed ? '（含 spread 修复）' : ''} to ${target}`);
+  _trace(`[bun-preload] Patch 12: fetch 访问器归一 applied${spreadFixed ? '（含 spread 修复）' : ''} to ${target}`);
 }
 
-console.log(`[bun-preload] ${REV_MARK} 应用完成：stripTypeScriptTypes / node-addon-require-builtin 桩 / HMR 关闭 / Bun.Terminal PTY / xterm 同步写 / 插件展示元数据解析 / 插件说明符 baseUrl 解析 / inspector fetch 归一+spread 修复（不还原）`);
+_trace(`[bun-preload] ${REV_MARK} 应用完成：stripTypeScriptTypes / node-addon-require-builtin 桩 / HMR 关闭 / Bun.Terminal PTY / xterm 同步写 / 插件展示元数据解析 / 插件说明符 baseUrl 解析 / inspector fetch 归一+spread 修复（不还原）`);

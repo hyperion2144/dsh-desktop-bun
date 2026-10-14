@@ -85,7 +85,7 @@ describe('桌面通知 tab 的数据面', () => {
 
       const scenarios = state.scenarios as Array<Record<string, unknown>>
       expect(scenarios).toHaveLength(NOTIFICATION_SCENARIOS.length)
-      expect(scenarios).toHaveLength(14)
+      expect(scenarios).toHaveLength(15)
       for (const row of scenarios) {
         expect(typeof row.id).toBe('string')
         expect(typeof row.group).toBe('string')

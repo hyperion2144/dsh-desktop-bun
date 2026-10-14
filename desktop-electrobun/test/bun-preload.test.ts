@@ -80,7 +80,8 @@ function runPreload(tree: string): { stdout: string; stderr: string; code: numbe
   const child = Bun.spawnSync({
     cmd: [process.execPath, '--no-install', '--preload', preloadPath, script],
     cwd: tree,
-    env: { ...process.env, DSH_BUN_PRELOAD_TREES: tree },
+  // 旧断言依赖 Patch N 的 stdout 日志：preload 的信息性日志现在默认静默（#62），测试显式打开
+  env: { ...process.env, DSH_BUN_PRELOAD_TREES: tree, DSH_SHELL_PRELOAD_DEBUG: '1' },
     stdout: 'pipe',
     stderr: 'pipe',
   })

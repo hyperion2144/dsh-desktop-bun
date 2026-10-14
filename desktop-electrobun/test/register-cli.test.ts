@@ -14,6 +14,12 @@ import {
   samePath,
   shellQuote,
   shellRcPathFix,
+  linuxRegistrationScript,
+  linuxRegistrationTarget,
+  parseWindowsPathRegQuery,
+  windowsPathHasEntry,
+  windowsUserPathEntries,
+  windowsUserPathWrite,
   shimFileName,
   shimPathOf,
   shimScript,
@@ -39,7 +45,9 @@ describe('shim：位置 / 内容 / 判词', () => {
 
   test('windows shim 是 .cmd，参数用双引号', () => {
     const text = shimScript('win32', ['C:\\bun.exe', '--no-install', 'C:\\lib\\bin.js'])
-    expect(text).toBe('@echo off\r\n"C:\\bun.exe" "--no-install" "C:\\lib\\bin.js" %*\r\n')
+    expect(text).toBe(
+      '@echo off\r\nrem 由 dsh 桌面壳维护：指向当前运行时的 dsh 入口\r\n"C:\\bun.exe" "--no-install" "C:\\lib\\bin.js" %*\r\n',
+    )
   })
 
   test('判词：absent / ours / stale / foreign（别人放的不覆盖）', () => {
@@ -139,11 +147,18 @@ describe('提权脚本与 rc 修正', () => {
 
 /** 注入件：内存文件系统 + 可编排的 run（记下跑过什么）。 */
 function harness(options: {
+
   files?: Record<string, string>
   dshResolved?: string | null
   runStatus?: number
+  whereResolved?: string | null
   runStderr?: string
   platform?: string
+  regStatus?: number
+  regStdout?: string
+  psStatus?: number
+  psStderr?: string
+  home?: string
 }) {
   const files = new Map<string, string>(Object.entries(options.files ?? {}))
   const calls: string[][] = []
@@ -155,6 +170,15 @@ function harness(options: {
       const resolved = options.dshResolved === undefined ? null : options.dshResolved
       return { status: resolved === null ? 1 : 0, stdout: resolved === null ? '' : `${resolved}\n`, stderr: '' }
     }
+    if (argv[0] === 'reg') return { status: options.regStatus ?? 0, stdout: options.regStdout ?? '', stderr: '' }
+    if (argv[0] === 'where') {
+      const resolved = options.whereResolved
+      if (resolved === undefined) return { status: 0, stdout: '', stderr: '' }
+      return resolved === null
+        ? { status: 1, stdout: '', stderr: '' }
+        : { status: 0, stdout: `${resolved}\r\n`, stderr: '' }
+    }
+    if (argv[0] === 'powershell') return { status: options.psStatus ?? 0, stdout: '', stderr: options.psStderr ?? '' }
     return { status: options.runStatus ?? 0, stdout: '', stderr: options.runStderr ?? '' }
   }
   const cli = createRegisterCli({
@@ -168,6 +192,7 @@ function harness(options: {
     exists: (path) => files.has(path),
     realpath: (path) => path,
     env: { USER: 'tester', SHELL: '/bin/zsh' },
+    home: options.home ?? '/home/tester',
   })
   return { cli, files, calls, logs }
 }
@@ -183,11 +208,11 @@ describe('createRegisterCli（IO 外壳，全部注入）', () => {
     expect(logs.filter((line) => line.includes('shim 已写入')).length).toBe(1)
   })
 
-  test('foreign 的 shim 不动它', () => {
+  test('foreign 内容也回收重写——shim 在本壳私有目录里（#62 PR 实测：旧坏内容没标记注释）', () => {
     const { cli, files, logs } = harness({ files: { '/app-support/runtime/bin-dsh/dsh': '#!/bin/sh\nexec /other\n' } })
-    expect(cli.ensureShim().verdict).toBe('foreign')
-    expect(files.get('/app-support/runtime/bin-dsh/dsh')).toBe('#!/bin/sh\nexec /other\n')
-    expect(logs.some((line) => line.includes('不覆盖'))).toBe(true)
+    expect(cli.ensureShim().verdict).toBe('ours')
+    expect(files.get('/app-support/runtime/bin-dsh/dsh') ?? '').toContain('由 dsh 桌面壳维护')
+    expect(logs.some((line) => line.includes('回收重写'))).toBe(true)
   })
 
   test('refresh：未注册 / 已注册 / 冲突三态 + 缓存 TTL', async () => {
@@ -233,11 +258,142 @@ describe('createRegisterCli（IO 外壳，全部注入）', () => {
     expect(conflicted.message).toContain('强制覆盖')
   })
 
-  test('非 macOS 平台：只物化 shim，注册执行明确说没接', async () => {
-    const linux = harness({ platform: 'linux', dshResolved: null })
-    const result = await linux.cli.register()
-    expect(result.ok).toBe(false)
-    expect(result.code).toBe('unsupported')
-    expect(linux.files.has('/app-support/runtime/bin-dsh/dsh')).toBe(true)
+  test('linux：~/.local/bin symlink 成功；冲突要 force；force 后放行', async () => {
+    const ok = harness({ platform: 'linux', dshResolved: null })
+    const result = await ok.cli.register()
+    expect(result.ok).toBe(true)
+    expect(result.message).toContain('/home/tester/.local/bin/dsh')
+    const script = ok.calls.find((argv) => argv[0] === '/bin/sh')?.[2] ?? ''
+    expect(script).toContain("mkdir -p '/home/tester/.local/bin'")
+    expect(script).toContain("ln -sfn '/app-support/runtime/bin-dsh/dsh'")
+
+    const conflict = harness({ platform: 'linux', dshResolved: null, runStatus: 3, runStderr: `sh: ${CONFLICT_MARKER}` })
+    expect((await conflict.cli.register()).code).toBe('conflict')
+
+    const forced = harness({ platform: 'linux', dshResolved: null })
+    expect((await forced.cli.register({ force: true })).ok).toBe(true)
+    expect(forced.calls.find((argv) => argv[0] === '/bin/sh')?.[2] ?? '').toContain("if [ '1' = '1' ]")
+  })
+
+  test('win32：读注册表 → EncodedCommand 写回；已含 shim 目录就幂等；force 前置', async () => {
+    const raw = 'HKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    %SystemRoot%\\system32;C:\\other\r\n'
+    const appended = harness({ platform: 'win32', dshResolved: null, regStdout: raw })
+    const result = await appended.cli.register()
+    expect(result.ok).toBe(true)
+    const ps = appended.calls.find((argv) => argv[0] === 'powershell') ?? []
+    const script = Buffer.from(ps[ps.indexOf('-EncodedCommand') + 1] ?? '', 'base64').toString('utf16le')
+    expect(script).toContain('%SystemRoot%\\system32;C:\\other')
+    const value = /-Value '([^']*)'/.exec(script)?.[1] ?? ''
+    expect(value).toBe('%SystemRoot%\\system32;C:\\other;/app-support/runtime/bin-dsh')
+    expect(script).toContain('-Type ExpandString')
+    expect(script).toContain('0x001A')
+
+    const idempotent = harness({
+      platform: 'win32',
+      dshResolved: null,
+      regStdout: 'Path    REG_SZ    /app-support/runtime/bin-dsh\r\n',
+    })
+    expect((await idempotent.cli.register()).ok).toBe(true)
+    expect(idempotent.calls.some((argv) => argv[0] === 'powershell')).toBe(false)
+
+    const forced = harness({ platform: 'win32', dshResolved: null, regStdout: raw })
+    expect((await forced.cli.register({ force: true })).ok).toBe(true)
+    const fscript = Buffer.from(
+      (forced.calls.find((argv) => argv[0] === 'powershell') ?? []).at(-1) ?? '',
+      'base64',
+    ).toString('utf16le')
+    expect(fscript.startsWith("Set-ItemProperty -Path 'HKCU:\\Environment' -Name 'Path' -Value '/app-support/runtime/bin-dsh;")).toBe(
+      true,
+    )
+  })
+
+  test('win32：注册表里有本壳入口就是已注册（权威；where 快照不再参与）', async () => {
+    const justRegistered = harness({
+      platform: 'win32',
+      whereResolved: null,
+      regStdout: 'Path    REG_SZ    /app-support/runtime/bin-dsh\r\n',
+    })
+    expect((await justRegistered.cli.refresh()).kind).toBe('registered')
+    expect(justRegistered.calls.some((argv) => argv[0] === 'where')).toBe(false)
+  })
+
+  test('win32：注册表没有本壳入口、where 解析到别人 → 冲突（带日志）', async () => {
+    const foreign = harness({
+      platform: 'win32',
+      whereResolved: 'C:\\opt\\other\\dsh.cmd',
+      regStdout: 'Path    REG_SZ    C:\\other\r\n',
+    })
+    expect((await foreign.cli.refresh()).kind).toBe('conflict')
+    expect(foreign.logs.some((line) => line.includes('where dsh'))).toBe(true)
+  })
+
+  test('win32：注册表里也没有 shim 目录就是未注册', async () => {
+    const absent = harness({ platform: 'win32', whereResolved: null, regStdout: 'Path    REG_SZ    C:\\other\r\n' })
+    expect((await absent.cli.refresh()).kind).toBe('missing')
+  })
+
+  test('win32：注册表读取失败且 where 落空 → 未注册（带日志）', async () => {
+    const broken = harness({ platform: 'win32', whereResolved: null, regStatus: 1 })
+    expect((await broken.cli.refresh()).kind).toBe('missing')
+    expect(broken.logs.some((line) => line.includes('注册表用户 PATH 读取失败'))).toBe(true)
+  })
+
+  test('win32：注册时清掉本壳旧安装的幽灵入口（只动自己的 bin-dsh 目录）', async () => {
+    const ghost = 'C:\\Users\\u\\AppData\\Local\\com.hyperion.dsh-desktop-bun\\stable\\runtime\\bin-dsh'
+    const raw = `HKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    ${ghost};C:\\other\r\n`
+    const cleanup = harness({ platform: 'win32', dshResolved: null, regStdout: raw })
+    expect((await cleanup.cli.register()).ok).toBe(true)
+    const ps = cleanup.calls.find((argv) => argv[0] === 'powershell') ?? []
+    const script = Buffer.from(ps[ps.indexOf('-EncodedCommand') + 1] ?? '', 'base64').toString('utf16le')
+    const value = /-Value '([^']*)'/.exec(script)?.[1] ?? ''
+    expect(value).toBe('C:\\other;/app-support/runtime/bin-dsh')
+  })
+
+  test('shim 内容过期（旧版本写坏的入口、无标记注释）也重写——私有目录不认「别人」', async () => {
+    const stale = harness({
+      platform: 'win32',
+      dshResolved: null,
+      regStdout: 'Path    REG_SZ    /app-support/runtime/bin-dsh\r\n',
+      files: { '/app-support/runtime/bin-dsh/dsh.cmd': '@echo off\r\n"C:\\old\\bun.exe" %*\r\n' },
+    })
+    await stale.cli.refresh()
+    expect(stale.files.get('/app-support/runtime/bin-dsh/dsh.cmd') ?? '').toContain('由 dsh 桌面壳维护')
+    expect(stale.logs.some((line) => line.includes('回收重写'))).toBe(true)
+  })
+})
+
+describe('Windows PATH 纯逻辑 / Linux 脚本', () => {
+  test('reg query 值行解析：类型 + 原始值，解析不了回 null', () => {
+    expect(parseWindowsPathRegQuery('    Path    REG_SZ    C:\\a;C:\\b\r\n')?.raw).toBe('C:\\a;C:\\b')
+    expect(parseWindowsPathRegQuery('    Path    REG_EXPAND_SZ    %SystemRoot%;C:\\b')?.type).toBe('REG_EXPAND_SZ')
+    expect(parseWindowsPathRegQuery('系统找不到指定的注册表项或值')).toBeNull()
+  })
+
+  test('windowsUserPathWrite：本壳旧 bin-dsh 幽灵项清掉，别人的原样保留', () => {
+    const ghost = 'C:\\x\\com.hyperion.dsh-desktop-bun\\stable\\runtime\\bin-dsh'
+    const mine = 'C:\\x\\com.hyperion.dsh-desktop-bun\\dev\\runtime\\bin-dsh'
+    const kept = windowsUserPathWrite(
+      [ghost, 'C:\\Windows', mine],
+      'C:\\y\\com.hyperion.dsh-desktop-bun\\v2\\runtime\\bin-dsh',
+      false,
+    )
+    expect(kept).toBe('C:\\Windows;C:\\y\\com.hyperion.dsh-desktop-bun\\v2\\runtime\\bin-dsh')
+    const forced = windowsUserPathWrite([ghost], 'C:\\y\\mine\\runtime\\bin-dsh', true)
+    expect(forced).toBe('C:\\y\\mine\\runtime\\bin-dsh')
+  })
+
+  test('拆项/判含/写回：追加 vs force 前置，大小写与斜杠不敏感', () => {
+    const entries = windowsUserPathEntries('C:\\A;;c:/b ')
+    expect(entries).toEqual(['C:\\A', 'c:/b'])
+    expect(windowsPathHasEntry(entries, 'c:\\a')).toBe(true)
+    expect(windowsUserPathWrite(entries, 'D:\\x', false)).toBe('C:\\A;c:/b;D:\\x')
+    expect(windowsUserPathWrite(entries, 'D:\\x', true)).toBe('D:\\x;C:\\A;c:/b')
+  })
+
+  test('linux 脚本结构与目标定位', () => {
+    expect(linuxRegistrationTarget('/home/u/')).toBe('/home/u/.local/bin/dsh')
+    const script = linuxRegistrationScript({ shim: '/app/runtime/bin-dsh/dsh', home: '/home/u', force: false })
+    expect(script).toContain("mkdir -p '/home/u/.local/bin'")
+    expect(script).toContain(CONFLICT_MARKER)
   })
 })
