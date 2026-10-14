@@ -3,7 +3,14 @@
 import http from 'node:http';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
-import { createRewriteProxy, POLYFILL, OWNS_HOST_PATCH, THEME_SYNC_PATCH, LOOPBACK_URL_PATCH } from './proxy.mjs';
+import {
+  createRewriteProxy,
+  POLYFILL,
+  OWNS_HOST_PATCH,
+  THEME_SYNC_PATCH,
+  LOOPBACK_URL_PATCH,
+  remoteInvokePatch as buildRemoteInvokePatch,
+} from './proxy.mjs';
 import { clientIp, entryKind } from './client-info.mjs';
 import { LANE_PREFIX, laneRoutePath } from './lane-routes.mjs';
 import { createDshUpstreamAuth } from './dshauth.mjs';
@@ -108,13 +115,21 @@ export function createMobileAccessService(opts = {}) {
     // LOOPBACK_URL_PATCH（#154）：远程页面上指向本机其它回环端口的绝对地址改写成映射路径
     // `/__dsh-mobile/loopback/<port>/…`（http/ws 同构），由反代转发到那个端口——于是「其它
     // 插件访问本机其它端口」在远程/手机侧也能工作（映射请求同样先过配对门禁）。
-    inject: [OWNS_HOST_PATCH, THEME_SYNC_PATCH, POLYFILL, LOOPBACK_URL_PATCH],
+    // REMOTE_INVOKE_PATCH（#47）：配对远程页的壳命令桥——壳经宿主 env 下发页面端口与
+    // remote 视图 token，两件齐才注入；命令白名单在壳侧 view-grant，这里不做过滤。
+    inject: [OWNS_HOST_PATCH, THEME_SYNC_PATCH, POLYFILL, LOOPBACK_URL_PATCH, buildRemoteInvokePatch(
+      process.env.DSH_SHELL_PAGE_PORT,
+      process.env.DSH_SHELL_RPC_VIEW_TOKEN,
+    )].filter(Boolean),
     auth: (req) => {
       // 配对门禁：所有到达反代本体的路径都必须是已配对设备（携带会话 cookie）。
       // lane 自有控制面住在保留命名空间（LANE_PREFIX/*，含冻结别名 /pair、/api/pair/*），
       // 由 routePairing 先于转发处理；打到这里的一律要求 cookie，杜绝「前缀豁免 +
       // 上游路径归一化」绕过。命名空间外的一切路径（含 dsh 自有路由）原样透传，不做白名单。
       const cookie = parseCookie(req.headers.cookie, 'dsh_mobile_session');
+      // PWA 清单放行（精确路径）：浏览器对 <link rel=manifest> 的获取不保证携带会话 cookie，
+      // 401 会把「桌面通知」等面板卡在加载中；清单非敏感，透传上游即可（#43）。
+      if ((req.url ?? '').split('?')[0] === '/manifest.webmanifest') return { ok: true };
       // 顺手把该设备的最新 UA/IP/接入路径刷新下来（#145 延伸）：
       // ①已配对的老设备（早先只存了名字）不用重新配对就能被富化；
       // ②同一台设备换入口（局域网↔隧道）时面板能跟上。

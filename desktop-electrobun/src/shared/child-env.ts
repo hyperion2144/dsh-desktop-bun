@@ -25,10 +25,17 @@ export const OPTIONAL_ENV_KEYS = [
   'DSH_DESKTOP_PORT',
   'DSH_MOBILE_LANE_PORT',
   'DSH_MOBILE_ENABLED',
+  'DSH_SHELL_PAGE_PORT',
+  'DSH_SHELL_RPC_VIEW_TOKEN',
   'DSH_CLOUDFLARED_BIN',
 ] as const
 /** 壳自己消费的内部键（不是 dsh 契约的一部分，不进 REQUIRED/OPTIONAL 表）。 */
-export const SHELL_INTERNAL_ENV_KEYS = ['DSH_SHELL_PARENT_PID', 'DSH_SHELL_PATCH_FILES'] as const
+export const SHELL_INTERNAL_ENV_KEYS = [
+  'DSH_SHELL_PARENT_PID',
+  'DSH_SHELL_PATCH_FILES',
+  'DSH_SHELL_PAGE_PORT',
+  'DSH_SHELL_RPC_VIEW_TOKEN',
+] as const
 
 /** 壳 → 宿主插件（仓库根 `index.js`）的私有契约：插件读它们回报忙状态与通知。 */
 export const SHELL_PLUGIN_ENV_KEYS = [
@@ -66,6 +73,10 @@ export interface ChildEnvInput {
   upstreamPort?: number | undefined
   /** 手机访问 lane 端口（旧壳 `DSH_MOBILE_LANE_PORT`，默认 desktop 3092） */
   lanePort?: number | undefined
+  /** 壳页面服务端口（#47 远程命令桥）：与 token 一起下发，缺一不下 */
+  shellPagePort?: number | undefined
+  /** remote 视图 token（#47）：壳铸给 mobile-access 的远程命令桥凭证 */
+  shellRpcViewToken?: string | undefined
   /** 代理注入（旧壳 `resolved_proxy_env` + `apply_proxy_env`）：大小写各一份；null/缺省 = 不动基线环境 */
   proxy?: ProxyEnv | null
   /** cloudflared 可执行文件路径（旧壳 `DSH_CLOUDFLARED_BIN`，#164）：空/缺省不注入 */
@@ -119,6 +130,20 @@ export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
   } else {
     delete env.DSH_MOBILE_LANE_PORT
     delete env.DSH_MOBILE_ENABLED
+  }
+  // 远程命令桥（#47）：壳铸的 remote 视图 token + 页面服务端口，mobile-access 据此给配对
+  // 远程页注入受白名单约束的 invoke shim（/_loopback/<page>/__shell__/rpc）。缺一不给。
+  if (
+    input.shellPagePort !== undefined &&
+    isValidPortNumber(input.shellPagePort) &&
+    input.shellRpcViewToken !== undefined &&
+    input.shellRpcViewToken !== ''
+  ) {
+    env.DSH_SHELL_PAGE_PORT = String(input.shellPagePort)
+    env.DSH_SHELL_RPC_VIEW_TOKEN = input.shellRpcViewToken
+  } else {
+    delete env.DSH_SHELL_PAGE_PORT
+    delete env.DSH_SHELL_RPC_VIEW_TOKEN
   }
   // 代理（旧壳 network/proxy.rs + lifecycle.rs:419-420）：大小写都写——不少工具只认小写；
   // proxy 为 null 时**不动**基线环境（旧壳也只写不删，尊重用户自己在环境里设的代理）。

@@ -36,6 +36,35 @@ function accessLog(parts) {
 export const POLYFILL = '<script data-dsh-mobile-polyfill="1">!function(){if(self.crypto&&!self.crypto.randomUUID){self.crypto.randomUUID=function(){var b=new Uint8Array(16);self.crypto.getRandomValues(b);b[6]=b[6]&15|64;b[8]=b[8]&63|128;var h="";for(var i=0;i<16;i++){var x=b[i].toString(16);h+=(x.length<2?"0":"")+x;if(i===3||i===5||i===7||i===9)h+="-";}return h;}}}();</script>';
 
 /**
+ * 远程命令桥（#47）：给**配对**远程页注入 `__TAURI_INTERNALS__.invoke` shim，把壳命令
+ * 经 `/_loopback/<page>/__shell__/rpc` 送到壳页面服务。协议与壳侧 tauri-ipc.ts 逐字对齐
+ * （200+{ok,value}→resolve(value)；{ok:false,error}→reject；非 200→reject）。
+ * 凭证与端口由壳经宿主 env 下发（DSH_SHELL_PAGE_PORT / DSH_SHELL_RPC_VIEW_TOKEN）；
+ * 命令白名单在壳侧 view-grant 的 REMOTE_ALLOWED_COMMANDS，这里不做命令过滤（壳是唯一闸）。
+ * pagePort/token 缺一 → 返回 null（不注入，远程页维持无桥现状）。
+ * @param {string|number|undefined} pagePort 壳页面服务端口
+ * @param {string|undefined} token remote 视图 token
+ * @returns {string|null}
+ */
+export function remoteInvokePatch(pagePort, token) {
+  const port = Number(pagePort);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535 || !token) return null;
+  const endpoint = '/_loopback/' + port + '/__shell__/rpc';
+  return '<script data-dsh-mobile-remote-rpc="1">!function(){try{'
+    + 'var E=' + JSON.stringify(endpoint) + ',T=' + JSON.stringify(String(token)) + ';'
+    + 'var invoke=function(cmd,args){return fetch(E,{method:"POST",cache:"no-store",'
+    + 'headers:{"content-type":"application/json","x-dsh-shell-view":T},'
+    + 'body:JSON.stringify({cmd:String(cmd),args:args&&typeof args==="object"?args:{}})}).then(function(res){return res.json().catch(function(){return null}).then(function(p){'
+    + 'if(res.status!==200)throw new Error("shell rpc failed: "+res.status);'
+    + 'if(p&&p.ok===true)return p.value;'
+    + 'throw new Error(p&&typeof p.error==="string"?p.error:"shell rpc failed");});});};'
+    + 'Object.defineProperty(globalThis,"__TAURI_INTERNALS__",{value:{invoke:invoke,'
+    + 'transformCallback:function(cb){return cb},metadata:{currentWindow:{label:"remote"}}},configurable:true});'
+    + 'Object.defineProperty(globalThis,"__TAURI__",{value:{core:{invoke:invoke}},configurable:true});'
+    + '}catch(e){console.error("mobile remote rpc shim failed",e);}}();</script>';
+}
+
+/**
  * 远程端「页面拥有 Host」能力位（#145）：dsh 客户端把**非 loopback 页面**当远程浏览器，
  * 特权面（服务端设置 RPC）不开放 → 插件设置、dsh 服务端设置、壳的手机访问信息一律拿不到。
  * 判定原文（dsh-client-connection）：
@@ -379,6 +408,10 @@ export function createRewriteProxy(opts) {
         const h = loopbackAuthority({ ...req.headers }, upHost, upPort);
         upstreamAuth?.applyTo(h);
         stripHopByHop(h); // 连接语义由本代理与上游之间重新协商
+        // #42：文档导航强制 identity——上游对 HTML 也 gzip，压缩响应无法注入
+        //（OWNS_HOST/POLYFILL 等缺席 → 远程页被判非 loopback，settings/提供商目录全拒）。
+        // API/资产请求保留压缩协商，不白费移动带宽。
+        if (/text\/html/i.test(String(req.headers.accept ?? ''))) h['accept-encoding'] = 'identity';
         return h;
       };
       const targetPath = lb ? lb.path : normalizeRemotePath(req.url);

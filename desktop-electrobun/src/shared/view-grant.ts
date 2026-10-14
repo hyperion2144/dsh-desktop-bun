@@ -9,15 +9,18 @@
  * 做法：主进程给每个视图发一枚随机 view token，随该视图的 preload 注入页面；页面桥每次请求带上
  * `x-dsh-shell-view`。壳侧查表得到视图种类，再按种类放行命令：
  *   - `shell`：壳自己的页面（主窗 / 各 profile 窗口）——全部命令；
- *   - `guest`：贴进来的网页（侧边栏浏览器、远程窗口）——**任何**壳命令都不放行，只留「报日志」
- *     这一条；它仍然要能开外链、弹右键菜单（那两条端点只认 token，不认命令白名单）。
+ *   - `guest`：贴进来的不可信网页（侧边栏浏览器）——**任何**壳命令都不放行，只留「报日志」
+*     这一条；它仍然要能开外链、弹右键菜单（那两条端点只认 token，不认命令白名单）。
+ *   - `remote`（#47）：**配对**远程设备（mobile-access lane 桥）——对齐旧壳 `remote-desktop.json`
+ *     的语义：受配对 cookie 门禁 + 命令白名单双重约束，只放行通知族等显式列出的命令；
+ *     不可信 guest 不因 remote 的存在多放一条命令。
  *
  * 为什么要按种类白名单而不是「不给 guest 装桥」：装了桥的页面就是不可信页面，白名单是最后一道
  * 闸（旧壳对应的是「远程窗口不装 dshDesktop 载体」，见 docs/research/shell-capability-inventory.md:72）。
  */
 
-/** 视图种类：壳自己的页面 / 外来网页。 */
-export type ViewKind = 'shell' | 'guest'
+/** 视图种类：壳自己的页面 / 外来网页 / 配对远程设备（#47）。 */
+export type ViewKind = 'shell' | 'guest' | 'remote'
 
 /** 页面桥带 token 的请求头。 */
 export const VIEW_TOKEN_HEADER = 'x-dsh-shell-view'
@@ -27,6 +30,23 @@ export const VIEW_TOKEN_HEADER = 'x-dsh-shell-view'
  * 其余一律拒绝——包括 `open_external` 这类看似无害的（外链有专门的端点，不走命令表）。
  */
 export const GUEST_ALLOWED_COMMANDS: readonly string[] = ['log_console', 'log_diag']
+
+/**
+ * remote 视图（配对远程设备，#47）放行的命令白名单。
+ * 首批：报日志 + 通知族（get/set 状态与配置、权限申请、音效试听/选择/导入）。
+ * `get_desktop_client_environment` 刻意**不在**名单里——它会让远程页激活桌面 chrome
+ * （普通浏览器里画红绿灯）。后续按需求显式追加，不批量放开。
+ */
+export const REMOTE_ALLOWED_COMMANDS: readonly string[] = [
+  'log_console',
+  'log_diag',
+  'get_notifications_state',
+  'set_notifications_config',
+  'request_notification_permission_cmd',
+  'preview_notification_sound',
+  'choose_notification_sound',
+  'import_notification_sound',
+]
 
 export interface ViewGrant {
   /** 随机 token（页面桥带回来） */
@@ -50,12 +70,14 @@ export interface ViewRegistry {
 /** 命令是否允许来自这种视图。 */
 export function isCommandAllowed(kind: ViewKind, command: string): boolean {
   if (kind === 'shell') return true
+  if (kind === 'remote') return REMOTE_ALLOWED_COMMANDS.includes(command)
   return GUEST_ALLOWED_COMMANDS.includes(command)
 }
 
 /** 拒绝时给页面与日志看的一句话。 */
 export function denyReason(kind: ViewKind, command: string): string {
-  return `命令 ${command} 不允许来自 ${kind === 'guest' ? 'guest（外来网页）' : kind} 视图`
+  const label = kind === 'guest' ? 'guest（外来网页）' : kind === 'remote' ? 'remote（配对远程设备）' : kind
+  return `命令 ${command} 不允许来自 ${label} 视图`
 }
 
 /**
