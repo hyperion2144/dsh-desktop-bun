@@ -38,6 +38,9 @@ jobs:
   build:
     name: 构建 + 产物断言（${{ matrix.label }}）
     runs-on: ${{ matrix.os }}
+    # hutch 首次构建要下载 cottontail/Electrobun/CEF/bun 四件套，下载器无超时（run 38493719636 实证挂 85 分钟）；
+    # 全量正常 ~15 分钟，40 分钟兜底防挂死占 runner
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
