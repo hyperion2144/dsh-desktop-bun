@@ -29,7 +29,8 @@
 
 ### Fixed
 
-<<<<<<< HEAD
+- 侧栏 header 错层（#44）：壳侧骨架期红绿灯让位注入（padding-top:28px + body 平台标记）在桌面插件接管后未退役，叠在官方 alpha 前端的 darwin 顶带布局上，logo 被折叠按钮顶下一层（官方 Desktop.app 的视觉是 logo 与折叠按钮同行）。退役骨架注入；插件 CSS 把 topStrip 浮到 logoRow 行、logoRow 顶回红绿灯让位带下方，还原单行几何；data-platform 信号保留（折叠全隐/红绿灯旁座位按钮依赖它）。随票修复 PR #48 合入时 CHANGELOG 残留的一处未解冲突标记。
+
 - 并行带窗 dev 实例被 CEF 单例顶掉（#38）：DSH_DESKTOP_NO_SINGLETON 只跳壳层 shell-instance.json 锁，真正拦第二实例的是 Chromium ProcessSingleton——按 `<identifier>/<channel>/CEF` 数据目录加锁，hutch 侧无环境口子可绕。新增构建期换 id：electrobun.config 的 app.identifier 改经 src/shared/app-identity.ts 的 resolveBundleIdentifier() 解析，`DSH_SHELL_DEV_IDENTIFIER` 非空（去首尾空白）则覆盖、默认与既有产物一致（正式构建/升级/签名链零感知）；README 环境表与钩子注释同步改诚实描述。
 - 配对远程页壳命令桥缺席（#47）：新壳对不可信 guest/远程视图零命令（#220 决策 12），配对远程设备被一并归零——远程页 `__TAURI_INTERNALS__.invoke` 全部 reject，设置面板「桌面通知」等 tab 恒「加载中」（旧壳 `remote-desktop.json` 有 74 条命令）。新增 `remote` 视图种类：壳铸 remote 视图 token 经宿主 env 下发给 mobile-access，桥给配对远程页注入与壳侧 tauri-ipc 逐字对齐的 invoke shim（经 /_loopback 达壳页面服务）；命令白名单 `REMOTE_ALLOWED_COMMANDS`（通知族 + 报日志，`get_desktop_client_environment` 刻意不在名单——不让远程浏览器画桌面 chrome），guest 不因 remote 多放一条。
 - 远程页桌面通知面板卡「加载中」（#43）：mobile-access 配对门禁对所有路径要求会话 cookie，而浏览器对 `<link rel=manifest>` 的获取不保证携带 cookie，manifest.webmanifest 恒 401 unpaired，前端桌面通知面板拿到 401 无兑底挂起。门禁对清单路径精确放行（非敏感 PWA 元数据，透传上游），其余路径门禁行为不变。

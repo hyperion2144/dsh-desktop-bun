@@ -11,7 +11,6 @@
 // 每视图 RPC 是后续增量，契约不变（官方用 IPC handle 返回同样两个字段）。
 
 import { carrierScript, type CarrierPlatform } from './carrier.ts'
-import { chromeScript, type ShellPlatform } from './chrome.ts'
 import { contextMenuScript } from './context-menu.ts'
 import { externalLinksScript } from './external.ts'
 import { tauriIpcScript } from './tauri-ipc.ts'
@@ -20,7 +19,7 @@ export const BOOT_ENDPOINT = '/__shell__/boot'
 
 import { VIEW_TOKEN_HEADER } from '../shared/view-grant.ts'
 
-export function bootPreloadScript(locale: string, platform: ShellPlatform, selfOrigin: string, viewToken: string): string {
+export function bootPreloadScript(locale: string, platform: CarrierPlatform, selfOrigin: string, viewToken: string): string {
   const carrier: CarrierPlatform = platform
   return [
     `const viewToken = ${JSON.stringify(viewToken)}`,
@@ -42,8 +41,7 @@ export function bootPreloadScript(locale: string, platform: ShellPlatform, selfO
     '}',
     // 载体标记：dsh 前端只在 globalThis.dshDesktop 存在时才装浏览器 guest 桥（旧壳同款）
     carrierScript(carrier),
-    // 窗口 chrome（骨架期）：给 macOS 红绿灯让出顶部空间 + 打平台标记
-    chromeScript(platform),
+    // 窗口 chrome 与平台标记：由桌面插件 advanced-shell/styles 接管（#23/#44），骨架期 chrome.ts 注入退役。
     // 外链（会话里的链接、侧边栏浏览器「在系统浏览器打开」）不把壳自己的窗口带走：
     // 上游契约是 window.open，CEF 下没人接，这里改发壳端点 → Utils.openExternal。
     externalLinksScript(selfOrigin, viewToken),
