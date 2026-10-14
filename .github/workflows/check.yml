@@ -34,6 +34,7 @@ jobs:
   check:
     name: 检查（壳 + 插件：typecheck + test）
     runs-on: ubuntu-latest
+    timeout-minutes: 20 # 检查链正常 ~5 分钟
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -89,6 +90,7 @@ jobs:
   check-windows:
     name: 检查（Windows 兜底）
     runs-on: windows-latest
+    timeout-minutes: 20 # Windows 兜底检查正常 ~10 分钟
     steps:
       - name: Checkout
         uses: actions/checkout@v4
