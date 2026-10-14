@@ -39,6 +39,7 @@ import {
   type WindowFrame,
 } from './window-state.ts'
 import { loadSettings } from './settings-store.ts'
+import { applyCdpDebugPort, DEVTOOLS_PORT_ENV, DEVTOOLS_PORT_OVERRIDE_ENV, devToolsMenuEnabled, isPortBindable, planDevToolsBoot } from './devtools.ts'
 import { activeProfile, type DesktopSettings } from '../shared/settings.ts'
 import { closeAction, offsetFrame, planWindowOpen, windowKey } from '../shared/window-targets.ts'
 import type { LaneForwarder } from './lane-forwarder.ts'
@@ -108,6 +109,35 @@ const windowStateFile = join(appSupportDir(), 'window.json')
 // 设置文件可能还不存在（首启），读失败就按默认——真正的落盘由 service 那一步做。
 const bootSettings: DesktopSettings = loadSettings({ home: dshHome() }).settings
 const instanceProfile = activeProfile(bootSettings, process.env)
+
+// ---- #69 开发者工具开关：打包态是否给 CEF 开远程调试口 ----
+// env 必须在任何 CEF 进程起来前就位（splash 就是 CEF 窗、native core 也在下面），
+// 所以启动决策放这里做完；菜单可见 ⇔ 口已开（同一份 plan 推出，禁中间态）。
+const devToolsPlan = await planDevToolsBoot({
+  isPackaged: build.isPackaged,
+  settingOn: bootSettings.devTools === true,
+  envOverride: process.env[DEVTOOLS_PORT_OVERRIDE_ENV],
+  isFree: isPortBindable,
+})
+// C environ 双写（dylib 用 C getenv 读开关；Bun map 写入不穿透，实测见 devtools.ts 头注）。
+// 写入失败 = CDP 开不了：cdpReady 落 false，菜单同批不出现（禁中间态，fail-closed）。
+const devToolsCdpReady = devToolsPlan.enableCdp && devToolsPlan.port !== null
+  ? applyCdpDebugPort(devToolsPlan.port)
+  : false
+if (devToolsPlan.enableCdp && !devToolsCdpReady) {
+  console.error('[shell] 开发者工具：调试口 env 写入失败（libc setenv 不可用），本次不开口、不出菜单')
+}
+if (devToolsPlan.reason === 'enabled-by-setting') {
+  console.log(`[shell] 开发者工具：已开启，CEF 远程调试口 127.0.0.1:${String(devToolsPlan.port)}（重启后生效；本机任意进程可借该口在页面里执行代码）`)
+} else if (devToolsPlan.reason === 'port-unavailable') {
+  console.error(`[shell] 开发者工具：端口 ${String(devToolsPlan.port)} 被占用，本次不开调试口、不出菜单（可用 ${DEVTOOLS_PORT_OVERRIDE_ENV} 换口）`)
+} else if (devToolsPlan.reason === 'port-invalid') {
+  console.error(`[shell] 开发者工具：${DEVTOOLS_PORT_OVERRIDE_ENV} 非法（需要 1-65535 整数），按未开启处理`)
+} else if (devToolsPlan.reason === 'dev-build') {
+  console.log('[shell] 开发者工具：dev 构建，DevTools 菜单恒可见（打包态才吃 dev_tools 开关）')
+} else {
+  console.log('[shell] 开发者工具：未开启（设置 dev_tools）——不监听调试口、不出菜单')
+}
 let tray: TrayHandle | null = null
 // 每视图授权台账（#220 决策 12）：每个窗口一枚 token，页面桥带回来，壳按视图种类放行命令。
 const views = createViewRegistry()
@@ -357,9 +387,13 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     onContextMenu: (request) => {
       const linkIsExternal =
         request.linkUrl !== null && isExternalUrl(request.linkUrl, originOf(profile))
-      // dev 构建（未打包）才给「打开 DevTools」；BuildConfig.getSync 内部有缓存，右键时取不贵
+      // 菜单可见性唯一事实源在 devtools.ts：dev 构建恒可见；打包态＝开关开且本次启动口已开（可见⇔口开）。
       const items = contextMenuItems(request, linkIsExternal, {
-        devTools: BuildConfig.getSync().isPackaged === false,
+        devTools: devToolsMenuEnabled({
+          isPackaged: BuildConfig.getSync().isPackaged,
+          settingOn: bootSettings.devTools === true,
+          cdpReady: devToolsCdpReady,
+        }),
       })
       // 「挂不上也要出声」：菜单内容进日志，实机排查时能看出是哪一档
       console.log(`[shell] 右键菜单：${items.map((item) => item.label ?? item.role ?? item.type ?? '?').join(' | ')}`)
