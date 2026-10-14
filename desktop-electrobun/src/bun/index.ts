@@ -4,6 +4,7 @@
 // 那一层不 import electrobun；这里只做「渲染器断言」和「窗口」两件事。
 
 import { ApplicationMenu, BrowserView, BrowserWindow, BuildConfig, ContextMenu, Screen, Utils, app } from 'electrobun/bun'
+import { acceptShimScript } from './accept-shim.ts'
 import { systemLocale } from './locale.ts'
 import { installApplicationMenu } from './menu.ts'
 import { deriveMaximized, ensureNativeMaximizeStyles, getWorkAreaForFrame } from './window-max.ts'
@@ -166,6 +167,8 @@ const guests = createGuestManager({
     const view = new BrowserView({
       url: GUEST_DEFAULT_URL,
       renderer: 'cef',
+      // #58：guest 页也可能有 MIME 形式的 file input；shim 只做 DOM 归一化，无 RPC，sandbox 下安全
+      preload: acceptShimScript(platform),
       partition,
       frame: { ...OFFSCREEN_GUEST_RECT },
       windowId: hit.window.id,

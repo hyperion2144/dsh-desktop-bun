@@ -11,6 +11,7 @@
 // Electrobun 官方 Typed RPC（#50，rpc-bridge.ts），boot 仍走 HTTP。
 
 import { carrierScript, type CarrierPlatform } from './carrier.ts'
+import { acceptShimScript } from './accept-shim.ts'
 import { contextMenuScript } from './context-menu.ts'
 import { externalLinksScript } from './external.ts'
 export const BOOT_ENDPOINT = '/__shell__/boot'
@@ -50,5 +51,8 @@ export function bootPreloadScript(locale: string, platform: CarrierPlatform, sel
     // 页面作用域，这里只是给它一个稳定名字；guest（无 preload）/remote（走
     // mobile-access 中继桥，token 由中继注入）不经这条路。
     `globalThis.__DSH_SHELL_VIEW_TOKEN__ = ${JSON.stringify(viewToken)}`,
+    // 文件选择对话框 accept 归一化（#58）：win 原生层把 MIME token 当扩展名拼 pattern，
+    // 这里在页面侧把 accept 改写成扩展名形式（win32 追加 *.* 补 All files），浏览器零影响。
+    acceptShimScript(platform),
   ].join('\n')
 }
