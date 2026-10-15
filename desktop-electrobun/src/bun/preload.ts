@@ -7,14 +7,13 @@
 //     并设 `__DSH_TRANSPORT__ = { ownsHost: true, streamBaseUrl }`
 //
 // 载荷来源：壳自己（进程内）持有宿主上报的 rows。骨架期用壳的同源端点
-// `/__shell__/boot`（宿主就绪前 503，页面会等）取回；把载体换成 Electrobun 的
-// 每视图 RPC 是后续增量，契约不变（官方用 IPC handle 返回同样两个字段）。
+// `/__shell__/boot`（宿主就绪前 503，页面会等）取回。壳↔页面的命令通道已换成
+// Electrobun 官方 Typed RPC（#50，rpc-bridge.ts），boot 仍走 HTTP。
 
 import { carrierScript, type CarrierPlatform } from './carrier.ts'
+import { acceptShimScript } from './accept-shim.ts'
 import { contextMenuScript } from './context-menu.ts'
 import { externalLinksScript } from './external.ts'
-import { tauriIpcScript } from './tauri-ipc.ts'
-
 export const BOOT_ENDPOINT = '/__shell__/boot'
 
 import { VIEW_TOKEN_HEADER } from '../shared/view-grant.ts'
@@ -47,8 +46,13 @@ export function bootPreloadScript(locale: string, platform: CarrierPlatform, sel
     externalLinksScript(selfOrigin, viewToken),
     // 右键菜单：CEF 不弹菜单，页面把上下文报给主进程，由它弹原生菜单。
     contextMenuScript(viewToken),
-    // 壳自己的客户端插件是照 Tauri 写的（`__TAURI_INTERNALS__.invoke`）：
-    // 这里把它接到壳的 RPC 端点上，桌面 chrome（设置面板/通知/下载…）才会激活。
-    tauriIpcScript(viewToken),
+    // 视图 token 暴露给页面脚本（#50）：桌面插件的 HTTP 兑底（/__shell__/rpc、
+    // /__shell__/window）要从页面侧带上同一枚 token。token 本就随 preload 进入
+    // 页面作用域，这里只是给它一个稳定名字；guest（无 preload）/remote（走
+    // mobile-access 中继桥，token 由中继注入）不经这条路。
+    `globalThis.__DSH_SHELL_VIEW_TOKEN__ = ${JSON.stringify(viewToken)}`,
+    // 文件选择对话框 accept 归一化（#58）：win 原生层把 MIME token 当扩展名拼 pattern，
+    // 这里在页面侧把 accept 改写成扩展名形式（win32 追加 *.* 补 All files），浏览器零影响。
+    acceptShimScript(platform),
   ].join('\n')
 }

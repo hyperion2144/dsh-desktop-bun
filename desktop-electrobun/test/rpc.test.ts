@@ -1,7 +1,7 @@
 // 壳 ↔ 页面 RPC（缝 ② 纯逻辑 + 真 HTTP 用例）。
 //
 // 守的是什么：壳自己的客户端插件（设置面板、通知 tab、下载 tab、本地 chrome）是照 Tauri
-// 写的，全经 `__TAURI_INTERNALS__.invoke(cmd, args)`。新壳没有 Tauri，也没有真实的 IPC——
+// 写的，全经页面侧 invoke shim 与壳通信。新壳没有 Tauri，也没有真实的 IPC——
 // 这一层必须把 41 个命令里的每一个都给出**明确**答复：能做的做，做不了的报清楚原因；
 // 绝不能出现「resolve 了 undefined」这种让插件静默失效、面板永远转圈的情况。
 
@@ -164,6 +164,9 @@ describe('命令表', () => {
       // serializeSettings 写下划线键（旧壳 serde 只认这个，回退到 v0.12.0 时设置不清零）
       expect(settings.prevent_sleep).toBe(true)
       expect(settings.download_concurrency).toBe(3)
+      // #69：显式字段与 settings 段都带 dev_tools（缺省 false）
+      expect(data.dev_tools).toBe(false)
+      expect(settings.dev_tools).toBe(false)
     } finally {
       h.cleanup()
     }
@@ -173,12 +176,14 @@ describe('命令表', () => {
     const h = harness()
     try {
       const result = (await h.table.save_desktop_settings?.({
-        patch: { prevent_sleep: false, download_concurrency: 8 },
+        patch: { prevent_sleep: false, download_concurrency: 8, dev_tools: true },
       })) as Record<string, unknown>
       expect((result.settings as Record<string, unknown>).prevent_sleep).toBe(false)
       const onDisk = loadSettings({ home: h.home }).settings
       expect(onDisk.preventSleep).toBe(false)
       expect(onDisk.downloadConcurrency).toBe(8)
+      expect(onDisk.devTools).toBe(true)
+      expect((result.settings as Record<string, unknown>).dev_tools).toBe(true)
     } finally {
       h.cleanup()
     }
@@ -417,6 +422,8 @@ describe('多窗口的数据面（列表类命令要看到别的 profile / 正�
         activeKind: 'override',
         activeDir: '/tmp/spike-rt/0.2.1-alpha.2',
         selected: null,
+
+        note: null,
         installed: [],
       }),
     })

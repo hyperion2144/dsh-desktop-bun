@@ -4,9 +4,12 @@
 // 那一层不 import electrobun；这里只做「渲染器断言」和「窗口」两件事。
 
 import { ApplicationMenu, BrowserView, BrowserWindow, BuildConfig, ContextMenu, Screen, Utils, app } from 'electrobun/bun'
+import { acceptShimScript } from './accept-shim.ts'
 import { systemLocale } from './locale.ts'
 import { installApplicationMenu } from './menu.ts'
+import { deriveMaximized, ensureNativeMaximizeStyles, getWorkAreaForFrame } from './window-max.ts'
 import { bootPreloadScript } from './preload.ts'
+import { attachShellRpc } from './rpc-bridge.ts'
 import { startService, type ServiceOptions, type ShellService } from './service.ts'
 import { createNativeNotify } from './notify-un.ts'
 import type { RuntimeSnapshot } from './commands.ts'
@@ -33,12 +36,14 @@ import {
   DEFAULT_WINDOW_HEIGHT,
   DEFAULT_WINDOW_WIDTH,
   readWindowFrame,
+  readWindowMaximized,
   sanitizeFrame,
   writeWindowFrame,
   type DisplayBounds,
   type WindowFrame,
 } from './window-state.ts'
 import { loadSettings } from './settings-store.ts'
+import { applyCdpDebugPort, DEVTOOLS_PORT_ENV, DEVTOOLS_PORT_OVERRIDE_ENV, devToolsMenuEnabled, isPortBindable, planDevToolsBoot } from './devtools.ts'
 import { activeProfile, type DesktopSettings } from '../shared/settings.ts'
 import { closeAction, offsetFrame, planWindowOpen, windowKey } from '../shared/window-targets.ts'
 import type { LaneForwarder } from './lane-forwarder.ts'
@@ -110,6 +115,35 @@ const windowStateFile = join(appSupportDir(), 'window.json')
 // 设置文件可能还不存在（首启），读失败就按默认——真正的落盘由 service 那一步做。
 const bootSettings: DesktopSettings = loadSettings({ home: dshHome() }).settings
 const instanceProfile = activeProfile(bootSettings, process.env)
+
+// ---- #69 开发者工具开关：打包态是否给 CEF 开远程调试口 ----
+// env 必须在任何 CEF 进程起来前就位（splash 就是 CEF 窗、native core 也在下面），
+// 所以启动决策放这里做完；菜单可见 ⇔ 口已开（同一份 plan 推出，禁中间态）。
+const devToolsPlan = await planDevToolsBoot({
+  isPackaged: build.isPackaged,
+  settingOn: bootSettings.devTools === true,
+  envOverride: process.env[DEVTOOLS_PORT_OVERRIDE_ENV],
+  isFree: isPortBindable,
+})
+// C environ 双写（dylib 用 C getenv 读开关；Bun map 写入不穿透，实测见 devtools.ts 头注）。
+// 写入失败 = CDP 开不了：cdpReady 落 false，菜单同批不出现（禁中间态，fail-closed）。
+const devToolsCdpReady = devToolsPlan.enableCdp && devToolsPlan.port !== null
+  ? applyCdpDebugPort(devToolsPlan.port)
+  : false
+if (devToolsPlan.enableCdp && !devToolsCdpReady) {
+  console.error('[shell] 开发者工具：调试口 env 写入失败（libc setenv 不可用），本次不开口、不出菜单')
+}
+if (devToolsPlan.reason === 'enabled-by-setting') {
+  console.log(`[shell] 开发者工具：已开启，CEF 远程调试口 127.0.0.1:${String(devToolsPlan.port)}（重启后生效；本机任意进程可借该口在页面里执行代码）`)
+} else if (devToolsPlan.reason === 'port-unavailable') {
+  console.error(`[shell] 开发者工具：端口 ${String(devToolsPlan.port)} 被占用，本次不开调试口、不出菜单（可用 ${DEVTOOLS_PORT_OVERRIDE_ENV} 换口）`)
+} else if (devToolsPlan.reason === 'port-invalid') {
+  console.error(`[shell] 开发者工具：${DEVTOOLS_PORT_OVERRIDE_ENV} 非法（需要 1-65535 整数），按未开启处理`)
+} else if (devToolsPlan.reason === 'dev-build') {
+  console.log('[shell] 开发者工具：dev 构建，DevTools 菜单恒可见（打包态才吃 dev_tools 开关）')
+} else {
+  console.log('[shell] 开发者工具：未开启（设置 dev_tools）——不监听调试口、不出菜单')
+}
 let tray: TrayHandle | null = null
 // 每视图授权台账（#220 决策 12）：每个窗口一枚 token，页面桥带回来，壳按视图种类放行命令。
 const views = createViewRegistry()
@@ -135,6 +169,8 @@ const guests = createGuestManager({
     const view = new BrowserView({
       url: GUEST_DEFAULT_URL,
       renderer: 'cef',
+      // #58：guest 页也可能有 MIME 形式的 file input；shim 只做 DOM 归一化，无 RPC，sandbox 下安全
+      preload: acceptShimScript(platform),
       partition,
       frame: { ...OFFSCREEN_GUEST_RECT },
       windowId: hit.window.id,
@@ -157,6 +193,10 @@ const guests = createGuestManager({
   },
 })
 let windowVisible = false
+/** 隐藏回托盘前窗口是否处于最大化（ffi hide/show 往返会丢最大化，show 前补回，#50 验证反馈）。 */
+let hiddenWhileMaximized = false
+/** #73：启动要恢复最大化的窗——建窗/dom-ready 的 maximize 在 Windows 实测不稳，改在首次 focus 断言补齐。 */
+const pendingStartMaximized = new Set<string>()
 let quitting = false
 /** 关窗后是否只是隐藏：没有托盘（原生层没建成）时隐藏就叫不回来了，那时关窗等于退出。 */
 const closeToTray = (): boolean => tray !== null
@@ -193,20 +233,48 @@ function scheduleFrameSave(win: BrowserWindow, profile: string): void {
     setTimeout(() => {
       frameSaveTimers.delete(profile)
       try {
-        const frame = win.getFrame()
-        writeWindowFrame(windowStateFileOf(profile), {
-          x: Math.round(frame.x),
-          y: Math.round(frame.y),
-          width: Math.round(frame.width),
-          height: Math.round(frame.height),
-        })
+        saveFrameNow(win, profile)
       } catch (error) {
         console.warn(`[shell] 窗口几何落盘失败：${String(error)}`)
       }
     }, 400),
   )
 }
+/**
+ * 几何立即落盘（scheduleFrameSave 定时器 / 关窗 flush / 退出 flush 三处共用）：
+ * 最大化态 = 原生旗标 ∨ 几何推导——后者兜住「补丁失败走了手动 setFrame」的场景，
+ * 那种窗口原生旗标恒 false，只记旗标的话重启就丢最大化态。
+ */
+function saveFrameNow(win: BrowserWindow, profile: string): void {
+  const frame = win.getFrame()
+  const native = win.isMaximized()
+  writeWindowFrame(
+    windowStateFileOf(profile),
+    { x: Math.round(frame.x), y: Math.round(frame.y), width: Math.round(frame.width), height: Math.round(frame.height) },
+    native || deriveMaximized(frame, getWorkAreaForFrame(frame), native),
+  )
+}
 
+/**
+ * 关窗策略（will-close / RPC window_close / 兑底端点三处共用，#50 验证反馈）：
+ * 主窗+有托盘 → 隐藏回托盘（进程继续）；主窗无托盘 → 直接退；其余 profile → 只销毁。
+ */
+function performClosePolicy(win: BrowserWindow, profile: string): 'hidden' | 'quit' | 'close' {
+  if (closeAction(profile, instanceProfile) === 'hide-to-tray' && closeToTray()) {
+    // D5：首次关窗回托盘时提示一次（旧壳关窗提示的等价物；用户知道了就不再弹）
+    if (!trayHintShown.has(profile)) {
+      trayHintShown.add(profile)
+      notifier.notify(SCENARIO.WINDOW_LIFECYCLE, '窗口已最小化到托盘，点托盘图标可找回。')
+    }
+    hiddenWhileMaximized = win.isMaximized()
+    win.hide()
+    windowVisible = false
+    refreshTray()
+    return 'hidden'
+  }
+  if (!closeToTray() && profile === instanceProfile) return 'quit'
+  return 'close'
+}
 /** 版本目录缓存：托盘子菜单用它渲染「↓ 下载并切换」，但不该每刷一次托盘就打网络（旧壳也拿缓存）。 */
 const TRAY_CATALOG_TTL_MS = 10 * 60_000
 let catalogCache: { at: number; entries: TrayCatalogItem[] } | null = null
@@ -302,10 +370,34 @@ function refreshTray(): void {
   })
 }
 
+/**
+ * #80：THICKFRAME 无边框窗在「最大化→最小化→恢复」往返可能被系统按隐形缩放边框
+ * 外扩落位（顶部越出屏幕）。焦点时只读自检：仍处最大化但帧相对所在显示器工作区
+ * 外扩超容差 → 判定落位损坏 → 纯原生 unmaximize()+maximize() 重摆（零自算坐标，
+ * 落位由 Windows 重算，与首次最大化同一条已验证路径）。Win+方向键半屏贴靠
+ * IsZoomed=false 天然不触发；任务栏恢复/托盘找回/Alt-Tab 都走 focus。
+ */
+function healMaximizedPlacement(win: BrowserWindow): void {
+  if (process.platform !== 'win32') return
+  if (!win.isMaximized()) return
+  const frame = win.getFrame()
+  const workArea = getWorkAreaForFrame(frame)
+  if (workArea === null) return
+  if (deriveMaximized(frame, workArea, true)) return
+  console.log('[shell] #80 检测到最大化落位外扩，原生重摆')
+  win.unmaximize()
+  win.maximize()
+}
+
 function showMainWindow(): void {
   const win = focusedWindow()
   if (win === null) return
   win.unminimize()
+  if (hiddenWhileMaximized) {
+    // 隐藏前是最大化：show 前先 maximize（与启动路径同构，窗口直接以最大化出现不闪小窗）
+    win.maximize()
+    hiddenWhileMaximized = false
+  }
   win.show()
   win.activate()
   windowVisible = true
@@ -315,6 +407,7 @@ function showMainWindow(): void {
 function hideMainWindow(): void {
   const win = focusedWindow()
   if (win === null) return
+  hiddenWhileMaximized = win.isMaximized()
   win.hide()
   windowVisible = false
   refreshTray()
@@ -359,9 +452,13 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     onContextMenu: (request) => {
       const linkIsExternal =
         request.linkUrl !== null && isExternalUrl(request.linkUrl, originOf(profile))
-      // dev 构建（未打包）才给「打开 DevTools」；BuildConfig.getSync 内部有缓存，右键时取不贵
+      // 菜单可见性唯一事实源在 devtools.ts：dev 构建恒可见；打包态＝开关开且本次启动口已开（可见⇔口开）。
       const items = contextMenuItems(request, linkIsExternal, {
-        devTools: BuildConfig.getSync().isPackaged === false,
+        devTools: devToolsMenuEnabled({
+          isPackaged: BuildConfig.getSync().isPackaged,
+          settingOn: bootSettings.devTools === true,
+          cdpReady: devToolsCdpReady,
+        }),
       })
       // 「挂不上也要出声」：菜单内容进日志，实机排查时能看出是哪一档
       console.log(`[shell] 右键菜单：${items.map((item) => item.label ?? item.role ?? item.type ?? '?').join(' | ')}`)
@@ -386,7 +483,15 @@ function serviceOptionsFor(profile: string): ServiceOptions {
         if (win.isMaximized()) win.unmaximize()
         else win.maximize()
       } else {
-        win.close()
+        // #50 验证反馈：兑底端点的关窗也走统一策略（要拿到 profile 才能判主/副窗）
+        const focusedEntry = [...windows.values()].find((entry) => entry.window === win)
+        if (focusedEntry === undefined) {
+          win.close()
+          return
+        }
+        const closePolicyAction = performClosePolicy(win, focusedEntry.profile)
+        if (closePolicyAction === 'close') win.close()
+        else if (closePolicyAction === 'quit') void shutdown()
       }
     },
     onProfileOpApplied: (op, profile) => {
@@ -419,6 +524,8 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     onHostGiveUp: (state, reason) => {
       console.error(`[shell] 宿主守护器放弃重启（${reason}）；页面停在 ${state.pageUrl}`)
     },
+    // #79：面板「重启 dsh 服务」= 统一 restartDsh（树级全重启 + 关窗→splash→原样重开）；无窗口模式回落宿主级
+    onFullRestart: noWindow ? undefined : () => restartDsh(),
     notifier,
     // 同一个 UN 桥实例（状态与投递都走它；面板的权限徽标也从这里读）
     notifyBridge,
@@ -480,22 +587,51 @@ function reloadWindow(profile: string, url: string): void {
 }
 
 /** 建一个 profile 窗口并接上壳侧语义（关窗、聚焦、几何）；DOM 事件与旧单窗实现同一套。 */
-function createProfileWindow(profile: string, svc: ShellService): BrowserWindow {
+async function createProfileWindow(profile: string, svc: ShellService): Promise<BrowserWindow> {
   const isBoot = profile === instanceProfile
   const index = windows.size
   const frame = index === 0 ? restoreWindowFrame(profile) : offsetFrame(restoreWindowFrame(profile), index)
-  const win = new BrowserWindow({
+  // 每视图授权 + 官方 RPC（#50）：token 一枚两用——preload 注给页面（HTTP 兑底用），
+  // 整份 grant 闭进 defineRPC（漏斗里做每视图白名单）。
+  const grant = views.issue('shell', profile, windowKey(profile))
+  // 三键目标窗：闭包面（构造前声明；官方 RPC 请求到达时 win 已赋值）。
+  let win: BrowserWindow
+  const rpcWindow = {
+    minimize: () => win.minimize(),
+    isMaximized: () => win.isMaximized(),
+    unmaximize: () => win.unmaximize(),
+    maximize: () => win.maximize(),
+    close: () => {
+      // #50 验证反馈：三键关闭按钮走与 will-close 同一套策略——主窗隐藏回托盘，不是退进程
+      const action = performClosePolicy(win, profile)
+      if (action === 'close') win.close()
+      else if (action === 'quit') void shutdown()
+    },
+    // 漏斗状态推导要用的只读帧（本仓不做任何窗口摆位，#80）。
+    getFrame: () => win.getFrame(),
+  }
+  const shellRpcHandle = await attachShellRpc({ router: () => svc.rpcRouter(), grant, window: rpcWindow })
+  win = new BrowserWindow({
     // D1：原生层同步评估的导航守卫——白名单页面 origin，其余导航被拦（外链交给 open_external）
     navigationRules: navRulesFor({ origin: svc.state.origin }),
-    title: isBoot ? APP_NAME : `${APP_NAME} · ${profile}` ,
+    title: isBoot ? APP_NAME : `${APP_NAME} · ${profile}`,
     url: svc.state.pageUrl,
     renderer: 'cef',
-    preload: bootPreloadScript(locale, platform, svc.state.origin, views.issue('shell', profile, windowKey(profile)).token),
-    // Windows 语义：hiddenInset = WS_CAPTION|WS_THICKFRAME（系统圆角边框、无标题栏文字/按钮）；
+    preload: bootPreloadScript(locale, platform, svc.state.origin, grant.token),
+    rpc: shellRpcHandle.rpc,
     // hidden = 纯无边框方框（实机报的「方形无边框」）。mac 两态都以 hiddenInset 出红绿灯。
     titleBarStyle: 'hiddenInset',
     frame,
   })
+  // D3 反馈：上次是最大化收场的，这次直接最大化（几何记忆只当还原帧用）。
+  // Windows 实测：从未显示过的窗上 maximize() 不落 WS_MAXIMIZE 旗标；dom-ready 补齐
+  // 实机也不稳（#73 两轮未过）——最终口径：focus 首焦断言补齐（见 focus 处理器）。
+  const startMaximized = readWindowMaximized(windowStateFileOf(profile))
+  if (startMaximized) {
+    ensureNativeMaximizeStyles()
+    win.maximize()
+    pendingStartMaximized.add(profile)
+  }
   windows.set(profile, { profile, window: win, ready: false })
   focusedProfile = profile
   if (isBoot) mainWindow = win
@@ -512,36 +648,47 @@ function createProfileWindow(profile: string, svc: ShellService): BrowserWindow 
       mainWindowReady = true
     }
     windowVisible = true
+    if (startMaximized && !win.isMaximized()) {
+      // 启动 maximize 落在隐藏窗上没生效（Windows）：可见后补一次；尺寸已是最大化帧，视觉无感
+      ensureNativeMaximizeStyles()
+      win.maximize()
+      // #73：没人告诉页面 —— 推 window_state_changed，客户端重查图标（resize/focus 都不触发）。
+      shellRpcHandle.notifyWindowState()
+    }
     refreshTray()
   })
   win.on('focus', () => {
     focusedProfile = profile
+    healMaximizedPlacement(win)
     // lane 稳定接入点跟随焦点（旧壳 forwarder.rs：新连接落焦点实例，存量不动）
     // lane 稳定接入点跟随焦点（旧壳 forwarder.rs：新连接落焦点实例，存量不动）。
+    // #73：启动恢复最大化断言——Windows 上从未显示/刚显示的窗 maximize 可能不落
+    // 旗标（建窗时、dom-ready 时各试过一次都不稳），首次获得焦点时窗口必然已可见，
+    // 再补一次并推送图标重查；断言成功即清 pending，之后不再干预。
+    if (pendingStartMaximized.has(profile)) {
+      if (!win.isMaximized()) {
+        ensureNativeMaximizeStyles()
+        win.maximize()
+        shellRpcHandle.notifyWindowState()
+      }
+      if (win.isMaximized()) pendingStartMaximized.delete(profile)
+    }
     // 转发器挂在先起的那份服务面上，这里找到它再指目标。
     focusedLaneForwarder()?.setTarget(services.get(profile)?.state.lanePort ?? 0)
     refreshTray()
   })
-  // 关窗回托盘：原生层会先问 `will-close`，回 response.allow=false 就不关（旧 Tauri 壳同行为）。
-  // 没有托盘时不能隐藏（隐藏后没有入口再叫回来），直接走真退出（仅主窗）。
+  // 关窗策略三处共用 performClosePolicy；原生层会先问 `will-close`，回 response.allow=false 就不关（旧 Tauri 壳同行为）
   win.on('will-close', (event) => {
     if (quitting) return
     // F8：「退出（停止实例）」主动销毁窗口时不拦截（stoppingProfiles 由 stopProfileFromTray 置位）
     if (stoppingProfiles.has(profile)) return
-    if (closeAction(profile, instanceProfile) === 'hide-to-tray' && closeToTray()) {
-    // D5：首次关窗回托盘时提示一次（旧壳关窗提示的等价物；用户知道了就不再弹）
-    if (closeAction(profile, instanceProfile) === 'hide-to-tray' && closeToTray() && !trayHintShown.has(profile)) {
-      trayHintShown.add(profile)
-      notifier.notify(SCENARIO.WINDOW_LIFECYCLE, '窗口已最小化到托盘，点托盘图标可找回。')
-    }
+    const action = performClosePolicy(win, profile)
+    if (action === 'hidden') {
       ;(event as { response?: unknown }).response = { allow: false }
       console.log(`[shell] 关窗回托盘（${profile} 窗口隐藏，进程继续）`)
-      win.hide()
-      windowVisible = false
-      refreshTray()
       return
     }
-    if (!closeToTray() && profile === instanceProfile) {
+    if (action === 'quit') {
       console.log('[shell] 关窗（无托盘）：直接退出')
       void shutdown()
       return
@@ -549,6 +696,15 @@ function createProfileWindow(profile: string, svc: ShellService): BrowserWindow 
     console.log(`[shell] 关窗（${profile}）：只销毁窗口，实例继续跑`)
   })
   win.on('close', () => {
+    // 真销毁前把挂起的几何写盘（去抖定时器等不到了），最大化态一并记住
+    const pending = frameSaveTimers.get(profile)
+    if (pending !== undefined) {
+      clearTimeout(pending)
+      frameSaveTimers.delete(profile)
+      try {
+        saveFrameNow(win, profile)
+      } catch {}
+    }
     windows.delete(profile)
     // 窗口没了就撤销它的视图 token（旧壳的 capability 是静态文件，这里跟着窗口走）
     views.revokeLabel(windowKey(profile))
@@ -581,7 +737,7 @@ async function openProfileWindow(profile: string): Promise<void> {
   console.log(`[shell] 打开 profile 窗口：${profile}`)
   try {
     const svc = await ensureService(profile)
-    createProfileWindow(profile, svc)
+    await createProfileWindow(profile, svc)
     refreshTray()
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -590,11 +746,108 @@ async function openProfileWindow(profile: string): Promise<void> {
   }
 }
 
-/** 托盘「重启 dsh 服务」：杀掉宿主，守护器带着同一份运行时把它拉起来。 */
+let restartingShell = false
+
+/**
+ * #60 + #79：全壳统一的「重启 dsh 服务」入口——面板按钮、托盘重启、托盘切运行时都走这一条。
+ * 语义（维护者拍板）：DSH 侧等效「退出应用再启动」——宿主+伴生进程树整树灭确认后全新拉起；
+ * 桌面壳本体（托盘/进程）不退出。有窗口时：关窗 → 重启界面（复用冷启动 splash 通道，
+ * onStage 阶段照推）→ 服务面就绪后原样重开重启前开着的窗口；无窗口模式保持纯服务面重启。
+ */
+async function restartDsh(): Promise<void> {
+  if (restartingShell || quitting) return
+  restartingShell = true
+  try {
+    const restartProfiles = [...services.keys()]
+    const serviceCount = restartProfiles.length
+    // #79：重启前开着的窗口就绪后原样重开；没开的不趁机弹窗（关窗回托盘的语义）
+    const reopenProfiles = [...windows.keys()]
+    const showSplash = !noWindow && reopenProfiles.length > 0
+    console.log(`[shell] 完整重启：DSH 树级重启 ${String(serviceCount)} 份服务面（壳与托盘保持不动）`)
+    // ---- 阶段〇：关窗 → 重启界面（splash 复用冷启动通道：onStage/pushStage 写同一组模块变量）----
+    if (showSplash) {
+      splash = new BrowserWindow({
+        title: APP_NAME,
+        html: splashHtml(),
+        renderer: 'cef',
+        titleBarStyle: 'hiddenInset',
+        frame: { width: SPLASH_WIDTH, height: SPLASH_HEIGHT },
+      })
+      // 冷启动的 splash 早已收掉（主窗 dom-ready 收尾）；这里重新立一面。dom-ready 前不能推 JS
+      //（原生层 FATAL，见启动段注释），先记阶段，dom-ready 后补推。
+      splashReady = false
+      lastStage = 'instance'
+      splash.on('dom-ready', () => {
+        splashReady = true
+        pushStage()
+      })
+      for (const profile of reopenProfiles) {
+        // 关窗绕过关窗策略（回托盘/退进程的判断是给用户手关用的；重启关窗是壳自己的动作）
+        stoppingProfiles.add(profile)
+        windows.get(profile)?.window.close()
+      }
+      // close 事件异步落账（windows Map 清理在 close 回调里），等一拍再动服务面
+      await Bun.sleep(100)
+      for (const profile of reopenProfiles) stoppingProfiles.delete(profile)
+      windowVisible = false
+    }
+    // ---- 阶段一：树级停止（host.stop 树级契约：伴生进程随宿主退场，树灭确认后才返回）----
+    await Promise.all(
+      restartProfiles.map(async (profile) => {
+        const svc = services.get(profile)
+        if (svc === undefined) return
+        try {
+          await svc.stop()
+        } catch (error) {
+          console.error(`[shell] 完整重启：停止服务面失败（${profile}）：${String(error)}`)
+        }
+        services.delete(profile)
+      }),
+    )
+    // ---- 阶段二：全新服务面（新宿主、新 token）；重启前开着的窗口原样重开 ----
+    for (const profile of restartProfiles) {
+      const fresh = await ensureService(profile).catch(() => null)
+      if (fresh === null) {
+        console.error(`[shell] 完整重启：重启服务面失败（${profile}）`)
+        continue
+      }
+      if (profile === instanceProfile) {
+        // 启动 profile 的服务面引用要换新（uiService/托盘/实例锁都以它为事实源）
+        service = fresh
+        updateInstance(instanceFile, process.pid, { origin: fresh.state.origin, pageUrl: fresh.state.pageUrl })
+      }
+      if (reopenProfiles.includes(profile)) {
+        // 重开（createProfileWindow：几何记忆/关窗策略/RPC 全套语义重新接上；
+        // 启动 profile 的窗口 dom-ready 会收掉重启界面并回填 mainWindowReady）
+        try {
+          await createProfileWindow(profile, fresh)
+        } catch (error) {
+          console.error(`[shell] 完整重启：重开窗口失败（${profile}）：${String(error)}`)
+        }
+      } else {
+        reloadWindow(profile, fresh.state.pageUrl)
+      }
+    }
+    // ---- 收尾：重启界面收掉（启动 profile 窗口的 dom-ready 也会收，这里是兜底）----
+    if (showSplash) {
+      try {
+        splash?.close()
+      } catch {}
+      splash = null
+      splashReady = false
+    }
+    console.log(`[shell] 完整重启完成（服务面 ${String(serviceCount)} 份）`)
+  } finally {
+    restartingShell = false
+    refreshTray()
+  }
+}
+
+/** 托盘「重启 dsh 服务」：完整重启语义（#60）——等效退出应用再启动，伴生进程不跨重启残留。 */
 async function restartServiceFromTray(): Promise<void> {
   console.log('[shell] 托盘：重启 dsh 服务')
   try {
-    await uiService().restartHost()
+    await restartDsh()
   } catch (error) {
     console.error(`[shell] 重启 dsh 服务失败：${String(error)}`)
   }
@@ -612,16 +865,9 @@ async function switchRuntimeFromTray(action: TrayAction): Promise<void> {
   uiService().save(patch)
   refreshTray()
   try {
-    // 运行时是壳级设置：把所有已起的服务面都重启一遍（各自守护器带走新运行时）
-    await Promise.all(
-      [...services.values()].map(async (svc) => {
-        try {
-          await svc.restartHost()
-        } catch (error) {
-          console.error(`[shell] 重启服务面失败（${svc.paths.profile}）：${String(error)}`)
-        }
-      })
-    )
+    // #79（拍板 Q2）：切运行时与面板/托盘重启同一条 restartDsh——树级全重启 + splash UX，
+    // 不再是宿主级 restartHost（那条路留给守护器自愈）
+    await restartDsh()
   } catch (error) {
     console.error(`[shell] 切换运行时失败：${String(error)}`)
   }
@@ -800,17 +1046,22 @@ async function registerDshCliFromTray(): Promise<void> {
   }
   const result = await registerCli.register({ force })
   console.log(`[register] ${result.ok ? '注册成功' : '注册未完成'}：${result.message}`)
-  notifier.notify(
-    SCENARIO.REGISTER_CLI,
-    result.message,
-    result.ok
-      ? 'dsh 命令注册成功'
-      : result.code === 'canceled'
-        ? 'dsh 命令注册取消'
-        : result.code === 'conflict'
-          ? 'dsh 命令注册有冲突'
-          : 'dsh 命令注册失败',
-  )
+  try {
+    notifier.notify(
+      SCENARIO.REGISTER_CLI,
+      result.message,
+      result.ok
+        ? 'dsh 命令注册成功'
+        : result.code === 'canceled'
+          ? 'dsh 命令注册取消'
+          : result.code === 'conflict'
+            ? 'dsh 命令注册有冲突'
+            : 'dsh 命令注册失败',
+    )
+  } catch (error) {
+    // 通知挂了不能连累托盘刷新——「出错了但没有日志、菜单不更新」的嫌疑路径（#62 实测）
+    console.log(`[register] 通知投递失败：${error instanceof Error ? error.message : String(error)}`)
+  }
   // 菜单只走 setState 更新：refreshTray 内部已有「异步刷新完再 setState」的延时更新，
   // 这里不再额外 await/重复刷——菜单开着时多余的动作会把它顶掉（用户口径：拒绝所有菜单重建）
   refreshTray()
@@ -962,7 +1213,7 @@ if (!noWindow) {
   }
   // 标题栏形态与旧壳对齐：macOS 保留原生红绿灯并叠在内容上（旧壳 TitleBarStyle::Overlay），
   // Windows/Linux 隐藏原生标题栏，caption 行与窗口按钮由插件 client 自绘（旧壳 decorations:false）。
-  if (!startupBlocked) createProfileWindow(instanceProfile, service)
+  if (!startupBlocked) await createProfileWindow(instanceProfile, service)
   // 右键菜单里我们自己那几项（原生 role 由系统处理，不会回到这里）；
   // 多窗口下作用在「最近聚焦」那个窗口上。
   ContextMenu.on('context-menu-clicked', (event) => {
@@ -1043,8 +1294,16 @@ const shutdown = async (): Promise<void> => {
   // 托盘先摘：否则退出过程中它还会响菜单（点了就是另一个 shutdown）
   tray?.destroy()
   tray = null
-  for (const timer of frameSaveTimers.values()) clearTimeout(timer)
-  frameSaveTimers.clear()
+  // 挂起的几何定时器不丢：退出前把各窗当前态同步落盘（上次只 clear，最后 400ms 内的变动全丢）
+  for (const [timerProfile, timer] of frameSaveTimers) {
+    clearTimeout(timer)
+    frameSaveTimers.delete(timerProfile)
+    const win = windows.get(timerProfile)?.window
+    if (win === undefined) continue
+    try {
+      saveFrameNow(win, timerProfile)
+    } catch {}
+  }
   try {
     // 先摘服务面与宿主（SIGTERM → 宽限期 → SIGKILL，并等它真退出）再让框架退出；
     // 不能像以前那样发完信号就走——壳一退，宿主就被 launchd 收养，变成占着会话的孤儿。

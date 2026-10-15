@@ -44,6 +44,151 @@ __export(index_exports, {
 });
 module.exports = __toCommonJS(index_exports);
 
+// src/client/shell-rpc.ts
+var RPC_ENDPOINT = "/__shell__/rpc";
+var WINDOW_ENDPOINT = "/__shell__/window";
+var VIEW_TOKEN_HEADER = "x-dsh-shell-view";
+var DEFAULT_TIMEOUT_MS = 15e3;
+var MAX_ID = 1e10;
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function createShellRpc(deps) {
+  const readGlobals = deps?.readGlobals ?? (() => globalThis);
+  const fetchImpl = deps?.fetchImpl ?? ((...a) => fetch(...a));
+  const setTimeoutImpl = deps?.setTimeoutImpl ?? ((fn, ms) => setTimeout(fn, ms));
+  const clearTimeoutImpl = deps?.clearTimeoutImpl ?? ((t) => clearTimeout(t));
+  const pending = /* @__PURE__ */ new Map();
+  const messageListeners = /* @__PURE__ */ new Set();
+  let nextId = 0;
+  let receiveAttached = false;
+  function officialBridge() {
+    const post = readGlobals().__electrobunHostBridge?.postMessage;
+    return typeof post === "function" ? post : void 0;
+  }
+  function handlePacket(packet) {
+    if (!isRecord(packet)) return;
+    if (packet.type === "message") {
+      const name = typeof packet.id === "string" ? packet.id : "";
+      if (name === "") return;
+      for (const listener of messageListeners) {
+        try {
+          listener(name, packet.payload);
+        } catch (error) {
+          console.error("shell rpc message listener failed", error);
+        }
+      }
+      return;
+    }
+    if (packet.type !== "response") return;
+    const id = typeof packet.id === "number" ? packet.id : NaN;
+    const waiter = pending.get(id);
+    if (waiter === void 0) return;
+    pending.delete(id);
+    if (waiter.timer !== void 0) clearTimeoutImpl(waiter.timer);
+    if (packet.success === true) waiter.resolve(packet.payload);
+    else waiter.reject(new Error(typeof packet.error === "string" ? packet.error : "shell rpc failed"));
+  }
+  function ensureReceive() {
+    if (receiveAttached) return;
+    const g = readGlobals();
+    const eb = g.__electrobun;
+    if (!eb) return;
+    eb.receiveMessageFromHost = handlePacket;
+    receiveAttached = true;
+    const queued = g.__electrobunPendingHostMessages;
+    if (Array.isArray(queued)) {
+      g.__electrobunPendingHostMessages = [];
+      for (const packet of queued) handlePacket(packet);
+    }
+  }
+  function officialInvoke(cmd, args, options) {
+    const post = officialBridge();
+    if (post === void 0) return Promise.reject(new Error("official bridge unavailable"));
+    ensureReceive();
+    nextId = nextId < MAX_ID ? nextId + 1 : 1;
+    const id = nextId;
+    return new Promise((resolve, reject) => {
+      const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      const timer = setTimeoutImpl(() => {
+        pending.delete(id);
+        reject(new Error("RPC request timed out."));
+      }, timeoutMs);
+      pending.set(id, {
+        resolve: (value) => resolve(value),
+        reject,
+        timer
+      });
+      try {
+        post(JSON.stringify({ type: "request", id, method: cmd, params: args }));
+      } catch (error) {
+        pending.delete(id);
+        if (timer !== void 0) clearTimeoutImpl(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+  function relayInvoke(cmd, args) {
+    const invoke4 = readGlobals().__DSH_SHELL_RELAY__?.invoke;
+    if (typeof invoke4 !== "function") return Promise.reject(new Error("relay bridge unavailable"));
+    return invoke4(cmd, args);
+  }
+  async function fetchInvoke(cmd, args) {
+    const token = readGlobals().__DSH_SHELL_VIEW_TOKEN__;
+    let response;
+    try {
+      response = await fetchImpl(RPC_ENDPOINT, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...typeof token === "string" && token !== "" ? { [VIEW_TOKEN_HEADER]: token } : {} },
+        body: JSON.stringify({ cmd, args })
+      });
+    } catch (error) {
+      throw new Error(`shell rpc failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!response.ok) throw new Error(`shell rpc failed: ${String(response.status)}`);
+    const body = await response.json().catch(() => null);
+    if (body !== null && body.ok === true) return body.value;
+    throw new Error(typeof body?.error === "string" ? body.error : "shell rpc failed");
+  }
+  return {
+    invoke(cmd, args, options) {
+      const rest = isRecord(args) ? args : {};
+      if (officialBridge() !== void 0) return officialInvoke(cmd, rest, options);
+      if (typeof readGlobals().__DSH_SHELL_RELAY__?.invoke === "function") return relayInvoke(cmd, rest);
+      if (typeof readGlobals().__DSH_SHELL_VIEW_TOKEN__ === "string") return fetchInvoke(cmd, rest);
+      return Promise.reject(new Error("shell rpc unavailable"));
+    },
+    onMessage(listener) {
+      messageListeners.add(listener);
+      return () => {
+        messageListeners.delete(listener);
+      };
+    },
+    available() {
+      const g = readGlobals();
+      return officialBridge() !== void 0 || typeof g.__DSH_SHELL_RELAY__?.invoke === "function" || typeof g.__DSH_SHELL_VIEW_TOKEN__ === "string";
+    }
+  };
+}
+var shellRpc = createShellRpc();
+async function sendWindowAction(action, deps) {
+  const method = { minimize: "window_minimize", "toggle-maximize": "window_toggle_maximize", close: "window_close" }[action];
+  const rpc = deps?.rpc ?? shellRpc;
+  const readGlobals = deps?.readGlobals ?? (() => globalThis);
+  if (typeof readGlobals().__electrobunHostBridge?.postMessage === "function") {
+    await rpc.invoke(method, {}, { timeoutMs: 3e4 });
+    return;
+  }
+  const fetchImpl = deps?.fetchImpl ?? ((...a) => fetch(...a));
+  const token = readGlobals().__DSH_SHELL_VIEW_TOKEN__;
+  const response = await fetchImpl(WINDOW_ENDPOINT, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...typeof token === "string" && token !== "" ? { [VIEW_TOKEN_HEADER]: token } : {} },
+    body: JSON.stringify({ action })
+  });
+  if (!response.ok) throw new Error(`window action failed: ${String(response.status)}`);
+}
+
 // src/client/local-chrome.ts
 var STRIP_HEIGHT = {
   darwin: 28,
@@ -53,24 +198,16 @@ var STRIP_HEIGHT = {
 var TRAFFIC_LIGHT_BAND = 76;
 var CAPTION_CONTROLS_WIDTH = 138;
 var FRAME_LAYER_SELECTOR = "[data-shell-overlay]";
-function tauriWindowCommand(command) {
-  try {
-    const internals2 = window.__TAURI_INTERNALS__;
-    if (internals2?.invoke !== void 0) void internals2.invoke(command).catch(() => void 0);
-  } catch {
-  }
+function runWindowAction(action) {
+  sendWindowAction(action).catch((error) => console.error("[dsh-desktop] window action failed", error));
 }
-function sendWindowAction(action) {
-  const tauri = { minimize: "plugin:window|minimize", "toggle-maximize": "plugin:window|toggle_maximize", close: "plugin:window|close" }[action];
-  const internals2 = window.__TAURI_INTERNALS__;
-  if (internals2?.invoke !== void 0) {
-    tauriWindowCommand(tauri);
-    return;
-  }
-  void fetch("/__shell__/window", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action })
+var maximizeIconSvg = (maximized) => maximized ? '<rect x="1.5" y="4.5" width="7" height="6" stroke="currentColor" strokeWidth="1" fill="none" /><path d="M3.5 4.5V2.5H10.5V9H8.5" stroke="currentColor" strokeWidth="1" fill="none" />' : '<rect x="1.5" y="1.5" width="9" height="9" stroke="currentColor" strokeWidth="1" fill="none" />';
+function syncMaximizeIcon() {
+  const button = document.querySelector(".dshDesktopCaptionButton-maximize");
+  if (button === null) return;
+  shellRpc.invoke("window_get_state", void 0, { timeoutMs: 5e3 }).then((state) => {
+    button.innerHTML = `<svg viewBox="0 0 12 12" aria-hidden="true">${maximizeIconSvg(state.maximized)}</svg>`;
+    button.setAttribute("aria-label", state.maximized ? "\u8FD8\u539F" : "\u6700\u5927\u5316");
   }).catch(() => void 0);
 }
 function makeCaptionButton(aria, extraClass, svgPath) {
@@ -81,19 +218,36 @@ function makeCaptionButton(aria, extraClass, svgPath) {
   button.innerHTML = `<svg viewBox="0 0 12 12" aria-hidden="true">${svgPath}</svg>`;
   return button;
 }
-function buildWindowControls() {
+function buildWindowControls(platform) {
   const box = document.createElement("div");
   box.className = "dshDesktopWindowControls";
   box.appendChild(makeCaptionButton("\u6700\u5C0F\u5316", "", '<path d="M1 6h10" stroke="currentColor" strokeWidth="1" fill="none" />'));
-  box.appendChild(makeCaptionButton("\u6700\u5927\u5316", "", '<rect x="1.5" y="1.5" width="9" height="9" stroke="currentColor" strokeWidth="1" fill="none" />'));
+  box.appendChild(makeCaptionButton("\u6700\u5927\u5316", "dshDesktopCaptionButton-maximize", maximizeIconSvg(false)));
   box.appendChild(makeCaptionButton("\u5173\u95ED", "dshDesktopCaptionButton-close", '<path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1" />'));
   box.addEventListener("click", (event) => {
     const button = event.target.closest("button");
     const action = button?.getAttribute("aria-label");
-    if (action === "\u6700\u5C0F\u5316") sendWindowAction("minimize");
-    else if (action === "\u6700\u5927\u5316") sendWindowAction("toggle-maximize");
-    else if (action === "\u5173\u95ED") sendWindowAction("close");
+    if (action === "\u6700\u5C0F\u5316") runWindowAction("minimize");
+    else if (action === "\u6700\u5927\u5316" || action === "\u8FD8\u539F") {
+      runWindowAction("toggle-maximize");
+      syncMaximizeIcon();
+    } else if (action === "\u5173\u95ED") runWindowAction("close");
   });
+  if (platform !== "darwin") {
+    syncMaximizeIcon();
+    shellRpc.onMessage((name) => {
+      if (name === "window_state_changed") syncMaximizeIcon();
+    });
+    let resizeTimer = 0;
+    window.addEventListener("resize", () => {
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(syncMaximizeIcon, 200);
+    });
+    window.addEventListener("focus", () => syncMaximizeIcon());
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") syncMaximizeIcon();
+    });
+  }
   return box;
 }
 function locateLayout() {
@@ -111,10 +265,10 @@ function installLocalChrome(platform) {
   strip.className = "dshDesktopChromeStrip";
   const drag = document.createElement("div");
   drag.className = "dshDesktopChromeDrag";
-  drag.setAttribute("data-tauri-drag-region", "");
   drag.classList.add("electrobun-webkit-app-region-drag");
+  if (platform !== "darwin") drag.addEventListener("dblclick", () => runWindowAction("toggle-maximize"));
   strip.appendChild(drag);
-  if (platform !== "darwin") strip.appendChild(buildWindowControls());
+  if (platform !== "darwin") strip.appendChild(buildWindowControls(platform));
   host.appendChild(strip);
   document.body.appendChild(host);
   const STATUS_BAR_HEIGHT = 24;
@@ -138,12 +292,6 @@ function installLocalChrome(platform) {
     6: "#ef4444",
     7: "#3b82f6"
   };
-  function tauriInvoke2() {
-    const w = window;
-    if (w.__TAURI__?.core?.invoke) return w.__TAURI__.core.invoke;
-    if (w.__TAURI_INTERNALS__?.invoke) return w.__TAURI_INTERNALS__.invoke;
-    return void 0;
-  }
   let raf = 0;
   let attempts = 0;
   let mountTimer = 0;
@@ -157,9 +305,8 @@ function installLocalChrome(platform) {
   bar.innerHTML = '<span class="dshDesktopStatusDot" aria-hidden="true"></span><span class="dshDesktopStatusText"></span>';
   host.appendChild(bar);
   const refreshStatus = () => {
-    const invoke6 = tauriInvoke2();
-    if (!invoke6) return;
-    void invoke6("get_dsh_status", {}).then((value) => {
+    if (!shellRpc.available()) return;
+    void shellRpc.invoke("get_dsh_status", {}).then((value) => {
       const s = value.status;
       if (typeof s !== "number") return;
       currentStatus = s;
@@ -219,13 +366,12 @@ function installLocalChrome(platform) {
           close();
           return;
         }
-        const invoke6 = tauriInvoke2();
-        if (!invoke6) {
+        if (!shellRpc.available()) {
           close();
           return;
         }
         btn.disabled = true;
-        void invoke6("exit_window_instance", {}).then(() => close()).catch((err) => {
+        void shellRpc.invoke("exit_window_instance", {}).then(() => close()).catch((err) => {
           bodyEl.textContent = `\u9000\u51FA\u5931\u8D25\uFF1A${String(err)}`;
           bodyEl.style.color = "#ef4444";
           btn.disabled = false;
@@ -494,16 +640,6 @@ var import_jsx_runtime = require("react/jsx-runtime");
 var DownloadIcon = import_dsh_client_ui_primitives.IconDownloadOutline16 ?? import_dsh_client_ui_primitives.IconDownloadOutlineRegular;
 var TAB_ID = "dsh-desktop-tauriapp/downloads";
 var TAB_KIND = "dsh-desktop-tauriapp/downloads";
-function invoke(cmd, args) {
-  const w = window;
-  if (w.__TAURI_INTERNALS__?.invoke) return w.__TAURI_INTERNALS__.invoke(cmd, args);
-  if (w.__TAURI__?.core?.invoke) return w.__TAURI__?.core.invoke(cmd, args);
-  return Promise.reject(new Error("no tauri ipc"));
-}
-function hasIpc() {
-  const w = window;
-  return Boolean(w.__TAURI_INTERNALS__?.invoke || w.__TAURI__?.core?.invoke);
-}
 function fmtBytes(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -529,8 +665,8 @@ function DownloadsPanel() {
     let alive = true;
     const refresh = async () => {
       try {
-        const list = await invoke("list_downloads");
-        const settings = await invoke("get_download_settings");
+        const list = await shellRpc.invoke("list_downloads");
+        const settings = await shellRpc.invoke("get_download_settings");
         if (!alive) return;
         setTasks(list);
         setConcurrency(settings.concurrency);
@@ -553,7 +689,7 @@ function DownloadsPanel() {
   const act = async (cmd, args) => {
     setBusy(true);
     try {
-      await invoke(cmd, args);
+      await shellRpc.invoke(cmd, args);
     } catch {
     } finally {
       setBusy(false);
@@ -656,8 +792,8 @@ function DownloadsHeaderButton() {
 }
 var headerOpenAction = null;
 function registerDownloadsTab(ctx) {
-  if (!hasIpc()) {
-    ctx?.logger?.warn?.("downloads-tab: \u65E0 Tauri IPC\uFF08\u7EAF\u6D4F\u89C8\u5668\uFF09\uFF0C\u8DF3\u8FC7\u6CE8\u518C");
+  if (!shellRpc.available()) {
+    ctx?.logger?.warn?.("downloads-tab: \u65E0\u58F3\u901A\u9053\uFF08\u7EAF\u6D4F\u89C8\u5668\uFF09\uFF0C\u8DF3\u8FC7\u6CE8\u518C");
     return;
   }
   const root = ctx;
@@ -730,16 +866,6 @@ function registerDownloadsTab(ctx) {
 }
 
 // src/client/download-intercept.ts
-function invoke2(cmd, args) {
-  const w = window;
-  if (w.__TAURI_INTERNALS__?.invoke) return w.__TAURI_INTERNALS__.invoke(cmd, args);
-  if (w.__TAURI__?.core?.invoke) return w.__TAURI__?.core.invoke(cmd, args);
-  return Promise.reject(new Error("no tauri ipc"));
-}
-function hasIpc2() {
-  const w = window;
-  return Boolean(w.__TAURI_INTERNALS__?.invoke || w.__TAURI__?.core?.invoke);
-}
 function interceptKind(href, hasDownloadAttr) {
   if (!hasDownloadAttr || href === null) return null;
   const trimmed = href.trim();
@@ -775,7 +901,7 @@ async function waitPathChosen(id, signal) {
   for (let i = 0; i < 600; i++) {
     if (signal.aborted) return false;
     try {
-      const tasks = await invoke2("list_downloads");
+      const tasks = await shellRpc.invoke("list_downloads");
       const t = tasks.find((x) => x.id === id);
       if (t === void 0) return false;
       if (t.status === "downloading") return true;
@@ -788,7 +914,7 @@ async function waitPathChosen(id, signal) {
   return false;
 }
 function installDownloadInterceptor() {
-  if (!hasIpc2()) return;
+  if (!shellRpc.available()) return;
   if (window.__dshDownloadsIntercept === true) return;
   window.__dshDownloadsIntercept = true;
   document.addEventListener(
@@ -819,17 +945,17 @@ async function transferBlobToShell(href, filename) {
     const resp = await fetch(href);
     if (!resp.ok) throw new Error(`fetch ${href} -> ${resp.status}`);
     const blob = await resp.blob();
-    const id = await invoke2("start_blob_download", { filename, total: blob.size });
+    const id = await shellRpc.invoke("start_blob_download", { filename, total: blob.size });
     if (id === null || id === void 0) return;
     const signal = { aborted: false };
     if (!await waitPathChosen(id, signal)) return;
     for (let offset = 0; offset < blob.size; offset += CHUNK_BYTES) {
       const chunk = blob.slice(offset, offset + CHUNK_BYTES);
       const b64 = base64Of(await chunk.arrayBuffer());
-      const ok = await invoke2("save_blob_chunk", { id, chunk: b64 });
+      const ok = await shellRpc.invoke("save_blob_chunk", { id, chunk: b64 });
       if (!ok) return;
     }
-    await invoke2("finish_blob_download", { id });
+    await shellRpc.invoke("finish_blob_download", { id });
   } catch (err) {
     console.warn("[dsh-desktop] blob \u4E0B\u8F7D\u8F6C\u4EA4\u5931\u8D25\uFF1A", err);
   }
@@ -837,21 +963,15 @@ async function transferBlobToShell(href, filename) {
 async function transferUrlToShell(href, filename) {
   try {
     const url = new URL(href, typeof location !== "undefined" ? location.href : void 0).href;
-    await invoke2("start_url_download", { url, filename });
+    await shellRpc.invoke("start_url_download", { url, filename });
   } catch (err) {
     console.warn("[dsh-desktop] URL \u4E0B\u8F7D\u8F6C\u4EA4\u5931\u8D25\uFF1A", err);
   }
 }
 
 // src/client/desktop-browser-bridge.ts
-function internals() {
-  const w = window;
-  return w.__TAURI_INTERNALS__;
-}
-function invoke3(cmd, args) {
-  const i = internals();
-  if (!i?.invoke) return Promise.reject(new Error("no-tauri-ipc"));
-  return i.invoke(cmd, args, void 0);
+function invoke(cmd, args) {
+  return shellRpc.invoke(cmd, args);
 }
 var mirrors = /* @__PURE__ */ new Map();
 var openListeners = /* @__PURE__ */ new Map();
@@ -927,11 +1047,11 @@ function applyPush(push) {
 }
 function patchElement(el, lease, m) {
   const fireAndForget = (cmd, args) => {
-    void invoke3(cmd, args).catch((e) => {
+    void invoke(cmd, args).catch((e) => {
       console.error("[desktop-browser-bridge] \u547D\u4EE4\u5931\u8D25", cmd, e);
     });
   };
-  el.loadURL = (url) => invoke3("browser_guest_navigate", { lease, url }).then(
+  el.loadURL = (url) => invoke("browser_guest_navigate", { lease, url }).then(
     () => void 0,
     (e) => {
       throw e;
@@ -971,7 +1091,7 @@ function installTagObserver() {
       const rectVisible = r.width > 1 && r.height > 1;
       const shouldShow = rectVisible && !m.overlayHidden;
       if (rectVisible) {
-        void invoke3("browser_guest_set_bounds", {
+        void invoke("browser_guest_set_bounds", {
           lease,
           x: r.x,
           y: r.y,
@@ -982,7 +1102,7 @@ function installTagObserver() {
       }
       if (shouldShow !== m.shown) {
         m.shown = shouldShow;
-        void invoke3("browser_guest_set_visible", { lease, visible: shouldShow }).catch(() => {
+        void invoke("browser_guest_set_visible", { lease, visible: shouldShow }).catch(() => {
         });
       }
     };
@@ -1014,7 +1134,7 @@ function installTagObserver() {
     window.addEventListener("resize", scheduleRect);
     const dialogMo = new MutationObserver(recomputeOverlay);
     dialogMo.observe(document.body, { childList: true, subtree: true });
-    void invoke3("browser_guest_state", { lease }).then((snap) => {
+    void invoke("browser_guest_state", { lease }).then((snap) => {
       m.url = snap.url;
       m.title = snap.title;
       m.loading = snap.loading;
@@ -1042,7 +1162,7 @@ function installDesktopBrowserBridge() {
   const impl = {
     acquire(workspace) {
       const key = typeof workspace === "string" ? workspace : String(workspace ?? "");
-      return invoke3("browser_guest_acquire", { workspaceKey: key }).then(
+      return invoke("browser_guest_acquire", { workspaceKey: key }).then(
         (res) => {
           mirrorOf(res.lease);
           return res;
@@ -1057,7 +1177,7 @@ function installDesktopBrowserBridge() {
         mirrors.delete(lease);
       }
       openListeners.delete(lease);
-      return invoke3("browser_guest_release", { lease }).then(
+      return invoke("browser_guest_release", { lease }).then(
         () => void 0,
         (e) => {
           console.error("[desktop-browser-bridge] guest release \u5931\u8D25", e);
@@ -1080,7 +1200,7 @@ function installDesktopBrowserBridge() {
   g.__dshShellBridgeImpl = impl;
   installTagObserver();
   window.addEventListener("pagehide", () => {
-    void invoke3("browser_guest_release_all", {}).catch(() => {
+    void invoke("browser_guest_release_all", {}).catch(() => {
     });
   });
 }
@@ -1255,18 +1375,43 @@ function ThemeSelect({ value, options, onChange, placeholder, style, disabled })
   ] });
 }
 
+// src/client/devtools-toggle.ts
+function planDevToolsUi(current, next) {
+  if (current === next) return { action: "idle" };
+  return { action: next ? "confirm-on" : "confirm-off" };
+}
+function devToolsConfirmCopy() {
+  return {
+    title: "\u5F00\u542F\u5F00\u53D1\u8005\u5DE5\u5177\uFF1F",
+    lines: [
+      "\u5F00\u542F\u540E\uFF0C\u684C\u9762\u58F3\u4F1A\u5728\u672C\u673A\u56DE\u73AF\u5730\u5740\u76D1\u542C\u4E00\u4E2A\u8FDC\u7A0B\u8C03\u8BD5\u53E3\uFF0C\u53F3\u952E\u83DC\u5355\u51FA\u73B0\u300C\u6253\u5F00 DevTools\u300D\u3002",
+      "\u672C\u673A\u4E0A\u7684\u4EFB\u4F55\u7A0B\u5E8F\u90FD\u80FD\u501F\u8FD9\u4E2A\u53E3\u5728\u9875\u9762\u91CC\u6267\u884C\u4EFB\u610F\u4EE3\u7801\u3001\u8BFB\u53D6\u4F1A\u8BDD\u5185\u5BB9\uFF08\u542B\u767B\u5F55\u51ED\u636E\uFF09\u3002",
+      "\u53EA\u5728\u81EA\u5DF1\u9700\u8981\u6392\u67E5\u95EE\u9898\u65F6\u5F00\u542F\uFF1B\u7528\u5B8C\u5728\u8BBE\u7F6E\u91CC\u5173\u6389\u5E76\u91CD\u542F\u684C\u9762\u58F3\u3002"
+    ],
+    confirm: "\u786E\u8BA4\u5F00\u542F\u5E76\u91CD\u542F",
+    cancel: "\u53D6\u6D88"
+  };
+}
+function devToolsDisableCopy() {
+  return {
+    title: "\u5173\u95ED\u5F00\u53D1\u8005\u5DE5\u5177\uFF1F",
+    lines: [
+      "\u786E\u8BA4\u540E\u684C\u9762\u58F3\u5C06\u91CD\u542F\uFF1A\u8FDC\u7A0B\u8C03\u8BD5\u53E3\u5173\u95ED\u3001\u53F3\u952E\u83DC\u5355\u300C\u6253\u5F00 DevTools\u300D\u6D88\u5931\u3002",
+      "\u91CD\u542F\u671F\u95F4\u9875\u9762\u4F1A\u77ED\u6682\u4E2D\u65AD\u3002"
+    ],
+    confirm: "\u786E\u8BA4\u5173\u95ED\u5E76\u91CD\u542F",
+    cancel: "\u53D6\u6D88"
+  };
+}
+function devToolsSavedNote(on) {
+  return on ? "\u5DF2\u5F00\u542F\uFF1A\u6B63\u5728\u91CD\u542F\u684C\u9762\u58F3\uFF0C\u91CD\u542F\u540E\u8C03\u8BD5\u53E3\u4E0E\u53F3\u952E\u83DC\u5355\u300C\u6253\u5F00 DevTools\u300D\u751F\u6548\u3002" : "\u5DF2\u5173\u95ED\uFF1A\u6B63\u5728\u91CD\u542F\u684C\u9762\u58F3\uFF0C\u91CD\u542F\u540E\u8C03\u8BD5\u53E3\u5173\u95ED\u3001\u83DC\u5355\u6D88\u5931\u3002";
+}
+
 // src/client/desktop-settings.tsx
 var import_jsx_runtime3 = require("react/jsx-runtime");
 var nsRpc = null;
-function hasIpc3() {
-  const w = window;
-  return Boolean(w.__TAURI_INTERNALS__?.invoke || w.__TAURI__?.core?.invoke);
-}
-function invoke4(cmd, args) {
-  const w = window;
-  if (w.__TAURI_INTERNALS__?.invoke) return w.__TAURI_INTERNALS__.invoke(cmd, args);
-  if (w.__TAURI__?.core?.invoke) return w.__TAURI__?.core.invoke(cmd, args);
-  return Promise.reject(new Error("no tauri ipc"));
+function invoke2(cmd, args) {
+  return shellRpc.invoke(cmd, args);
 }
 function fmtBytes2(bytes) {
   if (bytes === null || !Number.isFinite(bytes) || bytes <= 0) return "";
@@ -1344,6 +1489,30 @@ var INPUT_BASE_STYLE = {
 var INPUT_FULL_STYLE = { ...INPUT_BASE_STYLE, width: "100%", boxSizing: "border-box" };
 var ROW_STYLE = { display: "flex", gap: 8, alignItems: "center" };
 var FLEX_1_STYLE = { flex: 1 };
+var DEV_TOOLS_OVERLAY_STYLE = {
+  position: "fixed",
+  inset: 0,
+  zIndex: 2147483e3,
+  background: "rgba(0,0,0,0.45)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center"
+};
+var DEV_TOOLS_MODAL_STYLE = {
+  background: "var(--dsw-alias-bg-layer-1,#1e1e1e)",
+  border: "1px solid var(--dsw-alias-border-l2,#444)",
+  borderRadius: 12,
+  padding: "18px 20px",
+  minWidth: 320,
+  maxWidth: "80vw",
+  boxShadow: "0 12px 40px rgba(0,0,0,0.4)",
+  color: "var(--dsw-alias-label-primary,#eee)"
+};
+var DEV_TOOLS_TITLE_STYLE = { fontSize: 14, fontWeight: 600, marginBottom: 10 };
+var DEV_TOOLS_BODY_STYLE = { fontSize: 12.5, lineHeight: 1.6, color: "var(--dsw-alias-label-secondary,#bbb)" };
+var DEV_TOOLS_ACTIONS_STYLE = { display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 };
+var DEV_TOOLS_CONFIRM = devToolsConfirmCopy();
+var DEV_TOOLS_DISABLE = devToolsDisableCopy();
 var BTN_PRIMARY_STYLE = {
   background: "var(--dsw-alias-brand-primary-new-color,#4176e6)",
   border: "none",
@@ -1370,10 +1539,10 @@ var DANGER_NOTE_STYLE = {
   color: "var(--dsw-alias-state-danger-primary,#e5534b)"
 };
 async function nsSave(patch) {
-  await invoke4("save_desktop_settings", { patch });
+  await invoke2("save_desktop_settings", { patch });
 }
 async function nsGet() {
-  const d = await invoke4("get_desktop_settings_data");
+  const d = await invoke2("get_desktop_settings_data");
   return d.settings && typeof d.settings === "object" ? d.settings : {};
 }
 function normalizeRemote(input) {
@@ -1476,14 +1645,40 @@ function DesktopSettingsPanel() {
   const concurrencyTouchedRef = (0, import_react3.useRef)(false);
   const [muxHeartbeatInput, setMuxHeartbeatInput] = (0, import_react3.useState)("30000");
   const [desktopLayoutOnPhones, setDesktopLayoutOnPhones] = (0, import_react3.useState)(false);
+  const [devToolsConfirmKind, setDevToolsConfirmKind] = (0, import_react3.useState)(null);
+  const [devTools, setDevTools] = (0, import_react3.useState)(false);
+  const [devToolsNote, setDevToolsNote] = (0, import_react3.useState)(null);
   const [preventSleep, setPreventSleep] = (0, import_react3.useState)(true);
   const [preventSleepNote, setPreventSleepNote] = (0, import_react3.useState)(null);
   (0, import_react3.useEffect)(() => {
     setDesktopLayoutOnPhones(desktop.desktop_layout_on_phones === true);
     setPreventSleep(desktop.prevent_sleep !== false);
+    setDevTools(desktop.dev_tools === true);
     const hb = desktop.mux_heartbeat_ms;
     setMuxHeartbeatInput(typeof hb === "number" ? String(hb) : "30000");
   }, [desktop]);
+  const handleToggleDevTools = (next) => {
+    const plan = planDevToolsUi(devTools, next);
+    if (plan.action === "idle") return;
+    setDevToolsConfirmKind(plan.action === "confirm-on" ? "on" : "off");
+  };
+  const saveDevToolsSetting = (on) => {
+    setDevToolsConfirmKind(null);
+    setDevTools(on);
+    void nsSave({ dev_tools: on }).then(() => invoke2("restart_dsh_service").catch(() => void 0)).then(() => setDevToolsNote(devToolsSavedNote(on))).catch((e) => {
+      setDevTools(!on);
+      setDevToolsNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`);
+    });
+  };
+  (0, import_react3.useEffect)(() => {
+    if (devToolsConfirmKind === null) return;
+    const onKey = (e) => {
+      if (e.key === "Escape") setDevToolsConfirmKind(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [devToolsConfirmKind]);
+  const devToolsActiveConfirm = devToolsConfirmKind === "off" ? DEV_TOOLS_DISABLE : DEV_TOOLS_CONFIRM;
   const [testResult, setTestResult] = (0, import_react3.useState)(null);
   const [testBusy, setTestBusy] = (0, import_react3.useState)(false);
   const [profilePorts, setProfilePorts] = (0, import_react3.useState)([]);
@@ -1507,7 +1702,7 @@ function DesktopSettingsPanel() {
   const [depError, setDepError] = (0, import_react3.useState)(null);
   const refreshDepStatus = (0, import_react3.useCallback)(async () => {
     try {
-      const r = await invoke4("list_profile_dependency_status");
+      const r = await invoke2("list_profile_dependency_status");
       setDepProfiles(r?.profiles ?? []);
     } catch (err) {
       console.error("[desktop-settings] list_profile_dependency_status \u5931\u8D25\uFF1A", err);
@@ -1522,7 +1717,7 @@ function DesktopSettingsPanel() {
     if (depRebuilding) return;
     setDepRebuilding(profile);
     setDepNote(`${profile}\uFF1A\u4F9D\u8D56\u91CD\u5EFA\u4E2D\uFF08\u7528\u5185\u7F6E pnpm \u91CD\u88C5\uFF0C\u53EF\u80FD\u9700\u8981\u51E0\u5206\u949F\uFF09\u2026`);
-    void invoke4("rebuild_profile_dependencies", { profile }).then(() => {
+    void invoke2("rebuild_profile_dependencies", { profile }).then(() => {
       setDepNote(`${profile}\uFF1A\u4F9D\u8D56\u5DF2\u91CD\u5EFA\uFF0C\u91CD\u542F\u8BE5 profile \u540E\u751F\u6548\u3002`);
       return refreshDepStatus();
     }).catch((err) => setDepNote(`${profile}\uFF1A\u91CD\u5EFA\u5931\u8D25 \u2014\u2014 ${String(err)}`)).finally(() => setDepRebuilding(null));
@@ -1534,14 +1729,14 @@ function DesktopSettingsPanel() {
   const [updateState, setUpdateState] = (0, import_react3.useState)(null);
   const updateBusy = updateState !== null && (updateState.view.phase === "checking" || updateState.view.phase === "downloading" || updateState.view.phase === "preparing");
   const runUpdate = (cmd) => {
-    void invoke4(cmd).then((snapshot) => {
+    void invoke2(cmd).then((snapshot) => {
       setUpdateState(snapshot);
       showToast(snapshot.view.label, snapshot.view.phase !== "error");
     }).catch((e) => showToast(`\u66F4\u65B0\u5931\u8D25\uFF1A${String(e)}`, false));
   };
   (0, import_react3.useEffect)(() => {
     let cancelled = false;
-    void invoke4("get_update_state").then((snapshot) => {
+    void invoke2("get_update_state").then((snapshot) => {
       if (!cancelled) setUpdateState(snapshot);
     }).catch(() => {
     });
@@ -1552,7 +1747,7 @@ function DesktopSettingsPanel() {
   (0, import_react3.useEffect)(() => {
     if (!updateBusy) return;
     const timer = setInterval(() => {
-      void invoke4("get_update_state").then(setUpdateState).catch(() => {
+      void invoke2("get_update_state").then(setUpdateState).catch(() => {
       });
     }, 1e3);
     return () => clearInterval(timer);
@@ -1563,7 +1758,7 @@ function DesktopSettingsPanel() {
   const [taskInfo, setTaskInfo] = (0, import_react3.useState)(null);
   (0, import_react3.useEffect)(() => {
     const timer = setInterval(() => {
-      void invoke4("task_status").then((t) => {
+      void invoke2("task_status").then((t) => {
         if (t.running || t.finished) setTaskInfo(t);
       }).catch(() => {
       });
@@ -1574,7 +1769,7 @@ function DesktopSettingsPanel() {
     ensureStyles();
   }, []);
   (0, import_react3.useEffect)(() => {
-    void invoke4("runtime_download_status").then((s) => {
+    void invoke2("runtime_download_status").then((s) => {
       if (s.active && s.version) {
         setRuntimeDownloading((prev) => ({ ...prev, [s.version]: "downloading" }));
       }
@@ -1587,11 +1782,11 @@ function DesktopSettingsPanel() {
       try {
         const [ns, p, d] = await Promise.all([
           nsGet(),
-          invoke4("get_proxy_settings"),
-          invoke4("get_desktop_settings_data")
+          invoke2("get_proxy_settings"),
+          invoke2("get_desktop_settings_data")
         ]);
         if (cancelled) return;
-        void invoke4("get_diagnostics").then((r) => {
+        void invoke2("get_diagnostics").then((r) => {
           if (cancelled) return;
           const summary = r.diagnostics?.summary;
           if (typeof summary === "string" && summary !== "") setDiagSummary(summary);
@@ -1651,7 +1846,7 @@ function DesktopSettingsPanel() {
   const refreshSource = (0, import_react3.useCallback)(async () => {
     setSourceError(null);
     try {
-      const s = await invoke4("get_dsh_source");
+      const s = await invoke2("get_dsh_source");
       setSourceState(s);
     } catch (err) {
       setSourceError(String(err));
@@ -1661,7 +1856,7 @@ function DesktopSettingsPanel() {
     void refreshSource();
   }, [refreshSource]);
   (0, import_react3.useEffect)(() => {
-    invoke4("get_download_settings").then((s) => {
+    invoke2("get_download_settings").then((s) => {
       if (!concurrencyTouchedRef.current) setConcurrencyInput(String(s.concurrency));
     }).catch(() => {
     });
@@ -1670,7 +1865,7 @@ function DesktopSettingsPanel() {
     let cancelled = false;
     let attempt = 0;
     const load = () => {
-      invoke4("list_profile_ports").then((rows) => {
+      invoke2("list_profile_ports").then((rows) => {
         if (cancelled) return;
         setProfilePorts(rows);
         setProfilePortsStatus({ state: "ok" });
@@ -1696,7 +1891,7 @@ function DesktopSettingsPanel() {
   const refreshRuntimes = (0, import_react3.useCallback)(async () => {
     setRuntimeStatus({ state: "loading", text: "\u8BFB\u53D6\u7248\u672C\u76EE\u5F55\u4E2D\u2026" });
     try {
-      const s = await invoke4("list_runtime_catalog", { source: runtimeSource });
+      const s = await invoke2("list_runtime_catalog", { source: runtimeSource });
       setRuntimeCatalog(s);
       setRuntimeStatus(
         s.error ? { state: "error", text: `\u76EE\u5F55\u62C9\u53D6\u5931\u8D25\uFF1A${s.error}\uFF08\u4EC5\u663E\u793A\u5DF2\u4E0B\u8F7D\u7248\u672C\uFF09` } : { state: "ok" }
@@ -1714,7 +1909,7 @@ function DesktopSettingsPanel() {
     let cancelled = false;
     const tick = async () => {
       try {
-        const st = await invoke4("migration_status");
+        const st = await invoke2("migration_status");
         if (cancelled) return;
         if (st.running) {
           setMigrationProgress({ copied: st.copied, total: st.total });
@@ -1734,7 +1929,7 @@ function DesktopSettingsPanel() {
     void (async () => {
       try {
         await nsSave({ remote_addr: addr });
-        await invoke4("restart_dsh_service");
+        await invoke2("restart_dsh_service");
         setMsg({ ok: true, text: "\u5DF2\u5207\u6362 dsh \u670D\u52A1\u6765\u6E90\uFF0C\u6B63\u5728\u91CD\u542F\u2026" });
       } catch (err) {
         setMsg({ ok: false, text: `\u5207\u6362\u5931\u8D25\uFF1A${String(err)}` });
@@ -1782,7 +1977,7 @@ function DesktopSettingsPanel() {
     void (async () => {
       try {
         await nsSave({ active_profile: name });
-        await invoke4("restart_dsh_service");
+        await invoke2("restart_dsh_service");
         setMsg({ ok: true, text: `\u5DF2\u5207\u6362\u5230 Profile\u300C${name}\u300D\uFF0C\u6B63\u5728\u91CD\u542F\u2026` });
       } catch (err) {
         setMsg({ ok: false, text: `\u5207\u6362 Profile \u5931\u8D25\uFF1A${String(err)}` });
@@ -1822,7 +2017,7 @@ function DesktopSettingsPanel() {
   };
   const handleSaveConcurrency = () => {
     const v = Math.max(1, Math.min(32, parseInt(concurrencyInput, 10) || 3));
-    void nsSave({ download_concurrency: v }).then(() => invoke4("set_download_concurrency", { value: v })).then(() => setDownloadBoxNote(`\u5DF2\u4FDD\u5B58\uFF1A\u5E76\u53D1\u4E0A\u9650 ${v}`)).catch(() => setDownloadBoxNote("\u4FDD\u5B58\u5931\u8D25\uFF08\u65E0 Tauri IPC\uFF1F\uFF09"));
+    void nsSave({ download_concurrency: v }).then(() => invoke2("set_download_concurrency", { value: v })).then(() => setDownloadBoxNote(`\u5DF2\u4FDD\u5B58\uFF1A\u5E76\u53D1\u4E0A\u9650 ${v}`)).catch(() => setDownloadBoxNote("\u4FDD\u5B58\u5931\u8D25\uFF08\u65E0 Tauri IPC\uFF1F\uFF09"));
   };
   const handleSaveMuxHeartbeat = () => {
     const raw = muxHeartbeatInput.trim();
@@ -1879,7 +2074,7 @@ function DesktopSettingsPanel() {
     setTestResult(null);
     void (async () => {
       try {
-        const ms = await invoke4("test_proxy_connectivity", { url: proxy.proxy_url });
+        const ms = await invoke2("test_proxy_connectivity", { url: proxy.proxy_url });
         setTestResult(`\u8FDE\u63A5\u6210\u529F\uFF08${ms}ms\uFF09`);
       } catch (err) {
         setTestResult(`\u8FDE\u63A5\u5931\u8D25\uFF1A${String(err)}`);
@@ -1896,7 +2091,7 @@ function DesktopSettingsPanel() {
     const start = (overwrite) => {
       setMigrationRunning(true);
       setMigrationProgress({ copied: 0, total: 0 });
-      invoke4("migrate_profile", {
+      invoke2("migrate_profile", {
         source: migrationSource,
         dest: migrationDest,
         overwrite
@@ -1921,7 +2116,7 @@ function DesktopSettingsPanel() {
   };
   const handleDownloadRuntime = (version) => {
     setRuntimeDownloading((prev) => ({ ...prev, [version]: "downloading" }));
-    void invoke4("download_runtime", { source: runtimeSource, version }).then(() => {
+    void invoke2("download_runtime", { source: runtimeSource, version }).then(() => {
       setRuntimeDownloading((prev) => ({ ...prev, [version]: "downloaded" }));
       void refreshRuntimes();
       showToast(`dsh ${version} \u4E0B\u8F7D\u5B8C\u6210`, true);
@@ -1943,7 +2138,7 @@ function DesktopSettingsPanel() {
   (0, import_react3.useEffect)(() => {
     let sawActive = false;
     const timer = setInterval(() => {
-      void invoke4("runtime_download_status").then((s) => {
+      void invoke2("runtime_download_status").then((s) => {
         if (s.active) {
           sawActive = true;
           setRuntimeDownloading(
@@ -1973,7 +2168,7 @@ function DesktopSettingsPanel() {
   }, [refreshRuntimes]);
   const handleSwitchRuntime = (version) => {
     const isBuiltin = runtimeCatalog?.builtin === version;
-    void nsSave({ dsh_runtime: isBuiltin ? null : version, dsh_mode: "builtin" }).then(() => invoke4("restart_dsh_service")).then(() => {
+    void nsSave({ dsh_runtime: isBuiltin ? null : version, dsh_mode: "builtin" }).then(() => invoke2("restart_dsh_service")).then(() => {
       setMsg({ ok: true, text: `\u5DF2\u5207\u6362\u5230 dsh ${version}\uFF0C\u6B63\u5728\u91CD\u542F\u2026` });
       void refreshRuntimes();
     }).catch((err) => setMsg({ ok: false, text: `\u5207\u6362\u5931\u8D25\uFF1A${String(err)}` }));
@@ -1982,14 +2177,14 @@ function DesktopSettingsPanel() {
     if (removingVersion) return;
     if (!window.confirm(`\u5378\u8F7D\u8FD0\u884C\u65F6 dsh ${version}\uFF1F\u5C06\u5220\u9664\u672C\u5730\u5DF2\u4E0B\u8F7D\u6587\u4EF6\uFF0C\u4E0D\u53EF\u6062\u590D\u3002`)) return;
     setRemovingVersion(version);
-    invoke4("remove_runtime", { version }).then(() => {
+    invoke2("remove_runtime", { version }).then(() => {
       setMsg({ ok: true, text: `\u5DF2\u5378\u8F7D\u8FD0\u884C\u65F6 dsh ${version}` });
       void refreshRuntimes();
     }).catch((err) => setMsg({ ok: false, text: `\u5378\u8F7D\u5931\u8D25\uFF1A${String(err)}` })).finally(() => setRemovingVersion(null));
   };
   const refreshData = (0, import_react3.useCallback)(async () => {
     try {
-      const d = await invoke4("get_desktop_settings_data");
+      const d = await invoke2("get_desktop_settings_data");
       setDesktop(d);
     } catch {
     }
@@ -2272,7 +2467,7 @@ function DesktopSettingsPanel() {
           {
             variant: "ghost",
             onClick: () => {
-              void invoke4("export_diagnostics").then((r) => {
+              void invoke2("export_diagnostics").then((r) => {
                 setDiagExport(r.path);
                 showToast(`\u8BCA\u65AD\u5DF2\u5BFC\u51FA\uFF1A${r.path}`, true);
               }).catch((e) => showToast(`\u5BFC\u51FA\u5931\u8D25\uFF1A${String(e)}`, false));
@@ -2285,7 +2480,7 @@ function DesktopSettingsPanel() {
           {
             variant: "ghost",
             onClick: () => {
-              void invoke4("get_diagnostics").then((r) => {
+              void invoke2("get_diagnostics").then((r) => {
                 const path = r.diagnostics?.logs?.shell?.path;
                 if (typeof path === "string" && path !== "") showToast(`\u58F3\u65E5\u5FD7\uFF1A${path}`, true);
                 else showToast("\u8BCA\u65AD\u91CC\u6CA1\u6709\u65E5\u5FD7\u8DEF\u5F84", false);
@@ -2583,6 +2778,30 @@ function DesktopSettingsPanel() {
       preventSleepNote && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: preventSleepNote }),
       /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u7184\u5C4F\u540E\u82E5\u8FD8\u6709\u4F1A\u8BDD\u5728\u8DD1\uFF0C\u58F3\u4F1A\u6301\u6709\u7CFB\u7EDF\u9632\u4F11\u7720\u65AD\u8A00\uFF08macOS \u8D70 IOKit\u3001Windows \u8D70\u7EBF\u7A0B\u6267\u884C\u72B6\u6001\uFF09\uFF0C \u76F4\u5230\u4F1A\u8BDD\u8DD1\u5B8C\u3001dsh \u5B9E\u4F8B\u505C\u6B62\u6216\u9000\u51FA\u58F3\u3002\u5C4F\u5E55\u8BE5\u5173\u8FD8\u662F\u7167\u5173\uFF0C\u53EA\u662F\u4E0D\u8BA9\u6574\u673A\u7761\u8FC7\u53BB\uFF1B\u5408\u76D6\u4ECD\u7136\u4F1A\u7761\u3002\u6539\u52A8\u7ACB\u5373\u751F\u6548\u3002" })
     ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u5F00\u53D1\u8005\u5DE5\u5177", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: ROW_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+          "input",
+          {
+            type: "checkbox",
+            "data-desktop-settings": "dev-tools",
+            checked: devTools,
+            onChange: (e) => handleToggleDevTools(e.target.checked)
+          }
+        ),
+        "\u5141\u8BB8\u6253\u5F00 DevTools\uFF08\u6253\u5305\u6001\u9ED8\u8BA4\u5173\uFF1B\u6539\u52A8\u91CD\u542F\u684C\u9762\u58F3\u751F\u6548\uFF09"
+      ] }) }),
+      devToolsNote && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: devToolsNote }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u5F00\u542F\u540E\u684C\u9762\u58F3\u5728\u672C\u673A\u56DE\u73AF\u5730\u5740\u76D1\u542C\u4E00\u4E2A\u8FDC\u7A0B\u8C03\u8BD5\u53E3\uFF0C\u672C\u673A\u4EFB\u610F\u7A0B\u5E8F\u53EF\u501F\u5B83\u5728\u9875\u9762\u91CC\u6267\u884C\u4EE3\u7801\u3002\u53EA\u5728\u81EA\u5DF1\u6392\u67E5\u95EE\u9898\u65F6\u5F00\u542F\uFF0C\u7528\u5B8C\u8BB0\u5F97\u5173\u6389\u5E76\u91CD\u542F\u3002" }),
+      devToolsConfirmKind !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DEV_TOOLS_OVERLAY_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: DEV_TOOLS_MODAL_STYLE, "data-desktop-settings": "dev-tools-confirm", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DEV_TOOLS_TITLE_STYLE, children: devToolsActiveConfirm.title }),
+        devToolsActiveConfirm.lines.map((line) => /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DEV_TOOLS_BODY_STYLE, children: line }, line)),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: DEV_TOOLS_ACTIONS_STYLE, children: [
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: () => setDevToolsConfirmKind(null), children: devToolsActiveConfirm.cancel }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "primary", onClick: () => saveDevToolsSetting(devToolsConfirmKind === "on"), children: devToolsActiveConfirm.confirm })
+        ] })
+      ] }) })
+    ] }),
     /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u4EE3\u7406\u8BBE\u7F6E", children: [
       /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: LABEL_STYLE, children: "\u4EE3\u7406\u6A21\u5F0F" }),
       /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
@@ -2697,7 +2916,7 @@ function DesktopSettingsPanel() {
   ] });
 }
 function registerDesktopSettings(ctx) {
-  if (!hasIpc3()) return;
+  if (!shellRpc.available()) return;
   try {
     nsRpc = ctx.connection ?? null;
   } catch {
@@ -2712,14 +2931,14 @@ function registerDesktopSettings(ctx) {
       DesktopSettingsPanel
     )
   );
-  void invoke4("get_pending_active_profile").then((profile) => {
+  void invoke2("get_pending_active_profile").then((profile) => {
     if (profile && nsRpc) {
       void nsSave({ active_profile: profile }).catch(() => {
       });
     }
   }).catch(() => {
   });
-  void invoke4("check_startup_needed").then((res) => {
+  void invoke2("check_startup_needed").then((res) => {
     if (!res || res.action === "none") return;
     if (res.action === "profile-selection") {
       const profiles = res.profiles ?? [];
@@ -2742,7 +2961,7 @@ function registerDesktopSettings(ctx) {
         btn.onclick = () => {
           el.remove();
           showToast(`\u6B63\u5728\u542F\u52A8 ${p} profile\u2026`, true);
-          void invoke4("confirm_startup_profile", { name: p, repair: false }).catch((e) => showToast(`\u542F\u52A8\u5931\u8D25\uFF1A${String(e)}`, false));
+          void invoke2("confirm_startup_profile", { name: p, repair: false }).catch((e) => showToast(`\u542F\u52A8\u5931\u8D25\uFF1A${String(e)}`, false));
         };
         list.appendChild(btn);
       }
@@ -2757,7 +2976,7 @@ function registerDesktopSettings(ctx) {
         if (!name) return;
         el.remove();
         showToast(`\u6B63\u5728\u521B\u5EFA\u5E76\u542F\u52A8 ${name} profile\u2026`, true);
-        void invoke4("confirm_startup_profile", { name, repair: true }).catch((e) => showToast(`\u521B\u5EFA\u5931\u8D25\uFF1A${String(e)}`, false));
+        void invoke2("confirm_startup_profile", { name, repair: true }).catch((e) => showToast(`\u521B\u5EFA\u5931\u8D25\uFF1A${String(e)}`, false));
       };
       card.appendChild(list);
       card.appendChild(input);
@@ -2792,7 +3011,7 @@ function registerDesktopSettings(ctx) {
       noBtn.textContent = "\u76F4\u63A5\u542F\u52A8";
       noBtn.onclick = () => {
         el.remove();
-        void invoke4("confirm_startup_profile", { name: profile, repair: false }).catch((e) => showToast(`\u542F\u52A8\u5931\u8D25\uFF1A${String(e)}`, false));
+        void invoke2("confirm_startup_profile", { name: profile, repair: false }).catch((e) => showToast(`\u542F\u52A8\u5931\u8D25\uFF1A${String(e)}`, false));
       };
       const yesBtn = document.createElement("button");
       yesBtn.style.cssText = "flex:1;padding:10px;border-radius:8px;border:none;background:var(--dsw-alias-brand-primary-new-color,#4176e6);color:#fff;font-size:13px;cursor:pointer";
@@ -2800,7 +3019,7 @@ function registerDesktopSettings(ctx) {
       yesBtn.onclick = () => {
         el.remove();
         showToast(`\u6B63\u5728\u4FEE\u590D ${profile} profile\u2026`, true);
-        void invoke4("confirm_startup_profile", { name: profile, repair: true }).catch((e) => showToast(`\u4FEE\u590D\u5931\u8D25\uFF1A${String(e)}`, false));
+        void invoke2("confirm_startup_profile", { name: profile, repair: true }).catch((e) => showToast(`\u4FEE\u590D\u5931\u8D25\uFF1A${String(e)}`, false));
       };
       btns.appendChild(noBtn);
       btns.appendChild(yesBtn);
@@ -2817,11 +3036,8 @@ function registerDesktopSettings(ctx) {
 // src/client/notifications-tab.tsx
 var import_react4 = require("react");
 var import_jsx_runtime4 = require("react/jsx-runtime");
-function invoke5(cmd, args) {
-  const w = window;
-  if (w.__TAURI_INTERNALS__?.invoke) return w.__TAURI_INTERNALS__.invoke(cmd, args);
-  if (w.__TAURI__?.core?.invoke) return w.__TAURI__.core.invoke(cmd, args);
-  return Promise.reject(new Error("no tauri ipc"));
+function invoke3(cmd, args) {
+  return shellRpc.invoke(cmd, args);
 }
 var SYS_PREFS = "x-apple.systempreferences:com.apple.Preference.Notifications";
 var PANEL_CSS2 = `
@@ -2869,7 +3085,7 @@ function NotificationSettingsPanel() {
   const [data, setData] = (0, import_react4.useState)(null);
   const [busy, setBusy] = (0, import_react4.useState)(false);
   const refresh = (0, import_react4.useCallback)(() => {
-    invoke5("get_notifications_state").then(setData).catch(() => {
+    invoke3("get_notifications_state").then(setData).catch(() => {
     });
   }, []);
   (0, import_react4.useEffect)(() => {
@@ -2877,7 +3093,7 @@ function NotificationSettingsPanel() {
   }, [refresh]);
   const save = (0, import_react4.useCallback)((next) => {
     setBusy(true);
-    invoke5("set_notifications_config", { config: next }).catch((e) => {
+    invoke3("set_notifications_config", { config: next }).catch((e) => {
       logFail(e);
     }).finally(() => setBusy(false));
   }, []);
@@ -2906,17 +3122,17 @@ function NotificationSettingsPanel() {
   }
   const requestPerm = () => {
     setBusy(true);
-    invoke5("request_notification_permission_cmd").then(() => refresh()).catch(() => {
+    invoke3("request_notification_permission_cmd").then(() => refresh()).catch(() => {
     }).finally(() => setBusy(false));
   };
   const openSysPrefs = () => {
-    void invoke5("open_external", { url: SYS_PREFS }).catch(() => {
+    void invoke3("open_external", { url: SYS_PREFS }).catch(() => {
     });
   };
   const chooseSound = () => {
-    invoke5("choose_notification_sound").then((path) => {
+    invoke3("choose_notification_sound").then((path) => {
       if (path === null || path === void 0 || path === "") return;
-      return invoke5("import_notification_sound", { path }).then((name) => {
+      return invoke3("import_notification_sound", { path }).then((name) => {
         refresh();
         return name;
       });
@@ -3077,7 +3293,7 @@ function NotificationSettingsPanel() {
                 className: "n-btn ghost mini",
                 title: "\u8BD5\u542C",
                 onClick: () => {
-                  void invoke5("preview_notification_sound", { sound: conf.sound }).catch(() => {
+                  void invoke3("preview_notification_sound", { sound: conf.sound }).catch(() => {
                   });
                 },
                 children: "\u25B6"
@@ -3118,16 +3334,10 @@ function parseDesktopClientEnvironment(search) {
   return { platform };
 }
 async function requestDesktopClientEnvironment() {
-  const w = window;
+  if (!shellRpc.available()) return void 0;
   let raw;
   try {
-    if (w.__TAURI_INTERNALS__?.invoke) {
-      raw = await w.__TAURI_INTERNALS__.invoke("get_desktop_client_environment", void 0);
-    } else if (w.__TAURI__?.core?.invoke) {
-      raw = await w.__TAURI__.core.invoke("get_desktop_client_environment", {});
-    } else {
-      return void 0;
-    }
+    raw = await shellRpc.invoke("get_desktop_client_environment", {});
   } catch {
     return void 0;
   }
@@ -3253,10 +3463,7 @@ function applyShortcutEdit(document2, edit, profile) {
   return { ok: true, document: { ...document2, schemaVersion: SHORTCUT_SCHEMA_VERSION, profiles } };
 }
 function tauriInvoke(cmd, args) {
-  const w = window;
-  const internals2 = w.__TAURI_INTERNALS__;
-  if (!internals2?.invoke) return Promise.reject(new Error("no-tauri-ipc"));
-  return internals2.invoke(cmd, args, void 0);
+  return shellRpc.invoke(cmd, args);
 }
 function newRevision() {
   const c = globalThis.crypto;
@@ -3700,6 +3907,49 @@ function installComposerInputGuard() {
   });
 }
 
+// src/client/console-batch.ts
+function createConsoleBatch(options) {
+  const maxItems = options.maxItems ?? 20;
+  const maxChars = options.maxChars ?? 16384;
+  const flushMs = options.flushMs ?? 100;
+  const now = options.now ?? (() => Date.now());
+  const schedule = options.schedule ?? ((fn, ms) => {
+    const timer = setTimeout(fn, ms);
+    return () => clearTimeout(timer);
+  });
+  let items = [];
+  let chars = 0;
+  let oldestAt = null;
+  let cancelTimer = null;
+  const dispatch = () => {
+    if (cancelTimer !== null) {
+      cancelTimer();
+      cancelTimer = null;
+    }
+    if (items.length === 0) return;
+    const batch = items;
+    items = [];
+    chars = 0;
+    oldestAt = null;
+    try {
+      options.send(batch);
+    } catch {
+    }
+  };
+  return {
+    push(item) {
+      items.push(item);
+      chars += item.msg.length + item.pageUrl.length + item.level.length + 16;
+      if (oldestAt === null) {
+        oldestAt = now();
+        cancelTimer = schedule(dispatch, flushMs);
+      }
+      if (items.length >= maxItems || chars >= maxChars) dispatch();
+    },
+    flush: dispatch
+  };
+}
+
 // src/client/index.ts
 var inject = [
   "slots",
@@ -3709,21 +3959,32 @@ var inject = [
   "connection"
 ];
 function installWebviewConsoleMirror() {
-  const w = window;
-  const invoke6 = (cmd, args) => {
-    const a = w.__TAURI__?.core?.invoke;
-    if (a) {
-      a(cmd, args).catch(() => {
-      });
-      return;
-    }
-    const b = w.__TAURI_INTERNALS__?.invoke;
-    if (b) {
-      b(cmd, args, void 0).catch(() => {
-      });
-      return;
-    }
+  const invoke4 = (cmd, args) => {
+    void shellRpc.invoke(cmd, args).catch(() => {
+    });
   };
+  let batchSupported = true;
+  const consoleBatch = createConsoleBatch({
+    send: (items) => {
+      const send = (cmd, args) => {
+        if (!shellRpc.available()) return null;
+        return shellRpc.invoke(cmd, args);
+      };
+      const batched = batchSupported ? send("log_console_batch", { items }) : null;
+      if (batched !== null) {
+        batched.then(
+          () => {
+          },
+          () => {
+            batchSupported = false;
+            for (const item of items) invoke4("log_console", item);
+          }
+        );
+        return;
+      }
+      for (const item of items) invoke4("log_console", item);
+    }
+  });
   const fwd = (level, args) => {
     try {
       const msg = args.map((a) => {
@@ -3739,7 +4000,7 @@ ${a.stack}` : a.message;
         return String(a);
       }).join(" ");
       const url = typeof location !== "undefined" && location.href || "?";
-      invoke6("log_console", { level, msg, pageUrl: url });
+      consoleBatch.push({ level, msg, pageUrl: url });
     } catch {
     }
   };

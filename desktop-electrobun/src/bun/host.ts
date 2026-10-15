@@ -7,6 +7,7 @@
 import { buildChildEnv, assertChildEnv } from '../shared/child-env.ts'
 import type { ShellLayout } from './runtime.ts'
 import type { ProxyEnv } from '../shared/proxy-env.ts'
+import { createPlatformProbe, startTreeSampler, stopProcessTree, type TreeSampler } from './process-tree.ts'
 
 export interface HostReady {
   url: string
@@ -41,15 +42,19 @@ export interface StartHostInput {
   proxy?: ProxyEnv | null
   /** cloudflared 可执行文件路径（旧壳 `DSH_CLOUDFLARED_BIN`，#164 隧道） */
   cloudflaredBin?: string | undefined
+  /** PATH 垫片目录（#70）：非空则前置到宿主子进程 PATH 最前（内置 pnpm/node；service 现算传入） */
+  pathShimDir?: string | undefined
 }
 
 export interface HostHandle {
   ready: HostReady
-  /** 优雅停止：SIGTERM → 宽限期 → SIGKILL，并等到真的退出（不留孤儿） */
+  /** 优雅停止：树级停止（同批 SIGTERM 整棵宿主树 → 宽限 → SIGKILL → 确认树灭），等到宿主真退出 */
   stop: () => Promise<void>
   pid: number
   /** 宿主退出（含守护器观察到的异常退出）；解析为退出码 */
   exited: Promise<number>
+  /** 宿主生前最后一次进程树快照（后代 pid）：守护器自愈靠它清扫崩溃残留的伴生孤儿（#60） */
+  lastTree: () => number[]
 }
 
 const READY_PREFIX = 'HOST-READY '
@@ -58,6 +63,10 @@ const DEFAULT_TIMEOUT_MS = 120_000
 const STOP_GRACE_MS = 5_000
 /** 升级后最多再等多久 */
 const STOP_KILL_WAIT_MS = 2_000
+/** 树灭确认窗口：KILL 之后还允许等多久（到点放行幸存者，不阻塞重启） */
+const TREE_CONFIRM_TIMEOUT_MS = 3_000
+/** 宿主生前树快照的采样间隔（崩溃路径定位伴生孤儿的依据，见 process-tree.ts） */
+const TREE_SAMPLE_INTERVAL_MS = 5_000
 
 export async function startHost(input: StartHostInput): Promise<HostHandle> {
   const { layout } = input
@@ -83,6 +92,7 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
     lanePort: input.lanePort,
     proxy: input.proxy,
     cloudflaredBin: input.cloudflaredBin,
+    pathPrepend: input.pathShimDir,
   })
   assertChildEnv(env)
 
@@ -105,9 +115,14 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
     stderr: 'pipe',
   })
 
+  // #60：进程树探针与生前快照——停止契约（树级停止）与守护器清扫（崩溃孤儿）都靠它
+  const treeProbe = createPlatformProbe()
+  const treeSampler: TreeSampler = startTreeSampler(treeProbe, child.pid, TREE_SAMPLE_INTERVAL_MS, onLog)
+
   // 退出信号：守护器（supervisor）与 stop() 都盯着它；这里只记一条日志。
   const exited = child.exited.then((code) => {
     onLog(`[shell] 宿主退出：pid = ${String(child.pid)} code = ${String(code)}`)
+    treeSampler.stop()
     return code
   })
 
@@ -158,26 +173,30 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
     ready,
     pid: child.pid,
     exited,
+    lastTree: () => treeSampler.latest(),
     stop: async () => {
+      treeSampler.stop()
       if (child.exitCode !== null) return
-      try {
-        child.kill('SIGTERM')
-      } catch {}
-      const escalation = setTimeout(() => {
-        onLog(`[shell] 宿主 ${String(STOP_GRACE_MS)}ms 未退出，升级 SIGKILL`)
-        try {
-          child.kill('SIGKILL')
-        } catch {}
-      }, STOP_GRACE_MS)
-      try {
-        await Promise.race([exited, Bun.sleep(STOP_GRACE_MS + STOP_KILL_WAIT_MS)])
-      } finally {
-        clearTimeout(escalation)
-      }
-      if (child.exitCode === null) {
-        try {
-          child.kill('SIGKILL')
-        } catch {}
+      // #60：停止契约是树级的——伴生进程（第三方插件的代理、会话终端等）必须随宿主一起
+      // 退场，否则快速重启窗口里新宿主会撞上垂死的旧伴生（attach 竞争 → 流量直连）。
+      // 枚举必须在杀之前做：宿主一死直接子代就被 init/launchd 收养，事后按 ppid 找不到。
+      // 确认阶段有界，超时放行幸存者并记日志，不阻塞重启。
+      const result = await stopProcessTree({
+        rootPid: child.pid,
+        rootExited: exited,
+        probe: treeProbe,
+        graceMs: STOP_GRACE_MS,
+        killWaitMs: STOP_KILL_WAIT_MS,
+        confirmTimeoutMs: TREE_CONFIRM_TIMEOUT_MS,
+        // 宿主本体走 child 句柄（与守护器/退出事件同一事实源），后代直接发信号
+        signalFn: (pid, signal) => {
+          if (pid === child.pid) child.kill(signal)
+          else process.kill(pid, signal)
+        },
+        onLog,
+      })
+      if (result.survivors.length > 0) {
+        onLog(`[shell] 宿主树停止超时，放行幸存进程：${result.survivors.join(', ')}（不阻塞重启）`)
       }
       await stderrPump.catch(() => {})
     },

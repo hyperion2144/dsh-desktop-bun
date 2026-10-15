@@ -83,6 +83,8 @@ export interface DesktopSettings {
   /** 已废弃：视觉窗口化在换壳时整块删掉了（#200 收尾）。保留只为旧配置原样往返。 */
   desktopRenderBudget?: boolean
   preventSleep?: boolean
+  /** #69 开发者工具：打包态重启后开 CEF 远程调试口并放出右键菜单（缺省 false；安全面默认关）。 */
+  devTools?: boolean
   profilePorts?: Record<string, number>
   profileLanePorts?: Record<string, number>
   /** 页面口（loopback origin）偏好：语义对齐 env DSH_SHELL_PAGE_PORT——请求值，被占顺延（改口=换本地存储隔离空间）。 */
@@ -126,6 +128,7 @@ export function serializeSettings(settings: DesktopSettings): Record<string, unk
   put('desktop_layout_on_phones', settings.desktopLayoutOnPhones)
   put('desktop_render_budget', settings.desktopRenderBudget)
   put('prevent_sleep', settings.preventSleep)
+  put('dev_tools', settings.devTools)
   put('profile_ports', settings.profilePorts)
   put('profile_lane_ports', settings.profileLanePorts)
   put('profile_page_ports', settings.profilePagePorts)
@@ -208,6 +211,7 @@ export function defaultSettings(): DesktopSettings {
     muxHeartbeatMs: DEFAULT_MUX_HEARTBEAT_MS,
     desktopLayoutOnPhones: false,
     preventSleep: true,
+    devTools: false,
     dshMode: 'builtin',
     runtimeSource: 'github',
     proxyMode: 'off',
@@ -319,6 +323,7 @@ export function normalizeSettings(raw: unknown): DesktopSettings {
     muxHeartbeatMs: int(pick('muxHeartbeatMs', 'mux_heartbeat_ms'), MUX_HEARTBEAT_MIN, MUX_HEARTBEAT_MAX) ?? base.muxHeartbeatMs,
     desktopLayoutOnPhones: bool(pick('desktopLayoutOnPhones', 'desktop_layout_on_phones')) ?? base.desktopLayoutOnPhones,
     preventSleep: bool(pick('preventSleep', 'prevent_sleep')) ?? base.preventSleep,
+    devTools: bool(pick('devTools', 'dev_tools')) ?? base.devTools,
     dshMode: oneOf(pick('dshMode', 'dsh_mode'), DSH_MODES) ?? base.dshMode,
     runtimeSource: oneOf(pick('runtimeSource', 'runtime_source'), RUNTIME_SOURCES) ?? base.runtimeSource,
     proxyMode: oneOf(pick('proxyMode', 'proxy_mode'), PROXY_MODES) ?? base.proxyMode,
@@ -492,6 +497,7 @@ function port(value: unknown): number | undefined {
   push('downloadConcurrency', settings.downloadConcurrency, base.downloadConcurrency)
   push('muxHeartbeatMs', settings.muxHeartbeatMs, base.muxHeartbeatMs)
   push('preventSleep', settings.preventSleep, base.preventSleep)
+  push('devTools', settings.devTools, base.devTools)
   push('desktopLayoutOnPhones', settings.desktopLayoutOnPhones, base.desktopLayoutOnPhones)
   push('remoteAddr', settings.remoteAddr, undefined)
   if (settings.remoteList.length > 0) parts.push(`remoteList=${String(settings.remoteList.length)} 条`)

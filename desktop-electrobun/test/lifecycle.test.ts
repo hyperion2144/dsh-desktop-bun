@@ -7,9 +7,9 @@
 //   3. 台账 + 启动清扫（host-registry.ts）——上一次壳留下的孤儿只能靠这个清
 
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { startHost } from '../src/bun/host.ts'
 import {
   parseHostRecords,
@@ -248,4 +248,82 @@ describe('宿主停止：等到真退出，超时就升级 SIGKILL', () => {
     // 宽限期（5s）内不该走 SIGKILL，所以至少要等这么久；这里是「真的等了」的证据
     expect(elapsed).toBeGreaterThanOrEqual(4_000)
   }, 40_000)
+})
+
+describe('宿主 PATH 垫片透传（#70）', () => {
+  // Windows 的 process.env 键名是 Path：与测试覆盖的 PATH 并存会触发 buildChildEnv 的异写双键
+  // 清理（保先遇到的那个）。构造 base env 时先剥掉所有 PATH 同义键，测试才有确定性。
+  function pathIsolatedEnv(): Record<string, string> {
+    const env: Record<string, string> = {}
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value !== undefined && key.toUpperCase() !== 'PATH') env[key] = value
+    }
+    env.PATH = '/usr/bin:/bin'
+    return env
+  }
+  // 自带布局桩（「宿主停止」describe 里的 fakeLayout 在别的作用域，不跨用）
+  function pathProbeLayout(dir: string, seenFile: string) {
+    const preloadFile = join(dir, 'noop-preload.mjs')
+    const hostScript = join(dir, 'probe-host.mjs')
+    // 假宿主：启动即把收到的 PATH 落盘，再打 READY（写完才 READY，stop 前必然已写）
+    writeFileSync(preloadFile, '// 测试用空 preload\n')
+    writeFileSync(
+      hostScript,
+      [
+        `const { writeFileSync } = await import('node:fs')`,
+        `writeFileSync(${JSON.stringify(seenFile)}, 'PATH=' + (process.env.PATH ?? ''))`,
+        `console.log('HOST-READY ' + JSON.stringify({ type: 'ready', url: 'http://127.0.0.1:1/?token=t', injections: [] }))`,
+        `setTimeout(() => {}, 60000)`,
+      ].join('\n') + '\n',
+    )
+    return {
+      home: dir,
+      profile: 'desktop',
+      profileDir: `${dir}/profiles/desktop`,
+      appSupport: dir,
+      runtimeDir: dir,
+      dshLibDir: dir,
+      distDir: dir,
+      preloadFile,
+      hostScript,
+      repoRoot: dir,
+      resourcesDir: null,
+      runtimeKind: 'override' as const,
+      runtimeVersion: null,
+      runtimeNote: null,
+      // 布局里的 launcher 锚定（#62）：测试字面量不走探测，显式 null 跳过
+      launcherPath: null,
+    }
+  }
+
+  test('pathShimDir 前置到宿主子进程 PATH 最前（垫片优先于系统 PATH）', async () => {
+    const dir = tempDir()
+    const seenFile = join(dir, 'seen-path.txt')
+    const shimDir = join(dir, 'shims')
+    mkdirSync(shimDir)
+    const started = await startHost({
+      layout: pathProbeLayout(dir, seenFile),
+      clientVersion: '0.0.0-test',
+      env: pathIsolatedEnv(),
+      pathShimDir: shimDir,
+      timeoutMs: 15_000,
+    })
+    await started.stop()
+    const parts = readFileSync(seenFile, 'utf8').slice('PATH='.length).split(delimiter)
+    expect(parts[0]).toBe(shimDir)
+    expect(parts.slice(1).join(delimiter)).toBe('/usr/bin:/bin')
+  }, 30_000)
+
+  test('不给 pathShimDir：宿主 PATH 原样（缺省不改基线）', async () => {
+    const dir = tempDir()
+    const seenFile = join(dir, 'seen-path.txt')
+    const started = await startHost({
+      layout: pathProbeLayout(dir, seenFile),
+      clientVersion: '0.0.0-test',
+      env: pathIsolatedEnv(),
+      timeoutMs: 15_000,
+    })
+    await started.stop()
+    expect(readFileSync(seenFile, 'utf8')).toBe('PATH=/usr/bin:/bin')
+  }, 30_000)
 })

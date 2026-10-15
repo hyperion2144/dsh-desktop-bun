@@ -61,6 +61,21 @@ const INSPECTOR_UPSTREAM = [
   'export const done = true;',
   '',
 ].join('\n')
+/** Patch 13/14 与 Patch 12 的 rev≥7 夹具共用的上游 port1 泵锚块（真实上游自带）。 */
+const INSPECTOR_HOST_PUMP_LINES = [
+  'class HostInspectorSource {',
+  '\tconstructor(port) {',
+  '\t\tport.on("message", (value) => {',
+  '\t\t\ttry {',
+  '\t\t\t\tif (this.queries.receive(value)) return;',
+  '\t\t\t\tthis.receive(value);',
+  '\t\t\t} catch {',
+  '\t\t\t\tthis.close();',
+  '\t\t\t}',
+  '\t\t});',
+  '\t}',
+  '}',
+]
 
 function inspectorPath(tree: string): string {
   return join(tree, 'node_modules', '@deepseek-ai', 'dsh-experimental-inspector', 'lib', 'index.js')
@@ -165,6 +180,8 @@ describe('bun-preload Patch 12（inspector 的 fetch 访问器）', () => {
       '\t\twritable: true,',
       '\t\tconfigurable: true',
       '\t});',
+      // 今天真实上游自带 Patch 14 的 port1 泵锚：补上它，Patch 14 才不会报「上游版本不符」。
+      ...INSPECTOR_HOST_PUMP_LINES,
     ].join('\n')
     writeInspector(tree, patchedRev6)
 
@@ -288,5 +305,114 @@ describe('bun-preload Patch 6（koffi 禁用，rev 提升防叠加）', () => {
     expect(head).toContain('function loadWin32ProcessBindings() { if (typeof Bun')
     expect(head).toMatch(/bun-preload-rev:\d+$/)
     expect(patched).toContain('  const koffi = require("koffi")')
+  })
+})
+
+describe('bun-preload Patch 13/14（inspector CDP 桥，#61）', () => {
+  function workerPath(tree: string): string {
+    return join(tree, 'node_modules', '@deepseek-ai', 'dsh-experimental-inspector', 'lib', 'worker.js')
+  }
+
+  /**
+   * Patch 13/14 需要的上游锚点：worker 的 request() 头 + 入口行，index 的 port1 消息泵行。
+   * index 同时带上 Patch 12 的锚点（复用 INSPECTOR_UPSTREAM），用于验证同文件多补丁共存。
+   */
+  function writeInspectorPair(tree: string, options?: { driftWorker?: boolean; driftHost?: boolean }): void {
+    const worker = options?.driftWorker
+      ? 'export const done = true;\n'
+      : [
+          'class HostInspectorSession {',
+          '\trequest(method, params) {',
+          '\t\tconst failure = this.connect();',
+          '\t\treturn void 0;',
+          '\t}',
+          '}',
+          '\t\tif (!hostQueries.receive(value)) sources.receive(hostConnection, value);',
+          'export const done = true;',
+        ].join('\n')
+    const host = options?.driftHost
+      ? INSPECTOR_UPSTREAM
+      : INSPECTOR_UPSTREAM.replace(
+          'export const done = true;',
+          [...INSPECTOR_HOST_PUMP_LINES, 'export const done = true;'].join('\n'),
+        )
+    mkdirSync(dirname(inspectorPath(tree)), { recursive: true })
+    writeFileSync(inspectorPath(tree), host, 'utf8')
+    mkdirSync(dirname(workerPath(tree)), { recursive: true })
+    writeFileSync(workerPath(tree), worker, 'utf8')
+  }
+
+  test('两侧同时打上：worker 入口与 request() 被接管，index 消息泵前插桥，且与 Patch 12 同文件共存', () => {
+    const tree = tempTree()
+    writeInspectorPair(tree)
+
+    const result = runPreload(tree)
+    const worker = readFileSync(workerPath(tree), 'utf8')
+    const host = readFileSync(inspectorPath(tree), 'utf8')
+
+    expect(result.stdout).toContain('Patch 13: inspector CDP 桥（worker 侧）applied')
+    expect(result.stdout).toContain('Patch 14: inspector CDP 桥（主线程侧）applied')
+    // Patch 12 依然在同一份 index.js 上工作（同文件多补丁互不短路）。
+    expect(result.stdout).toContain('Patch 12: fetch 访问器归一 applied')
+    expect(worker).toContain('if (__dshCdpBridgeReceive(value)) return; // bun-preload-rev:')
+    expect(worker).toContain('__dshInspectorCdpBridge(this, method, params)')
+    expect(worker).toContain('bun-preload: inspector CDP 桥（worker 侧）')
+    expect(host).toContain('if (__dshInspectorCdpBridgeServe(value, this)) return; // bun-preload-rev:')
+    expect(host).toContain('const DSH_CDP_BRIDGE_HOST = {')
+    expect(host).toContain('bun-preload: inspector CDP 桥（主线程侧）')
+    // 原入口行保留：桥不认领的帧放行原流。
+    expect(worker).toContain('if (!hostQueries.receive(value)) sources.receive(hostConnection, value);')
+  })
+
+  test('重复启动幂等：只刷指纹，文件字节不变', () => {
+    const tree = tempTree()
+    writeInspectorPair(tree)
+    runPreload(tree)
+    const workerBefore = readFileSync(workerPath(tree), 'utf8')
+    const hostBefore = readFileSync(inspectorPath(tree), 'utf8')
+
+    const second = runPreload(tree)
+
+    expect(second.stdout).toContain('Patch 13: bun-preload-rev:')
+    expect(second.stdout).toContain('Patch 14: bun-preload-rev:')
+    expect(second.stdout).not.toContain('Patch 13: inspector CDP 桥（worker 侧）applied')
+    expect(second.stdout).not.toContain('Patch 14: inspector CDP 桥（主线程侧）applied')
+    expect(readFileSync(workerPath(tree), 'utf8')).toBe(workerBefore)
+    expect(readFileSync(inspectorPath(tree), 'utf8')).toBe(hostBefore)
+  })
+
+  test('上游锚点漂移只警告不落笔，worker 与 index 各自独立、不连坐 Patch 12', () => {
+    const tree = tempTree()
+    writeInspectorPair(tree, { driftWorker: true, driftHost: true })
+
+    const result = runPreload(tree)
+
+    expect(result.stderr).toContain('Patch 13: 未找到上游 request/worker-entry 文本')
+    expect(result.stderr).toContain('Patch 14: 未找到上游 port1 消息泵文本')
+    expect(readFileSync(workerPath(tree), 'utf8')).not.toContain('__dshCdpBridgeReceive')
+    expect(readFileSync(inspectorPath(tree), 'utf8')).not.toContain('DSH_CDP_BRIDGE_HOST')
+    // Patch 12 锚没漂：照常应用。
+    expect(result.stdout).toContain('Patch 12: fetch 访问器归一 applied')
+  })
+
+  test('Node 形态守卫：桥两端都以 typeof Bun 分流（同一份 bundle 给 Node 跑时零变化）', () => {
+    const tree = tempTree()
+    writeInspectorPair(tree)
+
+    runPreload(tree)
+
+    expect(readFileSync(workerPath(tree), 'utf8')).toContain('if (typeof Bun !== "undefined") {')
+    expect(readFileSync(inspectorPath(tree), 'utf8')).toContain('if (typeof Bun === "undefined") return false;')
+  })
+
+  test('没装 inspector 时 13/14 静默跳过', () => {
+    const tree = tempTree()
+
+    const result = runPreload(tree)
+
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain('child-ok')
+    expect(result.stderr).not.toContain('Patch 13:')
+    expect(result.stderr).not.toContain('Patch 14:')
   })
 })

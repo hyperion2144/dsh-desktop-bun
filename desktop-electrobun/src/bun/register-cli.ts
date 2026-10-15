@@ -148,7 +148,11 @@ export function createRegisterCli(options: RegisterCliOptions): RegisterCli {
         options.log(`[register] where dsh → ${hit}（注册表用户 PATH 里没有本壳入口）`)
         return hit
       }
-      if (parsed === null) options.log(`[register] 注册表用户 PATH 读取失败（exit ${String(query.status)}），按未注册处理`)
+      if (parsed === null) {
+        options.log(`[register] 注册表用户 PATH 读取失败（exit ${String(query.status)}），按未注册处理`)
+        return null
+      }
+      options.log(`[register] 注册表用户 PATH 里没有本壳入口（${dirname(shimPath)}）且 where 落空，按未注册处理`)
       return null
     }
     const shell = userShell()
@@ -243,7 +247,12 @@ export function createRegisterCli(options: RegisterCliOptions): RegisterCli {
           return { ok: false, code: 'error', message: `写入用户 PATH 失败：${out.stderr.trim() || `exit ${String(out.status)}`}` }
         }
       }
-      void refresh({ force: true })
+      // 写回成功即乐观置「已注册」：注册项立刻从托盘消失。不在返回前 force refresh 立即重测——
+      // 探测链任何一环在会话内读不到刚写进注册表的值（#62 实测：托盘不更新、重启才对），
+      // 都会把菜单打回「未注册」；30s TTL 过后的下一次刷新如实重测，以注册表为准。
+      cached = { kind: 'registered', resolved: shimPath, shimReady: true, at: now() }
+      lastAt = now()
+      options.log(`[register] 注册状态：已注册（用户 PATH 写回成功，乐观置位）`)
       return { ok: true, message: `已把 ${shimDir} 加进用户 PATH——已开的终端不会热更新，新开终端生效` }
     }
     if (platform !== 'darwin') {

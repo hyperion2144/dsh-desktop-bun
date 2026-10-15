@@ -1,4 +1,5 @@
 import type { DesktopClientPlatform } from './environment.ts'
+import { sendWindowAction, shellRpc } from './shell-rpc.ts'
 
 /** 各平台自绘条高度（CSS px）。 */
 const STRIP_HEIGHT: Record<DesktopClientPlatform, number> = {
@@ -16,30 +17,28 @@ const CAPTION_CONTROLS_WIDTH = 138
 /** ui-layout 原生 frame 的 overlay 层稳定标记（AppFrame 固定渲染 data-shell-overlay）。 */
 const FRAME_LAYER_SELECTOR = '[data-shell-overlay]'
 
-function tauriWindowCommand(command: string): void {
-  try {
-    const internals = (window as unknown as {
-      __TAURI_INTERNALS__?: { invoke?: (cmd: string, ...args: unknown[]) => Promise<unknown> }
-    }).__TAURI_INTERNALS__
-    if (internals?.invoke !== undefined) void internals.invoke(command).catch(() => undefined)
-  } catch {
-    // 页面不在 Tauri webview 内时静默忽略
-  }
+
+/** 自绘窗口三键：官方 RPC 优先，兜底 /__shell__/window（shell-rpc.ts）；失败可见，不再静默吞。 */
+function runWindowAction(action: 'minimize' | 'toggle-maximize' | 'close'): void {
+  sendWindowAction(action).catch((error) => console.error('[dsh-desktop] window action failed', error))
 }
 
-/** 自绘窗口三键（A5）：新壳走壳内端点；旧 Tauri 壳回退插件命令。 */
-function sendWindowAction(action: 'minimize' | 'toggle-maximize' | 'close'): void {
-  const tauri = { minimize: 'plugin:window|minimize', 'toggle-maximize': 'plugin:window|toggle_maximize', close: 'plugin:window|close' }[action]
-  const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: (cmd: string) => Promise<unknown> } }).__TAURI_INTERNALS__
-  if (internals?.invoke !== undefined) {
-    tauriWindowCommand(tauri)
-    return
-  }
-  void fetch('/__shell__/window', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ action }),
-  }).catch(() => undefined)
+export const maximizeIconSvg = (maximized: boolean): string =>
+  maximized
+    ? '<rect x="1.5" y="4.5" width="7" height="6" stroke="currentColor" strokeWidth="1" fill="none" /><path d="M3.5 4.5V2.5H10.5V9H8.5" stroke="currentColor" strokeWidth="1" fill="none" />'
+    : '<rect x="1.5" y="1.5" width="9" height="9" stroke="currentColor" strokeWidth="1" fill="none" />'
+
+/** 官方 RPC 报告的最大化态 → 换最大化/还原图标（几何推导在壳侧 window-max.ts，按钮不存在则无操作）。 */
+function syncMaximizeIcon(): void {
+  const button = document.querySelector<HTMLButtonElement>('.dshDesktopCaptionButton-maximize')
+  if (button === null) return
+  shellRpc
+    .invoke<{ maximized: boolean }>('window_get_state', undefined, { timeoutMs: 5000 })
+    .then((state) => {
+      button.innerHTML = `<svg viewBox="0 0 12 12" aria-hidden="true">${maximizeIconSvg(state.maximized)}</svg>`
+      button.setAttribute('aria-label', state.maximized ? '还原' : '最大化')
+    })
+    .catch(() => undefined)
 }
 function makeCaptionButton(aria: string, extraClass: string, svgPath: string): HTMLButtonElement {
   const button = document.createElement('button')
@@ -51,19 +50,42 @@ function makeCaptionButton(aria: string, extraClass: string, svgPath: string): H
 }
 
 /** Win/Linux 自绘窗口按钮：最小化 / 最大化 / 关闭。 */
-function buildWindowControls(): HTMLElement {
+function buildWindowControls(platform: DesktopClientPlatform): HTMLElement {
   const box = document.createElement('div')
   box.className = 'dshDesktopWindowControls'
   box.appendChild(makeCaptionButton('最小化', '', '<path d="M1 6h10" stroke="currentColor" strokeWidth="1" fill="none" />'))
-  box.appendChild(makeCaptionButton('最大化', '', '<rect x="1.5" y="1.5" width="9" height="9" stroke="currentColor" strokeWidth="1" fill="none" />'))
+  box.appendChild(makeCaptionButton('最大化', 'dshDesktopCaptionButton-maximize', maximizeIconSvg(false)))
   box.appendChild(makeCaptionButton('关闭', 'dshDesktopCaptionButton-close', '<path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1" />'))
   box.addEventListener('click', (event) => {
     const button = (event.target as HTMLElement).closest('button')
     const action = button?.getAttribute('aria-label')
-    if (action === '最小化') sendWindowAction('minimize')
-    else if (action === '最大化') sendWindowAction('toggle-maximize')
-    else if (action === '关闭') sendWindowAction('close')
+    if (action === '最小化') runWindowAction('minimize')
+    else if (action === '最大化' || action === '还原') {
+      runWindowAction('toggle-maximize')
+      syncMaximizeIcon()
+    }
+    else if (action === '关闭') runWindowAction('close')
   })
+  // 初次尝试同步 + 窗口尺寸变化（含贴靠/手动最大化）后重同步（去抖 200ms，#50 验证反馈）
+  if (platform !== 'darwin') {
+    syncMaximizeIcon()
+    // 壳侧主动推的窗口状态变化（#73：启动恢复最大化后 dom-ready 补 maximize，页面无从感知）：
+    // 消息是触发器，收到就重查真值。先挂监听再首查——接管前抵达的推送由框架 preload
+    // 攒在 __electrobunPendingHostMessages，首查（ensureReceive）时排空分发。
+    shellRpc.onMessage((name) => {
+      if (name === 'window_state_changed') syncMaximizeIcon()
+    })
+    let resizeTimer = 0
+    window.addEventListener('resize', () => {
+      window.clearTimeout(resizeTimer)
+      resizeTimer = window.setTimeout(syncMaximizeIcon, 200)
+    })
+    // 隐藏后找回（托盘 show）与首布局即最大化的启动场景都没有 resize 事件：焦点/可见性一变就重查
+    window.addEventListener('focus', () => syncMaximizeIcon())
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') syncMaximizeIcon()
+    })
+  }
   return box
 }
 
@@ -99,11 +121,12 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
   strip.className = 'dshDesktopChromeStrip'
   const drag = document.createElement('div')
   drag.className = 'dshDesktopChromeDrag'
-  drag.setAttribute('data-tauri-drag-region', '')
   // Electrobun 的拖拽区是 CSS 驱动（preload/dragRegions）：类名挂上才能原生拖动（macOS/Windows 同）
   drag.classList.add('electrobun-webkit-app-region-drag')
+  // 拖拽区双击 = 最大化切换（原生层不合成 WM_NCLBUTTONDBLCLK；macOS 走系统红绿灯，不需要）
+  if (platform !== 'darwin') drag.addEventListener('dblclick', () => runWindowAction('toggle-maximize'))
   strip.appendChild(drag)
-  if (platform !== 'darwin') strip.appendChild(buildWindowControls())
+  if (platform !== 'darwin') strip.appendChild(buildWindowControls(platform))
   host.appendChild(strip)
   document.body.appendChild(host)
 
@@ -119,15 +142,6 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
     4: '#f59e0b', 5: '#ef4444', 6: '#ef4444', 7: '#3b82f6',
   }
 
-  function tauriInvoke(): ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | undefined {
-    const w = window as unknown as {
-      __TAURI__?: { core?: { invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } }
-      __TAURI_INTERNALS__?: { invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> }
-    }
-    if (w.__TAURI__?.core?.invoke) return w.__TAURI__.core.invoke
-    if (w.__TAURI_INTERNALS__?.invoke) return w.__TAURI_INTERNALS__.invoke
-    return undefined
-  }
 
   let raf = 0
   let attempts = 0
@@ -146,9 +160,8 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
 
 
   const refreshStatus = () => {
-    const invoke = tauriInvoke()
-    if (!invoke) return
-    void invoke('get_dsh_status', {})
+    if (!shellRpc.available()) return
+    void shellRpc.invoke('get_dsh_status', {})
       .then((value) => {
         const s = (value as { status?: number }).status
         if (typeof s !== 'number') return
@@ -216,13 +229,12 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
           close()
           return
         }
-        const invoke = tauriInvoke()
-        if (!invoke) {
+        if (!shellRpc.available()) {
           close()
           return
         }
         btn.disabled = true
-        void invoke('exit_window_instance', {})
+        void shellRpc.invoke('exit_window_instance', {})
           .then(() => close())
           .catch((err) => {
             // #180 反馈：失败必须可见（此前静默恢复导致「没退出」无从排查）

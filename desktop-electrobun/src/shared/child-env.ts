@@ -63,6 +63,8 @@ export interface ChildEnvInput {
   preloadTrees?: string | undefined
   /** 插件解析回退：运行时树的 node_modules（Bun 下装不了 Node resolver hooks，见 #209） */
   nodePath?: string | undefined
+  /** PATH 前置目录（#70 宿主 PATH 垫片）：非空则前置到子进程 PATH 最前（内置 pnpm/node） */
+  pathPrepend?: string | undefined
   /** 看门狗用的父 pid（壳自己的 pid）：壳崩溃/被 SIGKILL 后宿主能自己退出，不留孤儿 */
   parentPid?: number | undefined
   /** `--patch` 注入清单（壳写好的覆盖层；缺省不给，宿主就用 dsh 默认行为） */
@@ -100,6 +102,18 @@ export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
   else delete env.DSH_BUN_PRELOAD_TREES
   if (input.nodePath !== undefined) env.NODE_PATH = input.nodePath
   else delete env.NODE_PATH
+  // #70：宿主子进程 PATH 前置垫片目录（内置 pnpm/node）。必须前置而非追加——垫片要赢过系统
+  // PATH 里可能存在的旧 pnpm（验收标准 3：宿主解析到内置版本）。Windows 的 env 键可能是
+  // `Path`：按大小写不敏感找既有键名前置，避免 PATH/Path 双键（子进程只会读到其中之一）。
+  if (input.pathPrepend !== undefined && input.pathPrepend !== '') {
+    const pathKey = Object.keys(env).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH'
+    const rest = env[pathKey]
+    env[pathKey] = rest === undefined || rest === '' ? input.pathPrepend : `${input.pathPrepend}${delimiter}${rest}`
+    // 同名异写键（PATH 与 Path 并存）只有一个会生效：删掉另一个，防陈旧值复活。
+    for (const key of Object.keys(env)) {
+      if (key !== pathKey && key.toUpperCase() === 'PATH') delete env[key]
+    }
+  }
   if (input.parentPid !== undefined) env.DSH_SHELL_PARENT_PID = String(input.parentPid)
   else delete env.DSH_SHELL_PARENT_PID
   if (input.patchFiles !== undefined && input.patchFiles.length > 0) {

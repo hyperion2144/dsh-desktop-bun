@@ -30,7 +30,7 @@ export interface CommandDeps {
   settings: () => DesktopSettings
   /** 读改写设置（走 settings-store 的原子写） */
   save: (patch: Record<string, unknown>) => DesktopSettings
-  /** dsh 服务面：重启宿主（设置面板切 dsh 来源 / profile 后调它） */
+  /** dsh 服务面：重启（设置面板调；#60 起为壳级完整重启，缺省回落宿主级） */
   restartService?: () => Promise<void>
   /** dsh 服务面状态快照（`get_dsh_status`） */
   status?: () => Record<string, unknown>
@@ -137,6 +137,8 @@ export interface RuntimeSnapshot {
   activeDir: string | null
   /** 面板 select 的当前值：设置里的 dshRuntime */
   selected: string | null
+  /** #79：运行时回退说明（偏好版本不在已装里时的用户可见原因；无回退为 null） */
+  note: string | null
   installed: InstalledRuntime[]
 }
 
@@ -195,6 +197,7 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
         mux_heartbeat_ms: settings.muxHeartbeatMs ?? null,
         desktop_layout_on_phones: settings.desktopLayoutOnPhones ?? null,
         prevent_sleep: settings.preventSleep ?? null,
+        dev_tools: settings.devTools ?? null,
         port: upstreamPort,
         origin,
         profiles: [
@@ -293,6 +296,7 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
         source,
         builtin: snapshot?.builtinVersion ?? null,
         selected: snapshot?.selected ?? null,
+        note: snapshot?.note ?? null,
         installed: snapshot?.installed ?? [],
         // 当前真正在跑的那棵树：面板要能把它标成「运行中」，
         // 并且不再把正在跑的版本当成「可下载」（dev 用 DSH_SHELL_RUNTIME_DIR 时内置树可能压根不在）
@@ -338,7 +342,7 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       return { ok: true, version }
     },
 
-    // 设置面板切 dsh 来源 / profile 后的动作：重启宿主，页面由守护器回调自动重载
+    // 设置面板切 dsh 来源 / profile 后的动作：重启服务（#60 起为壳级完整重启，与托盘同语义）
     restart_dsh_service: async () => {
       if (deps.restartService === undefined) throw new Error('restart_dsh_service: 服务面不可用')
       deps.log('[rpc] 收到重启 dsh 服务请求')
@@ -559,6 +563,21 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       if (deps.logPageConsole !== undefined) deps.logPageConsole({ level, msg, pageUrl })
       else deps.log(`[page.${level}] ${msg}`)
       return {}
+    },
+    // 批量版（#54 数据面聚合）：client 攒批后一次调用，壳侧逐条走与 log_console 完全相同的
+    // 落盘/镜像路径（顺序保持）。单条版保留不动（旧 client 与手工调用不受影响）。
+    log_console_batch: (args) => {
+      const items = Array.isArray(args.items) ? args.items : []
+      for (const item of items) {
+        if (typeof item !== 'object' || item === null) continue
+        const row = item as Record<string, unknown>
+        const level = argString(row, 'level', 'log')
+        const msg = argString(row, 'msg', '')
+        const pageUrl = argString(row, 'pageUrl', '')
+        if (deps.logPageConsole !== undefined) deps.logPageConsole({ level, msg, pageUrl })
+        else deps.log(`[page.${level}] ${msg}`)
+      }
+      return { count: items.length }
     },
     log_diag: (args) => {
       deps.log(`[diag] ${argString(args, 'msg', '(empty)')}`)

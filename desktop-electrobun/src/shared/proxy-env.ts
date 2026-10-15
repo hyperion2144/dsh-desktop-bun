@@ -116,3 +116,22 @@ export function resolveProxyEnv(settings: DesktopSettings, systemProxy: ProxyEnv
   const inject = (value: string | null): string | null => (value === null ? null : injectProxyCredentials(value, user, pass))
   return { ...env, http: inject(env.http), https: inject(env.https), all: inject(env.all) }
 }
+
+/**
+ * ProxyEnv → 子进程 env 记录（#79：pnpm 安装环境注入）。大小写都写——不少工具只认小写；
+ * null 条目不写（installRuntime 把这份记录 spread 在 process.env 之上，
+ * 与宿主 spawn 同一语义：代理关了不动用户自己环境里的变量）。
+ */
+export function proxyEnvRecord(proxy: ProxyEnv): Record<string, string> {
+  const out: Record<string, string> = {}
+  const apply = (name: 'HTTP_PROXY' | 'HTTPS_PROXY' | 'ALL_PROXY' | 'NO_PROXY', value: string | null): void => {
+    if (value === null || value === '') return
+    out[name] = value
+    out[name.toLowerCase()] = value
+  }
+  apply('HTTP_PROXY', proxy.http)
+  apply('HTTPS_PROXY', proxy.https)
+  apply('ALL_PROXY', proxy.all)
+  apply('NO_PROXY', proxy.no_proxy)
+  return out
+}

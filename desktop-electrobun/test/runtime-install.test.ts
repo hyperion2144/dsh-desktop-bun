@@ -3,7 +3,7 @@
 // 装树流程用假 spawn 驱动（不真跑 pnpm）：假 spawn 负责「写出一棵合法的运行时树 + 打进度行 + 退出」，
 // 于是这条链上的每个判定（工作区文件内容、进度、失败清理、成功判据、超时）都能在毫秒级验到。
 
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { afterEach, describe, expect, test } from 'bun:test'
@@ -11,11 +11,14 @@ import {
   OUTPUT_TAIL_LINES,
   createRuntimeDownloader,
   ensureNodeShim,
+  ensureShimDir,
   installRuntime,
   nodeShimScript,
   parsePnpmProgress,
   pickInstallerErrorTail,
+  pnpmShimScript,
   resolvePnpmCjs,
+  shimCmdScript,
   tailLines,
 } from '../src/bun/runtime-install.ts'
 
@@ -151,6 +154,72 @@ describe('node 垫片', () => {
   })
 })
 
+describe('宿主 PATH 垫片（#70）', () => {
+  test('pnpm 垫片脚本：POSIX 形态 exec bun pnpm.cjs "$@"', () => {
+    expect(pnpmShimScript('/bin/bun', '/x/pnpm.cjs')).toBe('#!/bin/sh\nexec "/bin/bun" "/x/pnpm.cjs" "$@"\n')
+  })
+
+  test('cmd 垫片脚本：node 与 pnpm 两形态（Windows 的 execa 经 cmd.exe 找 .cmd）', () => {
+    expect(shimCmdScript('/bin/bun')).toBe('@"/bin/bun" %*\r\n@exit /b %ERRORLEVEL%\r\n')
+    expect(shimCmdScript('/bin/bun', '/x/pnpm.cjs')).toBe('@"/bin/bun" "/x/pnpm.cjs" %*\r\n@exit /b %ERRORLEVEL%\r\n')
+  })
+
+  test('ensureShimDir：有 node 也写 pnpm 垫片（宿主要解析到内置 pnpm），node 垫片不插手', () => {
+    const appSupport = tempDir()
+    const dir = ensureShimDir({ appSupport, bunPath: '/bin/bun', hasNode: true, pnpmCjs: '/x/pnpm.cjs' })
+    expect(dir).toBe(join(appSupport, 'runtimes', '.node-shim'))
+    expect(readFileSync(join(dir as string, 'pnpm'), 'utf8')).toBe(pnpmShimScript('/bin/bun', '/x/pnpm.cjs'))
+    expect(readFileSync(join(dir as string, 'pnpm.cmd'), 'utf8')).toBe(shimCmdScript('/bin/bun', '/x/pnpm.cjs'))
+    expect(existsSync(join(dir as string, 'node'))).toBe(false)
+  })
+
+  test('ensureShimDir：没 node 时 node 垫片落盘并补 .cmd 形态（Windows 构建脚本也找得到）', () => {
+    const appSupport = tempDir()
+    const dir = ensureShimDir({ appSupport, bunPath: '/bin/bun', hasNode: false, pnpmCjs: null })
+    expect(readFileSync(join(dir as string, 'node'), 'utf8')).toBe(nodeShimScript('/bin/bun'))
+    expect(readFileSync(join(dir as string, 'node.cmd'), 'utf8')).toBe(shimCmdScript('/bin/bun'))
+    expect(existsSync(join(dir as string, 'pnpm'))).toBe(false)
+  })
+
+  test('ensureShimDir：宿主通道 pnpm.cjs 解析不到（null）→ 清掉陈旧 pnpm 垫片（不留死垫片）', () => {
+    const appSupport = tempDir()
+    const dir = ensureShimDir({ appSupport, bunPath: '/bin/bun', hasNode: true, pnpmCjs: '/x/old.cjs' }) as string
+    expect(existsSync(join(dir, 'pnpm'))).toBe(true)
+    // 切运行时/删树后解析不到：陈旧垫片必须从盘上消失，否则宿主 PATH 踩到指向已删 pnpm.cjs 的死垫片
+    expect(ensureShimDir({ appSupport, bunPath: '/bin/bun', hasNode: true, pnpmCjs: null })).toBeNull()
+    expect(existsSync(join(dir, 'pnpm'))).toBe(false)
+    expect(existsSync(join(dir, 'pnpm.cmd'))).toBe(false)
+  })
+
+  test('ensureShimDir：旧通道（pnpmCjs 缺省）不写也不删 pnpm 垫片（#70 前行为不变）', () => {
+    const appSupport = tempDir()
+    const dir = ensureShimDir({ appSupport, bunPath: '/bin/bun', hasNode: true, pnpmCjs: '/x/pnpm.cjs' }) as string
+    expect(ensureShimDir({ appSupport, bunPath: '/bin/bun', hasNode: true })).toBeNull()
+    expect(readFileSync(join(dir, 'pnpm'), 'utf8')).toBe(pnpmShimScript('/bin/bun', '/x/pnpm.cjs'))
+  })
+
+  test('pnpm 垫片可执行且参数透传（POSIX：用 /bin/echo 当解释器验证，不依赖真 bun/pnpm）', () => {
+    if (process.platform === 'win32') return
+    const appSupport = tempDir()
+    const dir = ensureShimDir({ appSupport, bunPath: '/bin/echo', hasNode: true, pnpmCjs: '/fake/pnpm.cjs' })
+    const proc = Bun.spawnSync([join(dir as string, 'pnpm'), '--version'])
+    expect(proc.stdout.toString().trim()).toBe('/fake/pnpm.cjs --version')
+  })
+
+  test('.cmd 垫片真机链路：cmd /c pnpm 解析到垫片，参数与退出码都透传（仅 Windows）', () => {
+    if (process.platform !== 'win32') return
+    const root = tempDir()
+    const fixture = join(root, 'fixture-pnpm.cjs')
+    writeFileSync(fixture, "if (process.argv[2] === 'fail') process.exit(3)\nconsole.log('SHIM-OK', process.argv.slice(2).join(','))\n")
+    const dir = ensureShimDir({ appSupport: root, bunPath: process.execPath, hasNode: true, pnpmCjs: fixture }) as string
+    const env = { PATH: `${dir};${process.env.PATH ?? ''}`, SYSTEMROOT: process.env.SYSTEMROOT ?? 'C:\\Windows' }
+    const ok = Bun.spawnSync(['cmd', '/c', 'pnpm', 'a', 'b'], { env })
+    expect(ok.stdout.toString().trim()).toBe('SHIM-OK a,b')
+    expect(ok.exitCode).toBe(0)
+    const bad = Bun.spawnSync(['cmd', '/c', 'pnpm', 'fail'], { env })
+    expect(bad.exitCode).toBe(3)
+  })
+})
 describe('resolvePnpmCjs', () => {
   test('优先级：显式 env > 当前运行时树 > 内置树 > 任一已下载树', () => {
     const appSupport = tempDir()
@@ -319,6 +388,7 @@ describe('createRuntimeDownloader', () => {
       },
       record: (version, source) => recorded.push({ version, source }),
     })
+    // 终态不完美也无妨：面板只在 active 期间读进度；装完后 downloaded 会对齐 resolved（#79）
     expect(downloader.status()).toEqual({ active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '' })
     const seenDuringRun: boolean[] = []
     const pending = downloader.start('9.9.9', 'npm')
@@ -326,8 +396,27 @@ describe('createRuntimeDownloader', () => {
     await expect(pending).resolves.toEqual({ ok: true, version: '9.9.9' })
     expect(seenDuringRun).toEqual([true])
     expect(recorded).toEqual([{ version: '9.9.9', source: 'npm' }])
-    expect(downloader.status()).toEqual({ active: false, version: '9.9.9', resolved: 5, downloaded: 4, added: 3, error: '' })
+    // #79：成功终态 downloaded 对齐 resolved（上次进度快照停在 538/625=86% 定格的假活就是这么来的）
+    expect(downloader.status()).toEqual({ active: false, version: '9.9.9', resolved: 5, downloaded: 5, added: 3, error: '' })
   })
+
+  test('成功终态：最后一条进度停在中间（如 538/625）也归一到 100%', async () => {
+    const downloader = createRuntimeDownloader({
+      install: async (_version, onProgress) => {
+        onProgress({ resolved: 625, downloaded: 538, added: 520 })
+        // pnpm default reporter 在下载阶段结束后不再打 Progress 行（linking 无进度可读），
+        // 现实里最后一条快照就停在这里
+      },
+      record: () => {},
+    })
+    await downloader.start('0.2.1-alpha.3', 'github')
+    const status = downloader.status()
+    expect(status.downloaded).toBe(625)
+    expect(status.resolved).toBe(625)
+    expect(status.added).toBe(520)
+    expect(status.error).toBe('')
+  })
+
 
   test('单飞：已有任务在跑时第二次 start 抛「已有运行时下载任务」', async () => {
     let release: () => void = () => {}
@@ -362,5 +451,21 @@ describe('createRuntimeDownloader', () => {
     expect(status.active).toBe(false)
     expect(status.error).toContain('ERR_PNPM_NO_MATCHING_VERSION')
     expect(status.version).toBe('9.9.9')
+  })
+
+  test('失败终态：保留最后进度快照与 error（面板拿它显示失败与已下载数，#79）', async () => {
+    const downloader = createRuntimeDownloader({
+      install: async (_version, onProgress) => {
+        onProgress({ resolved: 625, downloaded: 538, added: 520 })
+        throw new Error('dsh 0.2.1-alpha.3 安装失败（exit 1）：ETIMEDOUT')
+      },
+      record: () => {},
+    })
+    await downloader.start('0.2.1-alpha.3', 'github').catch(() => {})
+    const status = downloader.status()
+    expect(status.active).toBe(false)
+    expect(status.downloaded).toBe(538)
+    expect(status.resolved).toBe(625)
+    expect(status.error).toContain('ETIMEDOUT')
   })
 })

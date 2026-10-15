@@ -21,6 +21,7 @@ await build({
   outfile: join(tmp, 'download-intercept.mjs'),
   format: 'esm',
   platform: 'node',
+  bundle: true,
   target: 'node20',
   logLevel: 'silent',
 })
@@ -59,6 +60,7 @@ await build({
   outfile: join(tmp, 'platform-keyboard.mjs'),
   format: 'esm',
   platform: 'node',
+  bundle: true,
   target: 'node20',
   logLevel: 'silent',
 })
@@ -187,6 +189,74 @@ assert.equal(kb.applyShortcutEdit(edited.document, { type: 'set', id: 'a', bindi
 assert.equal(kb.applyShortcutEdit(edited.document, { type: 'set', id: 'a', binding: null }, 'desktop:macos').ok, false, '非对象绑定拒绝')
 assert.equal(kb.applyShortcutEdit(edited.document, { type: 'nope' }, 'desktop:macos').ok, false, '未知编辑类型拒绝')
 
+// ── console-batch（#54）：页面 console 攒批上报 ──
+await build({
+  entryPoints: [join(root, 'src/client/console-batch.ts')],
+  outfile: join(tmp, 'console-batch.mjs'),
+  format: 'esm',
+  platform: 'node',
+  logLevel: 'silent',
+})
+const { createConsoleBatch } = await import(pathToFileURL(join(tmp, 'console-batch.mjs')).href)
+
+{
+  // maxItems 触发：攒满即发、顺序保持；未满不发；手动 flush 立即发；空 flush 不发空批
+  const sent = []
+  const batch = createConsoleBatch({
+    send: (items) => sent.push(items),
+    maxItems: 3,
+    flushMs: 3_600_000,
+    schedule: () => () => {},
+  })
+  batch.push({ level: 'log', msg: '一', pageUrl: 'p' })
+  batch.push({ level: 'error', msg: '二', pageUrl: 'p' })
+  assert.equal(sent.length, 0, '未攒满不发')
+  batch.push({ level: 'info', msg: '三', pageUrl: 'p' })
+  assert.equal(sent.length, 1, '攒满 maxItems 即发')
+  assert.deepEqual(
+    sent[0].map((item) => item.msg),
+    ['一', '二', '三'],
+    '整批按 push 顺序',
+  )
+  batch.push({ level: 'warn', msg: '四', pageUrl: 'p' })
+  batch.flush()
+  assert.deepEqual(sent[1].map((item) => item.msg), ['四'], 'flush 立即发掉手头批次')
+  batch.flush()
+  assert.equal(sent.length, 2, '空批次不产生空上报')
+}
+
+{
+  // 定时线触发：最老一条等满 flushMs 自动发
+  const sent = []
+  const batch = createConsoleBatch({ send: (items) => sent.push(items), flushMs: 20 })
+  batch.push({ level: 'log', msg: '慢线', pageUrl: 'p' })
+  assert.equal(sent.length, 0, '定时线未到不发')
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  assert.equal(sent.length, 1, 'flushMs 到点自动发')
+  assert.deepEqual(sent[0].map((item) => item.level), ['log'])
+}
+
+{
+  // send 同步抛错：该批丢弃、后续批次不受影响（与旧「单条失败吞掉」同口径）
+  const sent = []
+  let boom = true
+  const batch = createConsoleBatch({
+    send: (items) => {
+      if (boom) throw new Error('send 炸了')
+      sent.push(items)
+    },
+    maxItems: 2,
+    flushMs: 3_600_000,
+    schedule: () => () => {},
+  })
+  batch.push({ level: 'log', msg: '会炸', pageUrl: 'p' })
+  batch.push({ level: 'log', msg: '也炸', pageUrl: 'p' })
+  boom = false
+  batch.push({ level: 'log', msg: '好的', pageUrl: 'p' })
+  batch.push({ level: 'log', msg: '也好', pageUrl: 'p' })
+  assert.deepEqual(sent[0].map((item) => item.msg), ['好的', '也好'], 'send 抛错只丢该批')
+}
+
 // ── 壳 preload 注入的 dshDesktop 载体脚本（desktop-electrobun/src/bun/carrier.ts，
 // 旧壳 Rust 版 DESKTOP_CARRIER_INIT_SCRIPT 的等价物）：esbuild 转译后在最小 DOM 桩里
 // 真跑一遍，锁住对外形状（幂等安装 / 惰性转发 / 轮询等待 / 平台标记）。
@@ -195,6 +265,7 @@ await build({
   outfile: join(tmp, 'carrier.mjs'),
   format: 'esm',
   platform: 'node',
+  bundle: true,
   target: 'node20',
   logLevel: 'silent',
 })
@@ -300,6 +371,7 @@ await build({
   outfile: join(tmp, 'composer-input-guard.mjs'),
   format: 'esm',
   platform: 'node',
+  bundle: true,
   target: 'node20',
   logLevel: 'silent',
 })
@@ -412,6 +484,215 @@ const area = new gt.TestElement('TEXTAREA')
 area.value = 'x\u001dy'
 gt.fire('input', mkEvent({ target: area, type: 'input' }))
 assert.equal(area.value, 'xy', '输入框 value 里的控制字符也被擦掉')
+
+
+
+
+// ── shell-rpc（#50）：统一传输层，三通道选择 / wire 协议 / 超时 / 窗口三键 ──
+await build({
+  entryPoints: [join(root, 'src/client/shell-rpc.ts')],
+  outfile: join(tmp, 'shell-rpc.mjs'),
+  format: 'esm',
+  platform: 'node',
+  bundle: true,
+  target: 'node20',
+  logLevel: 'silent',
+})
+const { createShellRpc, sendWindowAction } = await import(pathToFileURL(join(tmp, 'shell-rpc.mjs')).href)
+
+// 官方桥：捕获 postMessage 包形，回包经 receiveMessageFromHost 注入
+{
+  const sent = []
+  const globals = {
+    __electrobunHostBridge: { postMessage: (raw) => { sent.push(JSON.parse(raw)) } },
+    __electrobun: {},
+  }
+  const timers = []
+  const rpc = createShellRpc({
+    readGlobals: () => globals,
+    setTimeoutImpl: (fn, ms) => { timers.push({ fn, ms }); return timers.length },
+    clearTimeoutImpl: () => {},
+  })
+  const p = rpc.invoke('echo', { a: 1 })
+  assert.equal(sent.length, 1, '官方通道：请求经 __electrobunHostBridge.postMessage 发出')
+  assert.deepEqual(sent[0], { type: 'request', id: 1, method: 'echo', params: { a: 1 } }, '包形对齐官方 wire 协议')
+  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 1, success: true, payload: 'ok-echo' })
+  assert.equal(await p, 'ok-echo', '成功响应 resolve value')
+
+  const p2 = rpc.invoke('boom')
+  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 2, success: false, error: '炸了' })
+  await assert.rejects(p2, /炸了/, '业务失败 reject Error(error)')
+
+  const p3 = rpc.invoke('slow', {}, { timeoutMs: 50 })
+  timers[timers.length - 1].fn()
+  await assert.rejects(p3, /timed out/, '超时 reject，对齐官方默认语义')
+
+  assert.equal(rpc.available(), true, '有官方桥时 available()')
+}
+
+// 先期积压回包：接管接收面时排空（对齐官方 Electroview.init）
+{
+  const globals = {
+    __electrobunHostBridge: { postMessage: () => {} },
+    __electrobun: {},
+    __electrobunPendingHostMessages: [{ type: 'response', id: 9, success: true, payload: 'early' }],
+  }
+  const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
+  void rpc.invoke('x')
+  assert.deepEqual(globals.__electrobunPendingHostMessages, [], '接管后积压已排空')
+}
+
+// 壳→页面主动推送（#73）：{type:'message', id:消息名, payload} 分发给监听器
+{
+  const globals = {
+    __electrobunHostBridge: { postMessage: () => {} },
+    __electrobun: {},
+  }
+  const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
+  const seen = []
+  const off = rpc.onMessage((name, payload) => seen.push([name, payload]))
+  void rpc.invoke('ping').catch(() => {}) // 接管接收面（真页面上 handlePacket 也只在接管后可达）
+  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: { maximized: true } })
+  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 1, success: true, payload: 'x' })
+  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: { maximized: false } })
+  assert.deepEqual(seen, [['window_state_changed', { maximized: true }], ['window_state_changed', { maximized: false }]], 'message 包分发到监听器，response 不串台')
+  off()
+  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: {} })
+  assert.equal(seen.length, 2, '退订后不再分发')
+  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 7, payload: {} })
+  assert.equal(seen.length, 2, 'id 非字符串的 message 包丢弃')
+}
+
+// 接管前抵达的推送：preload 攒在 __electrobunPendingHostMessages，首查（ensureReceive）时排空分发
+{
+  const globals = {
+    __electrobunHostBridge: { postMessage: () => {} },
+    __electrobun: {},
+    __electrobunPendingHostMessages: [{ type: 'message', id: 'window_state_changed', payload: {} }],
+  }
+  const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
+  let pushed = 0
+  rpc.onMessage((name) => {
+    if (name === 'window_state_changed') pushed += 1
+  })
+  void rpc.invoke('x').catch(() => {})
+  assert.equal(pushed, 1, '积压的推送在首次 invoke 排空时分发（#73 启动竞态）')
+  assert.deepEqual(globals.__electrobunPendingHostMessages, [], '积压已排空')
+}
+
+// 多监听器隔离：一个抛错不影响其余
+{
+  const globals = {
+    __electrobunHostBridge: { postMessage: () => {} },
+    __electrobun: {},
+  }
+  const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
+  let second = 0
+  rpc.onMessage(() => {
+    throw new Error('第一个监听器炸了')
+  })
+  void rpc.invoke('ping').catch(() => {}) // 接管接收面（真页面上 handlePacket 也只在接管后可达）
+  rpc.onMessage((name) => {
+    if (name === 'window_state_changed') second += 1
+  })
+  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: {} })
+  assert.equal(second, 1, '一个监听器抛错不阻断其余监听器')
+}
+
+// 中继通道（mobile-access 远程页）
+{
+  const globals = { __DSH_SHELL_RELAY__: { invoke: async (cmd, args) => ({ cmd, args }) } }
+  const rpc = createShellRpc({ readGlobals: () => globals })
+  assert.deepEqual(await rpc.invoke('get_notifications_state', { x: 1 }), { cmd: 'get_notifications_state', args: { x: 1 } }, '有中继无桥时走中继')
+}
+
+// 同源 fetch 兑底：带 token 头 + 请求体字形
+{
+  const calls = []
+  const fetchImpl = async (url, init) => { calls.push({ url, init }); return { ok: true, json: async () => ({ ok: true, value: { status: 2 } }) } }
+  const globals = { __DSH_SHELL_VIEW_TOKEN__: 'tok-1' }
+  const rpc = createShellRpc({ readGlobals: () => globals, fetchImpl })
+  assert.deepEqual(await rpc.invoke('get_dsh_status'), { status: 2 }, 'fetch 兑底解析 value')
+  assert.equal(calls[0].url, '/__shell__/rpc', '端点正确')
+  assert.equal(calls[0].init.headers['x-dsh-shell-view'], 'tok-1', '带每视图 token 头')
+  assert.deepEqual(JSON.parse(calls[0].init.body), { cmd: 'get_dsh_status', args: {} }, 'body 对齐旧 shim 协议')
+
+  const fetchErr = async () => ({ ok: true, json: async () => ({ ok: false, error: 'unsupported command: nope' }) })
+  const rpcE = createShellRpc({ readGlobals: () => globals, fetchImpl: fetchErr })
+  await assert.rejects(rpcE.invoke('nope'), /unsupported command/, 'fetch 业务失败可见')
+}
+
+// 无任何通道：available false + invoke reject
+{
+  const rpc = createShellRpc({ readGlobals: () => ({}) })
+  assert.equal(rpc.available(), false)
+  await assert.rejects(rpc.invoke('x'), /shell rpc unavailable/)
+}
+
+// 官方通道失败不回退 fetch（命令可能已生效，toggle 二次执行会翻转两次）
+{
+  let fetchCalls = 0
+  const fetchImpl = async () => { fetchCalls += 1; return { ok: true, json: async () => ({ ok: true, value: 1 }) } }
+  const globals = { __electrobunHostBridge: { postMessage: () => {} }, __electrobun: {}, __DSH_SHELL_VIEW_TOKEN__: 't3' }
+  const rpc = createShellRpc({ readGlobals: () => globals, fetchImpl, setTimeoutImpl: (fn) => { fn(); return 1 }, clearTimeoutImpl: () => {} })
+  await assert.rejects(rpc.invoke('x'), /timed out/)
+  assert.equal(fetchCalls, 0, '官方通道超时后不打 fetch 兑底')
+}
+
+// 窗口三键：官方通道 window_* 方法；无桥时 /__shell__/window 兑底
+{
+  const sent = []
+  const globals = { __electrobunHostBridge: { postMessage: (raw) => sent.push(JSON.parse(raw)) }, __electrobun: {} }
+  const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
+  const p = sendWindowAction('toggle-maximize', { rpc, readGlobals: () => globals })
+  assert.equal(sent[0].method, 'window_toggle_maximize', '三键走官方 RPC 方法')
+  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 1, success: true, payload: null })
+  await p
+
+  const calls = []
+  const fetchImpl = async (url, init) => { calls.push({ url, init }); return { ok: true } }
+  await sendWindowAction('minimize', { fetchImpl, readGlobals: () => ({ __DSH_SHELL_VIEW_TOKEN__: 't2' }) })
+  assert.equal(calls[0].url, '/__shell__/window', '无桥三键兑底到窗口端点')
+  assert.deepEqual(JSON.parse(calls[0].init.body), { action: 'minimize' })
+}
+
+// ── devtools-toggle（#69）：开发者工具开关的状态机与安全面文案 ──
+await build({
+  entryPoints: [join(root, 'src/client/devtools-toggle.ts')],
+  outfile: join(tmp, 'devtools-toggle.mjs'),
+  format: 'esm',
+  platform: 'node',
+  target: 'node20',
+  logLevel: 'silent',
+})
+
+const dt = await import(pathToFileURL(join(tmp, 'devtools-toggle.mjs')).href)
+
+// 状态机：同值不动；两个方向的变更都先弹确认，确认才写入并重启
+assert.equal(dt.planDevToolsUi(false, false).action, 'idle', '关→关不动')
+assert.equal(dt.planDevToolsUi(true, true).action, 'idle', '开→开不动')
+assert.equal(dt.planDevToolsUi(false, true).action, 'confirm-on', '关→开先弹安全确认（取消不写入）')
+assert.equal(dt.planDevToolsUi(true, false).action, 'confirm-off', '开→关也弹确认（重启不静默）')
+
+// 关闭确认文案：点明重启与中断
+const dtOffCopy = dt.devToolsDisableCopy()
+assert.ok(dtOffCopy.title.includes('关闭'), '关闭弹窗标题点名关闭')
+assert.ok(dtOffCopy.confirm.includes('重启'), '关闭确认动作带重启语义')
+assert.ok(dtOffCopy.lines.some((l) => l.includes('中断')), '关闭文案提示页面会短暂中断')
+assert.equal(dtOffCopy.cancel, '取消', '取消不写入')
+
+// 确认弹窗文案：说清口开在哪、谁能用、能造成什么
+const dtCopy = dt.devToolsConfirmCopy()
+assert.ok(dtCopy.title.includes('开发者工具'), '标题点名功能')
+assert.ok(dtCopy.lines.some((l) => l.includes('回环')), '文案说明口在回环地址')
+assert.ok(dtCopy.lines.some((l) => l.includes('任意') && l.includes('代码')), '文案点破本机任意程序可执行代码')
+assert.ok(dtCopy.lines.some((l) => l.includes('凭据')), '文案点破会话内容含凭据')
+assert.ok(dtCopy.confirm.includes('重启'), '确认动作带重启语义')
+assert.equal(dtCopy.cancel, '取消', '取消不写入')
+
+// 保存后提示：两个方向都点明要重启
+assert.ok(dt.devToolsSavedNote(true).includes('重启'), '开启提示含重启')
+assert.ok(dt.devToolsSavedNote(false).includes('重启'), '关闭提示含重启')
 
 
 rmSync(tmp, { recursive: true, force: true })

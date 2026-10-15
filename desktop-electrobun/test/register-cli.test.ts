@@ -349,6 +349,20 @@ describe('createRegisterCli（IO 外壳，全部注入）', () => {
     expect(value).toBe('C:\\other;/app-support/runtime/bin-dsh')
   })
 
+  test('win32：写回成功即乐观置已注册（TTL 内不被重测打回）', async () => {
+    // regStdout 始终不含本壳入口：即便随后的探测读不到刚写进的注册表，也不许把菜单打回未注册
+    const flaky = harness({
+      platform: 'win32',
+      whereResolved: null,
+      regStdout: 'Path    REG_SZ    C:\\other\r\n',
+    })
+    expect((await flaky.cli.register()).ok).toBe(true)
+    expect(flaky.cli.cached().kind).toBe('registered')
+    await flaky.cli.refresh()
+    expect(flaky.cli.cached().kind).toBe('registered')
+    expect(flaky.logs.some((line) => line.includes('乐观置位'))).toBe(true)
+  })
+
   test('shim 内容过期（旧版本写坏的入口、无标记注释）也重写——私有目录不认「别人」', async () => {
     const stale = harness({
       platform: 'win32',

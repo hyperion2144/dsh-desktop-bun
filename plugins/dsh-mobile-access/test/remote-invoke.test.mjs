@@ -21,14 +21,16 @@ after(() => {
 
 const { remoteInvokePatch } = await import('../lib/proxy.mjs');
 
-test('remoteInvokePatch：端口+token 齐全才生成 shim，协议与壳侧 tauri-ipc 对齐', () => {
+test('remoteInvokePatch：端口+token 齐全才生成 shim，协议与壳 RPC HTTP 端点对齐（#50 改中性全局）', () => {
   const patch = remoteInvokePatch('6391', 'tok-abc');
   assert.ok(typeof patch === 'string' && patch.startsWith('<script data-dsh-mobile-remote-rpc="1">'));
   assert.ok(patch.includes('/_loopback/6391/__shell__/rpc'));
   assert.ok(patch.includes('"x-dsh-shell-view"'));
   assert.ok(patch.includes('JSON.stringify({cmd:String(cmd)'));
-  assert.ok(patch.includes('__TAURI_INTERNALS__'));
-  assert.ok(patch.includes('__TAURI__'));
+  assert.ok(patch.includes('__DSH_SHELL_RELAY__'));
+  assert.ok(patch.includes('invoke:invoke'));
+  // #50 去 Tauri 化：不再注入 __TAURI_INTERNALS__ / __TAURI__
+  assert.ok(!patch.includes('__TAURI'));
   assert.ok(patch.endsWith('</script>'));
   // 数字端口同样收
   assert.equal(typeof remoteInvokePatch(6391, 'tok-abc'), 'string');

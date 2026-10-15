@@ -4,13 +4,15 @@
 // 禁止 document.createElement / innerHTML / appendChild，UI 全部由 JSX 返回；状态 useState/useEffect/useCallback 声明式管理。
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type { ClientContext } from './ctx-types.ts'
+import { shellRpc } from './shell-rpc.ts'
 
 import { ThemeSelect } from './theme-select.tsx'
+import { devToolsConfirmCopy, devToolsDisableCopy, devToolsSavedNote, planDevToolsUi } from './devtools-toggle.ts'
 export const inject = ['slots']
 
-// 设置项持久化走 Tauri IPC（nsSave → invoke('save_desktop_settings')，Rust 单写者
+// 设置项持久化走壳 RPC（nsSave → invoke('save_desktop_settings')，宿主单写者
 // 读改写私有 desktop-settings.json），不直接读写 settings.yaml；
-// Tauri IPC 另保留只读回显（get_proxy_settings 的 effective 预览、profile 目录扫描）与动作（重启/连通性测试/运行时刻录读取）。
+// 壳 RPC 另保留只读回显（get_proxy_settings 的 effective 预览、profile 目录扫描）与动作（重启/连通性测试/运行时刻录读取）。
 interface NsRpc {
   rpc: { call: (channel: string, endpoint: string, payload?: unknown) => Promise<NsRpcResponse> }
 }
@@ -22,22 +24,10 @@ interface NsRpcResponse {
 
 let nsRpc: NsRpc | null = null
 
-function hasIpc(): boolean {
-  const w = window as unknown as {
-    __TAURI_INTERNALS__?: { invoke?: unknown }
-    __TAURI__?: { core?: { invoke?: unknown } }
-  }
-  return Boolean(w.__TAURI_INTERNALS__?.invoke || w.__TAURI__?.core?.invoke)
-}
 
+/** 壳 RPC 统一通道（#50）：签名保持旧本地 invoke 不变，调用点零改动。 */
 function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const w = window as unknown as {
-    __TAURI_INTERNALS__?: { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<T> }
-    __TAURI__?: { core?: { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<T> } }
-  }
-  if (w.__TAURI_INTERNALS__?.invoke) return w.__TAURI_INTERNALS__.invoke(cmd, args)
-  if (w.__TAURI__?.core?.invoke) return w.__TAURI__?.core.invoke(cmd, args)
-  return Promise.reject(new Error('no tauri ipc'))
+  return shellRpc.invoke<T>(cmd, args)
 }
 
 
@@ -61,6 +51,8 @@ interface DesktopData {
   desktop_layout_on_phones?: boolean | null
   /** #186 防休眠：有会话在跑时阻止系统休眠（缺省 true；屏幕仍会照常熄灭） */
   prevent_sleep?: boolean | null
+  /** #69 开发者工具：打包态重启后开 CEF 远程调试口并放出菜单（缺省 false；安全面） */
+  dev_tools?: boolean | null
 }
 
 interface DshSourceState {
@@ -85,6 +77,8 @@ interface RuntimeCatalog {
   catalog: { version: string; channel: string }[]
   /** #107：目录拉取失败时的降级标记（此时 catalog 为空、installed 为本地全部已装） */
   error?: string
+  /** #79：运行时回退说明（偏好版本不在已装目录时的用户可见原因；无回退为 null） */
+  note?: string | null
   /** 当前真正在跑的那棵树（override | installed | builtin）：标记「运行中」并禁掉它的下载/卸载 */
   running?: { kind: string; version: string | null; dir: string | null } | null
 }
@@ -202,6 +196,32 @@ const INPUT_BASE_STYLE: React.CSSProperties = {
 const INPUT_FULL_STYLE: React.CSSProperties = { ...INPUT_BASE_STYLE, width: '100%', boxSizing: 'border-box' }
 const ROW_STYLE: React.CSSProperties = { display: 'flex', gap: 8, alignItems: 'center' }
 const FLEX_1_STYLE: React.CSSProperties = { flex: 1 }
+// #69 开发者工具确认弹窗：遮罩/卡片/文字 token 与 local-chrome.ts 退出确认弹窗同款（--dsw-alias-* 带回退）
+const DEV_TOOLS_OVERLAY_STYLE: React.CSSProperties = {
+  position: 'fixed',
+  inset: 0,
+  zIndex: 2147483000,
+  background: 'rgba(0,0,0,0.45)',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+}
+const DEV_TOOLS_MODAL_STYLE: React.CSSProperties = {
+  background: 'var(--dsw-alias-bg-layer-1,#1e1e1e)',
+  border: '1px solid var(--dsw-alias-border-l2,#444)',
+  borderRadius: 12,
+  padding: '18px 20px',
+  minWidth: 320,
+  maxWidth: '80vw',
+  boxShadow: '0 12px 40px rgba(0,0,0,0.4)',
+  color: 'var(--dsw-alias-label-primary,#eee)',
+}
+const DEV_TOOLS_TITLE_STYLE: React.CSSProperties = { fontSize: 14, fontWeight: 600, marginBottom: 10 }
+const DEV_TOOLS_BODY_STYLE: React.CSSProperties = { fontSize: 12.5, lineHeight: 1.6, color: 'var(--dsw-alias-label-secondary,#bbb)' }
+const DEV_TOOLS_ACTIONS_STYLE: React.CSSProperties = { display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }
+// #69 确认弹窗文案纯静态：模块级算一次
+const DEV_TOOLS_CONFIRM = devToolsConfirmCopy()
+const DEV_TOOLS_DISABLE = devToolsDisableCopy()
 
 const BTN_PRIMARY_STYLE: React.CSSProperties = {
   background: 'var(--dsw-alias-brand-primary-new-color,#4176e6)',
@@ -239,7 +259,7 @@ const DANGER_MSG_STYLE: React.CSSProperties = {
 
 // ── 持久化通道（nsSave / nsGet）──
 // #95 v0.1.7：dsh 废除 settings.yaml 插件命名空间——壳设置搬出 dsh，
-// 走壳自己的 Tauri IPC（Rust 单写者，$DSH_HOME/desktop-settings.json），不再经宿主 RPC。
+// 走壳自己的 RPC（宿主单写者，$DSH_HOME/desktop-settings.json），不再经宿主 RPC。
 async function nsSave(patch: Record<string, unknown>): Promise<void> {
   await invoke('save_desktop_settings', { patch })
 }
@@ -390,6 +410,10 @@ function DesktopSettingsPanel(): React.ReactElement {
   // #147 路线 A：手机端是否改用桌面布局（不注入 dsh-web-mobile）；#144：网关 mux 心跳覆盖
   const [muxHeartbeatInput, setMuxHeartbeatInput] = useState<string>('30000')
   const [desktopLayoutOnPhones, setDesktopLayoutOnPhones] = useState(false)
+  // #69：开发者工具开关（缺省关；双向变更都先弹确认；确认后保存并重启桌面壳生效）
+  const [devToolsConfirmKind, setDevToolsConfirmKind] = useState<null | 'on' | 'off'>(null)
+  const [devTools, setDevTools] = useState(false)
+  const [devToolsNote, setDevToolsNote] = useState<string | null>(null)
   // #186：有会话在跑时阻止系统休眠（缺省开）
   const [preventSleep, setPreventSleep] = useState(true)
   const [preventSleepNote, setPreventSleepNote] = useState<string | null>(null)
@@ -398,9 +422,42 @@ function DesktopSettingsPanel(): React.ReactElement {
   useEffect(() => {
     setDesktopLayoutOnPhones(desktop.desktop_layout_on_phones === true)
     setPreventSleep(desktop.prevent_sleep !== false)
+    setDevTools(desktop.dev_tools === true)
     const hb = desktop.mux_heartbeat_ms
     setMuxHeartbeatInput(typeof hb === 'number' ? String(hb) : '30000')
   }, [desktop])
+
+  /** #69：开发者工具开关——两个方向的变更都先弹确认（取消不写入），确认才保存并重启桌面壳。 */
+  const handleToggleDevTools = (next: boolean): void => {
+    const plan = planDevToolsUi(devTools, next)
+    if (plan.action === 'idle') return
+    setDevToolsConfirmKind(plan.action === 'confirm-on' ? 'on' : 'off')
+  }
+
+  const saveDevToolsSetting = (on: boolean): void => {
+    setDevToolsConfirmKind(null)
+    setDevTools(on)
+    void nsSave({ dev_tools: on })
+      // 重启会把本调用连同页面一起重载（Failed to fetch）——这是完整重启的预期形态，不是失败；
+      // 只有真正的保存失败才报错并回滚勾选态。
+      .then(() => invoke('restart_dsh_service').catch(() => undefined))
+      .then(() => setDevToolsNote(devToolsSavedNote(on)))
+      .catch((e) => {
+        setDevTools(!on)
+        setDevToolsNote(`保存失败：${String(e)}`)
+      })
+  }
+
+  // #69：确认弹窗开着时 Escape = 取消（不写入），与 local-chrome 退出确认同款键盘可达
+  useEffect(() => {
+    if (devToolsConfirmKind === null) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setDevToolsConfirmKind(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [devToolsConfirmKind])
+  const devToolsActiveConfirm = devToolsConfirmKind === 'off' ? DEV_TOOLS_DISABLE : DEV_TOOLS_CONFIRM
   // 代理测试
   const [testResult, setTestResult] = useState<string | null>(null)
   const [testBusy, setTestBusy] = useState(false)
@@ -1029,12 +1086,26 @@ function DesktopSettingsPanel(): React.ReactElement {
             return
           }
           setDlProgress(null)
-          if (!sawActive) return
+          if (!sawActive) {
+            // #79：面板没开时结束的下载——挂载/重开后第一拍在这里恢复终态，不再静默。
+            // 失败终态写 {failed}（与 invoke catch 口径一致）；成功终态 error 为空且已进 installed，无需恢复。
+            if (s.version !== '' && s.error !== '') {
+              const reason = s.error.replace(/^下载失败：?/i, '') || '未知错误'
+              setRuntimeDownloading((prev) => {
+                // 已是失败态就别重置（轮询每 600ms 一拍，重置会闪）
+                if (typeof prev[s.version] === 'object') return prev
+                return { ...prev, [s.version]: { failed: reason } }
+              })
+            }
+            return
+          }
           sawActive = false
           const ok = !s.error
           setRuntimeDownloading((prev) => {
             const next = { ...prev }
-            delete next[s.version]
+            if (ok) delete next[s.version]
+            // #79：失败不再 delete（那会把失败洗成无状态）——写 {failed}，与 invoke catch 同口径
+            else next[s.version] = { failed: s.error.replace(/^下载失败：?/i, '') || '未知错误' }
             return next
           })
           void refreshRuntimes()
@@ -1519,6 +1590,9 @@ function DesktopSettingsPanel(): React.ReactElement {
                       ? `当前使用：运行时 ${runtimeCatalog.running.version}（${runtimeCatalog.running.kind}）`
                       : '当前无可用 dsh'}
               </div>
+              {runtimeCatalog.note && (
+                <div style={{ ...DANGER_NOTE_STYLE, marginBottom: 6, whiteSpace: 'pre-wrap' }}>{`⚠ ${runtimeCatalog.note}`}</div>
+              )}
               {(() => {
                 // 折叠（#95）：默认只显示各渠道头版 + 已下载版本，其余收进「展开全部」
                 const seen = new Set<string>()
@@ -1816,6 +1890,44 @@ function DesktopSettingsPanel(): React.ReactElement {
           直到会话跑完、dsh 实例停止或退出壳。屏幕该关还是照关，只是不让整机睡过去；合盖仍然会睡。改动立即生效。
         </div>
       </SectionBox>
+      {/* ── 开发者工具（#69）── */}
+      <SectionBox title="开发者工具">
+        <div style={ROW_STYLE}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="checkbox"
+              data-desktop-settings="dev-tools"
+              checked={devTools}
+              onChange={(e) => handleToggleDevTools(e.target.checked)}
+            />
+            允许打开 DevTools（打包态默认关；改动重启桌面壳生效）
+          </label>
+        </div>
+        {devToolsNote && <div style={NOTE_STYLE}>{devToolsNote}</div>}
+        <div style={NOTE_STYLE}>
+          开启后桌面壳在本机回环地址监听一个远程调试口，本机任意程序可借它在页面里执行代码。只在自己排查问题时开启，用完记得关掉并重启。
+        </div>
+        {devToolsConfirmKind !== null && (
+          <div style={DEV_TOOLS_OVERLAY_STYLE}>
+            <div style={DEV_TOOLS_MODAL_STYLE} data-desktop-settings="dev-tools-confirm">
+              <div style={DEV_TOOLS_TITLE_STYLE}>{devToolsActiveConfirm.title}</div>
+              {devToolsActiveConfirm.lines.map((line) => (
+                <div key={line} style={DEV_TOOLS_BODY_STYLE}>
+                  {line}
+                </div>
+              ))}
+              <div style={DEV_TOOLS_ACTIONS_STYLE}>
+                <PfBtn variant="ghost" onClick={() => setDevToolsConfirmKind(null)}>
+                  {devToolsActiveConfirm.cancel}
+                </PfBtn>
+                <PfBtn variant="primary" onClick={() => saveDevToolsSetting(devToolsConfirmKind === 'on')}>
+                  {devToolsActiveConfirm.confirm}
+                </PfBtn>
+              </div>
+            </div>
+          </div>
+        )}
+      </SectionBox>
       {/* ── 代理设置 ── */}
       <SectionBox title="代理设置">
         <div style={LABEL_STYLE}>代理模式</div>
@@ -1947,7 +2059,7 @@ function DesktopSettingsPanel(): React.ReactElement {
 }
 
 export function registerDesktopSettings(ctx: ClientContext): void {
-  if (!hasIpc()) return
+  if (!shellRpc.available()) return
   // 捕获 connection RPC（dsh settings 服务的桌面壳命名空间读写通道）
   try {
     nsRpc =
