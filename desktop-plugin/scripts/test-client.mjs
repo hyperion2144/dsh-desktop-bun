@@ -694,6 +694,106 @@ assert.equal(dtCopy.cancel, '取消', '取消不写入')
 assert.ok(dt.devToolsSavedNote(true).includes('重启'), '开启提示含重启')
 assert.ok(dt.devToolsSavedNote(false).includes('重启'), '关闭提示含重启')
 
+// ── runtime-download-ui（#97）：下载终态判定 / 取消 / 「当前使用」归一 ──
+await build({
+  entryPoints: [join(root, 'src/client/runtime-download-ui.ts')],
+  outfile: join(tmp, 'runtime-download-ui.mjs'),
+  format: 'esm',
+  platform: 'node',
+  logLevel: 'silent',
+})
+const rdu = await import(pathToFileURL(join(tmp, 'runtime-download-ui.mjs')).href)
+
+{
+  const idle = { active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '', cancelled: false }
+
+  // 进行中：进度必须有数字、这一格只能是「下载中」，且不弹 toast
+  const running = rdu.decideRuntimeDownload(
+    { ...idle, active: true, version: '0.2.1-alpha.3', resolved: 624, downloaded: 335, added: 320 },
+    true,
+  )
+  assert.deepEqual(running.progress, { version: '0.2.1-alpha.3', resolved: 624, downloaded: 335, added: 320 })
+  assert.deepEqual(running.entry, { version: '0.2.1-alpha.3', value: 'downloading' })
+  assert.equal(running.toast, null)
+
+  // #97 症状②：超时弹窗一关就再没人动进度。不再 active 的一拍必须把进度条撤掉
+  const done = rdu.decideRuntimeDownload({ ...idle, version: '0.2.1-alpha.3' }, true)
+  assert.equal(done.progress, null, '非进行中一律撤进度条（进度条不再永久定格）')
+  assert.deepEqual(done.entry, { version: '0.2.1-alpha.3', remove: true })
+  assert.equal(done.toast.tone, 'ok')
+
+  // 取消是独立终态：中性提示、无 error 文案，且不被当成失败
+  const cancelled = rdu.decideRuntimeDownload({ ...idle, version: '0.2.1-alpha.3', cancelled: true }, true)
+  assert.deepEqual(cancelled.entry, { version: '0.2.1-alpha.3', value: { cancelled: true } })
+  assert.equal(cancelled.toast.tone, 'info', '取消走中性提示，不报错色')
+  assert.ok(cancelled.toast.text.includes('已取消'))
+  assert.equal(cancelled.progress, null)
+
+  // 失败仍带原因（#95 的老口径不许退化）
+  const failed = rdu.decideRuntimeDownload(
+    { ...idle, version: '0.2.1-alpha.3', error: '下载失败：ERR_PNPM_NO_MATCHING_VERSION' },
+    true,
+  )
+  assert.deepEqual(failed.entry, {
+    version: '0.2.1-alpha.3',
+    value: { failed: 'ERR_PNPM_NO_MATCHING_VERSION' },
+  })
+  assert.equal(failed.toast.tone, 'error')
+  assert.ok(!failed.toast.text.includes('下载失败：下载失败'), '错误前缀只剥一层')
+
+  // 面板重开（sawActive=false）：终态照样写回去，但不弹 toast
+  const reopened = rdu.decideRuntimeDownload({ ...idle, version: '0.2.1-alpha.3', cancelled: true }, false)
+  assert.deepEqual(reopened.entry, { version: '0.2.1-alpha.3', value: { cancelled: true } })
+  assert.equal(reopened.toast, null, '重开面板不重复弹终态提示')
+
+  // 彻底空闲（连版本号都没有）不动任何状态
+  assert.deepEqual(rdu.decideRuntimeDownload(idle, true), { progress: null, entry: null, toast: null })
+
+  // 终态同值不重写（否则每 600ms 一拍把失败原因刷掉）
+  assert.equal(rdu.sameDownloadEntry({ failed: 'x' }, { failed: 'x' }), true)
+  assert.equal(rdu.sameDownloadEntry({ failed: 'x' }, { failed: 'y' }), false)
+  assert.equal(rdu.sameDownloadEntry({ cancelled: true }, { cancelled: true }), true)
+  assert.equal(rdu.sameDownloadEntry('downloading', 'downloading'), true)
+  assert.equal(rdu.sameDownloadEntry(undefined, 'downloading'), false)
+
+  // #97 症状④：钉了 .2、实际回退到 .1 时，「当前使用」必须说 .1（真在跑的那棵）
+  const line = rdu.currentRuntimeLine({
+    selected: '0.2.1-alpha.2',
+    builtin: '0.2.1-alpha.2',
+    running: { kind: 'installed', version: '0.2.1-alpha.1' },
+  })
+  assert.ok(line.includes('0.2.1-alpha.1'), '顶行报实际在跑的版本')
+  assert.ok(line.includes('已选择 0.2.1-alpha.2'), '钉的号与实际不一致时如实说明')
+
+  // 内置正在跑：不带「运行时」字样，带兜底语义
+  assert.equal(
+    rdu.currentRuntimeLine({ builtin: '0.2.1-alpha.2', running: { kind: 'builtin', version: '0.2.1-alpha.2' } }),
+    '当前使用：内置 dsh 0.2.1-alpha.2（兜底）',
+  )
+
+  // #97 症状⑤：内置行与运行行不得同时标「使用中」
+  const usage = {
+    selected: null,
+    builtin: '0.2.1-alpha.2',
+    running: { kind: 'installed', version: '0.2.1-alpha.1' },
+  }
+  assert.equal(rdu.isRuntimeInUse(usage, '0.2.1-alpha.1'), true)
+  assert.equal(rdu.isRuntimeInUse(usage, '0.2.1-alpha.2'), false)
+
+  // 读不到 running（老壳）时才回退内置
+  assert.equal(rdu.isRuntimeInUse({ builtin: '0.2.1-alpha.2' }, '0.2.1-alpha.2'), true)
+  assert.equal(rdu.isRuntimeInUse({ builtin: '0.2.1-alpha.2' }, '0.2.1-alpha.9'), false)
+
+  // 按钮/提示文案：取消是中性且可重试
+  assert.equal(rdu.runtimeDownloadButtonLabel(undefined), '下载')
+  assert.equal(rdu.runtimeDownloadButtonLabel('downloading'), '下载中…')
+  assert.equal(rdu.runtimeDownloadButtonLabel({ cancelled: true }), '已取消 · 重试下载')
+  assert.equal(rdu.runtimeDownloadButtonLabel({ failed: 'boom' }), '重试下载')
+  assert.equal(rdu.runtimeDownloadHint({ cancelled: true }), '下载已取消')
+  assert.equal(rdu.runtimeDownloadHint({ failed: 'boom' }), 'boom')
+  assert.equal(rdu.runtimeDownloadHint('downloading'), '')
+}
+
 
 rmSync(tmp, { recursive: true, force: true })
 console.log('client 纯函数测试：全部通过 ✓')

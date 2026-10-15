@@ -47,6 +47,12 @@ export interface ShellRpcGlobals {
 export interface ShellRpcInvokeOptions {
   /** 单请求超时（官方通道生效；默认 15s，文件选择/重启类调用可放宽）。 */
   timeoutMs?: number
+  /**
+   * #97：不挂客户端超时。长任务（运行时下载）必须靠轮询快照收尾——官方通道自身的 120s 上限
+   * 只放弃回包、**不取消**壳侧任务，客户端再补一刀超时就会出现「安装其实完成了，面板却报超时、
+   * 进度条还卡着」。这类调用改用 `noTimeout`，终态一律由 `runtime_download_status` 对账。
+   */
+  noTimeout?: boolean
 }
 
 export type ShellRpcMessageListener = (name: string, payload: unknown) => void
@@ -141,10 +147,14 @@ export function createShellRpc(deps?: Partial<ShellRpcDeps>): ShellRpcClient {
     const id = nextId
     return new Promise<T>((resolve, reject) => {
       const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS
-      const timer = setTimeoutImpl(() => {
-        pending.delete(id)
-        reject(new Error('RPC request timed out.'))
-      }, timeoutMs)
+      // #97：noTimeout 时压根不挂计时器——pending 一直留着，回包什么时候到都还能收。
+      const timer =
+        options?.noTimeout === true
+          ? undefined
+          : setTimeoutImpl(() => {
+              pending.delete(id)
+              reject(new Error('RPC request timed out.'))
+            }, timeoutMs)
       pending.set(id, {
         resolve: (value) => resolve(value as T),
         reject,

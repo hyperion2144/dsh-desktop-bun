@@ -314,7 +314,7 @@ function downloadStatusSafe(): RuntimeDownloadStatus {
   try {
     return uiService().downloadStatus()
   } catch {
-    return { active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '' }
+    return { active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '', cancelled: false }
   }
 }
 

@@ -4,7 +4,18 @@
 // 禁止 document.createElement / innerHTML / appendChild，UI 全部由 JSX 返回；状态 useState/useEffect/useCallback 声明式管理。
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type { ClientContext } from './ctx-types.ts'
-import { shellRpc } from './shell-rpc.ts'
+import { shellRpc, type ShellRpcInvokeOptions } from './shell-rpc.ts'
+import {
+  currentRuntimeLine,
+  decideRuntimeDownload,
+  isRuntimeInUse,
+  runtimeDownloadButtonLabel,
+  runtimeDownloadHint,
+  sameDownloadEntry,
+  stripDownloadErrorPrefix,
+  type RuntimeDownloadEntry,
+  type RuntimeDownloadSnapshot,
+} from './runtime-download-ui.ts'
 
 import { ThemeSelect } from './theme-select.tsx'
 import { devToolsConfirmCopy, devToolsDisableCopy, devToolsSavedNote, planDevToolsUi } from './devtools-toggle.ts'
@@ -26,8 +37,13 @@ let nsRpc: NsRpc | null = null
 
 
 /** 壳 RPC 统一通道（#50）：签名保持旧本地 invoke 不变，调用点零改动。 */
-function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  return shellRpc.invoke<T>(cmd, args)
+function invoke<T = unknown>(
+  cmd: string,
+  args?: Record<string, unknown>,
+  // #97：透传通道选项——下载类调用要传 `{ noTimeout: true }`，别让客户端超时把它们砍成失败
+  options?: ShellRpcInvokeOptions,
+): Promise<T> {
+  return shellRpc.invoke<T>(cmd, args, options)
 }
 
 
@@ -359,9 +375,16 @@ function PortCell({
 
 
 // 全局 toast：挂 document.body，不依赖设置面板是否打开。
-function showToast(text: string, ok: boolean): void {
+function showToast(text: string, ok: boolean, tone: 'ok' | 'error' | 'info' = ok ? 'ok' : 'error'): void {
+  // #97：三档配色——取消走中性蓝，不冒充成功（绿）也不吓唬人（红）
+  const palette =
+    tone === 'info'
+      ? 'background:rgba(96,165,250,.15);border:1px solid rgba(96,165,250,.6);color:#93c5fd'
+      : tone === 'ok'
+        ? 'background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.6);color:#4ade80'
+        : 'background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.6);color:#f87171'
   const el = document.createElement('div')
-  el.style.cssText = `position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:999999;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:500;max-width:480px;box-shadow:0 4px 12px rgba(0,0,0,.4);cursor:pointer;backdrop-filter:blur(8px);${ok ? 'background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.6);color:#4ade80' : 'background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.6);color:#f87171'}`
+  el.style.cssText = `position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:999999;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:500;max-width:480px;box-shadow:0 4px 12px rgba(0,0,0,.4);cursor:pointer;backdrop-filter:blur(8px);${palette}`
   el.textContent = text
   el.addEventListener('click', () => el.remove())
   document.body.appendChild(el)
@@ -487,9 +510,10 @@ function DesktopSettingsPanel(): React.ReactElement {
     text?: string
   }>({ state: 'loading', text: '读取中…' })
   const [runtimeCatalog, setRuntimeCatalog] = useState<RuntimeCatalog | null>(null)
-  // 下载状态：'downloading' | 'downloaded' | { failed: 原因 }（#95 评论：失败必须带原因展示）
+  // 下载状态：'downloading' | 'downloaded' | { failed: 原因 } | { cancelled: true }
+  //（#95 失败必须带原因展示；#97 取消是独立终态，不与失败混同）
   const [runtimeDownloading, setRuntimeDownloading] = useState<
-    Record<string, 'downloading' | 'downloaded' | { failed: string }>
+    Record<string, RuntimeDownloadEntry>
   >({})
   // 依赖状态（#122）：各 profile 的 node_modules 记录的 pnpm 与内置 pnpm 是否一致
   const [depProfiles, setDepProfiles] = useState<Array<{
@@ -1037,11 +1061,13 @@ function DesktopSettingsPanel(): React.ReactElement {
 
   const handleDownloadRuntime = (version: string): void => {
     setRuntimeDownloading((prev) => ({ ...prev, [version]: 'downloading' }))
-    void invoke('download_runtime', { source: runtimeSource, version })
+    // #97：**不挂客户端超时**（维护者裁决：下载类调用无超时限制）。官方通道 120s 上限只会丢弃回包、
+    // 不取消后台任务，所以成败一律由轮询快照定，这个 Promise 只回答「壳已受理」。
+    void invoke('download_runtime', { source: runtimeSource, version }, { noTimeout: true })
       .then(() => {
-        setRuntimeDownloading((prev) => ({ ...prev, [version]: 'downloaded' }))
+        // 终态（成功 / 失败 / 取消）由轮询的 decideRuntimeDownload 落。这里要是直接写「已下载」，
+        // 下一拍的 active 又会把它打回「下载中」——状态来回闪就是这么来的。
         void refreshRuntimes()
-        showToast(`dsh ${version} 下载完成`, true)
       })
       .catch((err) => {
         const text = String(err)
@@ -1056,10 +1082,20 @@ function DesktopSettingsPanel(): React.ReactElement {
           return
         }
         // #95 评论：失败原因必须落到 UI，不能只打 console
-        const reason = text.replace(/^下载失败：?/i, '')
+        const reason = stripDownloadErrorPrefix(text)
         setRuntimeDownloading((prev) => ({ ...prev, [version]: { failed: reason || '未知错误' } }))
         showToast(`dsh ${version} 下载失败：${reason || '未知错误'}`, false)
       })
+  }
+
+  // #97：取消运行时下载——取消是用户唯一的主动出口（下载不再有时间限制）。
+  // 终态仍由轮询落；这里只回报「取消已受理」，官方通道的回包可能被 120s 上限丢掉，不能等它。
+  const handleCancelRuntimeDownload = (version: string): void => {
+    void invoke<{ cancelled: boolean; version: string }>('cancel_runtime_download', {}, { noTimeout: true })
+      .then((r) => {
+        if (r.cancelled) showToast(`正在取消 dsh ${version} 下载…`, true, 'info')
+      })
+      .catch((err) => showToast(`取消失败：${String(err)}`, false))
   }
 
   // 下载状态以后端 runtime_download_status 为唯一事实源（#135 验证反馈）：
@@ -1068,51 +1104,39 @@ function DesktopSettingsPanel(): React.ReactElement {
   useEffect(() => {
     let sawActive = false
     const timer = setInterval(() => {
-      void invoke<{
-        active: boolean
-        version: string
-        resolved: number
-        downloaded: number
-        added: number
-        error: string
-      }>('runtime_download_status')
+      void invoke<RuntimeDownloadSnapshot>('runtime_download_status')
         .then((s) => {
-          if (s.active) {
-            sawActive = true
-            setRuntimeDownloading((prev) =>
-              prev[s.version] === 'downloading' ? prev : { ...prev, [s.version]: 'downloading' },
-            )
-            setDlProgress({ version: s.version, resolved: s.resolved, downloaded: s.downloaded, added: s.added })
-            return
-          }
-          setDlProgress(null)
-          if (!sawActive) {
-            // #79：面板没开时结束的下载——挂载/重开后第一拍在这里恢复终态，不再静默。
-            // 失败终态写 {failed}（与 invoke catch 口径一致）；成功终态 error 为空且已进 installed，无需恢复。
-            if (s.version !== '' && s.error !== '') {
-              const reason = s.error.replace(/^下载失败：?/i, '') || '未知错误'
+          // #97：终态判定收进纯函数（scripts/test-client.mjs 直接断言）。
+          // 这段原先散在 then 分支里，于是三个坑一起长：超时弹窗后进度条永久卡住、
+          // 取消被报成红色失败、以及终态被下一拍的 active 覆盖。
+          const decision = decideRuntimeDownload(s, sawActive)
+          if (s.active) sawActive = true
+          else if (sawActive) sawActive = false
+          // 非进行中一律撤进度条：超时弹窗一关就再没人动它，不撤就是永久定格
+          setDlProgress(decision.progress)
+          const entry = decision.entry
+          if (entry !== null) {
+            const version = entry.version
+            if ('remove' in entry) {
               setRuntimeDownloading((prev) => {
-                // 已是失败态就别重置（轮询每 600ms 一拍，重置会闪）
-                if (typeof prev[s.version] === 'object') return prev
-                return { ...prev, [s.version]: { failed: reason } }
+                if (prev[version] === undefined) return prev
+                const next = { ...prev }
+                delete next[version]
+                return next
               })
+            } else {
+              const value = entry.value
+              setRuntimeDownloading((prev) =>
+                // 同值不重写：否则每 600ms 一拍会把终态反复重置，失败原因闪一下就没
+                sameDownloadEntry(prev[version], value) ? prev : { ...prev, [version]: value },
+              )
             }
-            return
           }
-          sawActive = false
-          const ok = !s.error
-          setRuntimeDownloading((prev) => {
-            const next = { ...prev }
-            if (ok) delete next[s.version]
-            // #79：失败不再 delete（那会把失败洗成无状态）——写 {failed}，与 invoke catch 同口径
-            else next[s.version] = { failed: s.error.replace(/^下载失败：?/i, '') || '未知错误' }
-            return next
-          })
-          void refreshRuntimes()
-          showToast(
-            ok ? `dsh ${s.version} 下载完成` : `dsh ${s.version} 下载失败：${s.error.replace(/^下载失败：?/i, '')}`,
-            ok,
-          )
+          const toast = decision.toast
+          if (toast !== null) {
+            showToast(toast.text, toast.tone === 'ok', toast.tone === 'info' ? 'info' : undefined)
+            void refreshRuntimes()
+          }
         })
         .catch(() => {})
     }, 600)
@@ -1120,10 +1144,11 @@ function DesktopSettingsPanel(): React.ReactElement {
   }, [refreshRuntimes])
 
   const handleSwitchRuntime = (version: string): void => {
-    // 运行时切换 = 内置树换版本：同时钉回 builtin（dsh_mode 只认 builtin，写回是自愈旧配置）
-    // #113：内置版本 = 回内置兜底 → dsh_runtime 置 null（存版本号会让顶部误显示「当前使用：运行时 xxx」）
-    const isBuiltin = runtimeCatalog?.builtin === version
-    void nsSave({ dsh_runtime: isBuiltin ? null : version, dsh_mode: 'builtin' })
+    // 运行时切换 = 把设置里的运行时钉成目标版本，然后重启让它生效。
+    // #97：内置那一行也写**版本号**（旧写法置 null，因为顶行当时读的是设置值、会误显示成「运行时」；
+    // 顶行已改成按实际在跑的树派生，null 就只剩坏处——它和「没设置过」长得一模一样，壳无法区分，
+    // 于是「切回内置」会被当成没设置，进而拿已装最高版本顶上，看着像切换失败）。
+    void nsSave({ dsh_runtime: version, dsh_mode: 'builtin' })
       .then(() => invoke('restart_dsh_service'))
       .then(() => {
         setMsg({ ok: true, text: `已切换到 dsh ${version}，正在重启…` })
@@ -1580,15 +1605,14 @@ function DesktopSettingsPanel(): React.ReactElement {
           {runtimeCatalog && (
             <>
               <div style={{ marginBottom: 6 }}>
-                {runtimeCatalog.selected
-                  ? `当前使用：运行时 ${runtimeCatalog.selected}${
-                      runtimeCatalog.builtin ? '（内置兜底 ' + runtimeCatalog.builtin + '）' : ''
-                    }`
-                  : runtimeCatalog.builtin
-                    ? `当前使用：内置 dsh ${runtimeCatalog.builtin}（兜底）`
-                    : runtimeCatalog.running?.version
-                      ? `当前使用：运行时 ${runtimeCatalog.running.version}（${runtimeCatalog.running.kind}）`
-                      : '当前无可用 dsh'}
+                {/* #97：判据是**实际在跑的那棵树**（catalog.running），不再拿设置里钉的 selected 当「当前使用」 */}
+                {
+                  currentRuntimeLine({
+                    selected: runtimeCatalog.selected,
+                    builtin: runtimeCatalog.builtin,
+                    running: runtimeCatalog.running,
+                  })
+                }
               </div>
               {runtimeCatalog.note && (
                 <div style={{ ...DANGER_NOTE_STYLE, marginBottom: 6, whiteSpace: 'pre-wrap' }}>{`⚠ ${runtimeCatalog.note}`}</div>
@@ -1638,18 +1662,23 @@ function DesktopSettingsPanel(): React.ReactElement {
                         runtimeCatalog.running?.version !== undefined &&
                         runtimeCatalog.running.version === c.version
                       const available = installed || isBuiltin || isRunning
-                      // 当前使用：selected 有值按号匹配；selected 为空 = 内置兜底（内置行即「使用中」）
-                      const isCurrent =
-                        runtimeCatalog.selected
-                          ? runtimeCatalog.selected === c.version
-                          : isBuiltin || isRunning
+                      // #97：「使用中」只看**实际在跑的那棵树**。旧判据 selected 为空时回退
+                      // `isBuiltin || isRunning`，于是内置行和运行行同时标上「使用中」（症状⑤）。
+                      const isCurrent = isRuntimeInUse(
+                        {
+                          selected: runtimeCatalog.selected,
+                          builtin: runtimeCatalog.builtin,
+                          running: runtimeCatalog.running,
+                        },
+                        c.version,
+                      )
                       const tags: string[] = []
                       if (c.channel) tags.push(c.channel)
                       if (isBuiltin) tags.push('内置')
                       else if (installed) tags.push('已下载')
                       if (isRunning) tags.push('运行中')
                       const downloadState = runtimeDownloading[c.version]
-                      const failedReason = typeof downloadState === 'object' ? downloadState.failed : ''
+                      const failedReason = runtimeDownloadHint(downloadState)
                       const pct =
                         dlProgress && dlProgress.version === c.version && dlProgress.resolved > 0
                           ? Math.min(100, Math.round((dlProgress.downloaded / dlProgress.resolved) * 100))
@@ -1665,19 +1694,22 @@ function DesktopSettingsPanel(): React.ReactElement {
                           >
                             <span>{`${c.version}${tags.length ? '（' + tags.join(' · ') + '）' : ''}`}</span>
                             {!available ? (
-                              <PfBtn
-                                variant="ghost"
-                                disabled={downloadState === 'downloading'}
-                                onClick={() => handleDownloadRuntime(c.version)}
-                              >
-                                {downloadState === 'downloading'
-                                  ? '下载中…'
-                                  : failedReason
-                                    ? '重试下载'
-                                    : downloadState === 'downloaded'
-                                      ? '已下载'
-                                      : '下载'}
-                              </PfBtn>
+                              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                <PfBtn
+                                  variant="ghost"
+                                  disabled={downloadState === 'downloading'}
+                                  onClick={() => handleDownloadRuntime(c.version)}
+                                >
+                                  {runtimeDownloadButtonLabel(downloadState)}
+                                </PfBtn>
+                                {/* #97：下载进行中就给一个出口——取消。维护者定了「下载不超时」，
+                                  取消于是成了用户唯一的主动手段，没有它就只能干等。 */}
+                                {downloadState === 'downloading' && (
+                                  <PfBtn variant="ghost" onClick={() => handleCancelRuntimeDownload(c.version)}>
+                                    取消
+                                  </PfBtn>
+                                )}
+                              </div>
                             ) : (
                               <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                                 <PfBtn
@@ -1687,27 +1719,23 @@ function DesktopSettingsPanel(): React.ReactElement {
                                 >
                                   {isCurrent ? '使用中' : '切换到此版本'}
                                 </PfBtn>
-                                <PfBtn
-                                  variant="danger"
-                                  disabled={
-                                    removingVersion !== null ||
-                                    isRunning ||
-                                    runtimeCatalog.selected === c.version ||
-                                    c.version === runtimeCatalog.builtin
-                                  }
-                                  title={
-                                    isRunning
-                                      ? '正在运行的版本不可卸载'
-                                      : runtimeCatalog.selected === c.version
-                                        ? '使用中的版本不可卸载，请先切换'
-                                        : c.version === runtimeCatalog.builtin
-                                          ? '内置版本随应用分发，不可卸载'
+                                {/* Q3：内置行不显示卸载——它随应用分发，本来就删不掉 */}
+                                {!isBuiltin && (
+                                  <PfBtn
+                                    variant="danger"
+                                    disabled={removingVersion !== null || isRunning || runtimeCatalog.selected === c.version}
+                                    title={
+                                      isRunning
+                                        ? '正在运行的版本不可卸载'
+                                        : runtimeCatalog.selected === c.version
+                                          ? '使用中的版本不可卸载，请先切换'
                                           : '删除本地已下载的运行时'
-                                  }
-                                  onClick={() => handleRemoveRuntime(c.version)}
-                                >
-                                  {removingVersion === c.version ? '卸载中…' : '卸载'}
-                                </PfBtn>
+                                    }
+                                    onClick={() => handleRemoveRuntime(c.version)}
+                                  >
+                                    {removingVersion === c.version ? '卸载中…' : '卸载'}
+                                  </PfBtn>
+                                )}
                               </div>
                             )}
                           </div>
@@ -1740,8 +1768,19 @@ function DesktopSettingsPanel(): React.ReactElement {
                             </div>
                           )}
                           {failedReason && (
-                            <div style={{ ...DANGER_NOTE_STYLE, marginTop: 4, whiteSpace: 'pre-wrap' }}>
-                              下载失败：{failedReason}
+                            <div
+                              style={{
+                                // #97：取消是中性终态，不能穿红色警告色、也不能顶着「下载失败：」的前缀
+                                ...(downloadState !== undefined &&
+                                typeof downloadState === 'object' &&
+                                'cancelled' in downloadState
+                                  ? NOTE_STYLE
+                                  : DANGER_NOTE_STYLE),
+                                marginTop: 4,
+                                whiteSpace: 'pre-wrap',
+                              }}
+                            >
+                              {failedReason}
                             </div>
                           )}
                         </div>

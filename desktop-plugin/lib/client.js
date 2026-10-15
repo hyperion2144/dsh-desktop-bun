@@ -110,7 +110,7 @@ function createShellRpc(deps) {
     const id = nextId;
     return new Promise((resolve, reject) => {
       const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-      const timer = setTimeoutImpl(() => {
+      const timer = options?.noTimeout === true ? void 0 : setTimeoutImpl(() => {
         pending.delete(id);
         reject(new Error("RPC request timed out."));
       }, timeoutMs);
@@ -1208,6 +1208,76 @@ function installDesktopBrowserBridge() {
 // src/client/desktop-settings.tsx
 var import_react3 = __toESM(require("react"), 1);
 
+// src/client/runtime-download-ui.ts
+var IDLE = { progress: null, entry: null, toast: null };
+function stripDownloadErrorPrefix(text) {
+  return text.replace(/^下载失败[:：]\s*/, "").trim();
+}
+function present(version) {
+  return version !== null && version !== void 0 && version !== "";
+}
+function decideRuntimeDownload(s, sawActive) {
+  if (s.active) return {
+    progress: { version: s.version, resolved: s.resolved, downloaded: s.downloaded, added: s.added },
+    entry: { version: s.version, value: "downloading" },
+    toast: null
+  };
+  if (!present(s.version)) return IDLE;
+  const cancelled = s.cancelled === true;
+  const failed = s.error !== "";
+  if (!cancelled && !failed) {
+    return sawActive ? { progress: null, entry: { version: s.version, remove: true }, toast: { text: `dsh ${s.version} \u4E0B\u8F7D\u5B8C\u6210`, tone: "ok" } } : IDLE;
+  }
+  const reason = stripDownloadErrorPrefix(s.error);
+  const entry = cancelled ? { cancelled: true } : { failed: reason === "" ? "\u672A\u77E5\u9519\u8BEF" : reason };
+  const text = cancelled ? `dsh ${s.version} \u4E0B\u8F7D\u5DF2\u53D6\u6D88` : `dsh ${s.version} \u4E0B\u8F7D\u5931\u8D25\uFF1A${reason === "" ? "\u672A\u77E5\u9519\u8BEF" : reason}`;
+  return {
+    progress: null,
+    entry: { version: s.version, value: entry },
+    toast: sawActive ? { text, tone: cancelled ? "info" : "error" } : null
+  };
+}
+function sameDownloadEntry(a, b) {
+  if (a === void 0) return false;
+  if (typeof a === "string" || typeof b === "string") return a === b;
+  if ("failed" in a && "failed" in b) return a.failed === b.failed;
+  if ("cancelled" in a && "cancelled" in b) return true;
+  return false;
+}
+function currentRuntimeLine(input) {
+  const builtin = input.builtin ?? null;
+  const selected = input.selected ?? null;
+  const runningVersion = input.running?.version ?? null;
+  const kind = input.running?.kind ?? "";
+  if (present(runningVersion)) {
+    const builtinRun = present(builtin) && runningVersion === builtin;
+    const head = builtinRun ? `\u5F53\u524D\u4F7F\u7528\uFF1A\u5185\u7F6E dsh ${builtin}\uFF08\u515C\u5E95\uFF09` : `\u5F53\u524D\u4F7F\u7528\uFF1A\u8FD0\u884C\u65F6 ${runningVersion}${kind === "" ? "" : `\uFF08${kind}\uFF09`}`;
+    if (present(selected) && selected !== runningVersion) return `${head}\uFF08\u5DF2\u9009\u62E9 ${selected}\uFF0C\u91CD\u542F\u540E\u751F\u6548\uFF09`;
+    return head;
+  }
+  if (present(selected)) return `\u5F53\u524D\u4F7F\u7528\uFF1A\u8FD0\u884C\u65F6 ${selected}${present(builtin) ? `\uFF08\u5185\u7F6E\u515C\u5E95 ${builtin}\uFF09` : ""}`;
+  if (present(builtin)) return `\u5F53\u524D\u4F7F\u7528\uFF1A\u5185\u7F6E dsh ${builtin}\uFF08\u515C\u5E95\uFF09`;
+  return "\u5F53\u524D\u65E0\u53EF\u7528 dsh";
+}
+function isRuntimeInUse(input, version) {
+  const runningVersion = input.running?.version ?? null;
+  if (present(runningVersion)) return runningVersion === version;
+  const builtin = input.builtin ?? null;
+  return present(builtin) && builtin === version;
+}
+function runtimeDownloadButtonLabel(entry) {
+  if (entry === "downloading") return "\u4E0B\u8F7D\u4E2D\u2026";
+  if (entry === "downloaded") return "\u5DF2\u4E0B\u8F7D";
+  if (entry !== void 0 && typeof entry === "object") {
+    return "cancelled" in entry ? "\u5DF2\u53D6\u6D88 \xB7 \u91CD\u8BD5\u4E0B\u8F7D" : "\u91CD\u8BD5\u4E0B\u8F7D";
+  }
+  return "\u4E0B\u8F7D";
+}
+function runtimeDownloadHint(entry) {
+  if (entry === void 0 || typeof entry === "string") return "";
+  return "cancelled" in entry ? "\u4E0B\u8F7D\u5DF2\u53D6\u6D88" : entry.failed;
+}
+
 // src/client/theme-select.tsx
 var import_react2 = require("react");
 var import_jsx_runtime2 = require("react/jsx-runtime");
@@ -1410,8 +1480,8 @@ function devToolsSavedNote(on) {
 // src/client/desktop-settings.tsx
 var import_jsx_runtime3 = require("react/jsx-runtime");
 var nsRpc = null;
-function invoke2(cmd, args) {
-  return shellRpc.invoke(cmd, args);
+function invoke2(cmd, args, options) {
+  return shellRpc.invoke(cmd, args, options);
 }
 function fmtBytes2(bytes) {
   if (bytes === null || !Number.isFinite(bytes) || bytes <= 0) return "";
@@ -1607,9 +1677,10 @@ function PortCell({
     /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", style: { marginLeft: 6 }, onClick: onSave, children: "\u4FDD\u5B58" })
   ] });
 }
-function showToast(text, ok) {
+function showToast(text, ok, tone = ok ? "ok" : "error") {
+  const palette = tone === "info" ? "background:rgba(96,165,250,.15);border:1px solid rgba(96,165,250,.6);color:#93c5fd" : tone === "ok" ? "background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.6);color:#4ade80" : "background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.6);color:#f87171";
   const el = document.createElement("div");
-  el.style.cssText = `position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:999999;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:500;max-width:480px;box-shadow:0 4px 12px rgba(0,0,0,.4);cursor:pointer;backdrop-filter:blur(8px);${ok ? "background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.6);color:#4ade80" : "background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.6);color:#f87171"}`;
+  el.style.cssText = `position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:999999;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:500;max-width:480px;box-shadow:0 4px 12px rgba(0,0,0,.4);cursor:pointer;backdrop-filter:blur(8px);${palette}`;
   el.textContent = text;
   el.addEventListener("click", () => el.remove());
   document.body.appendChild(el);
@@ -2116,10 +2187,8 @@ function DesktopSettingsPanel() {
   };
   const handleDownloadRuntime = (version) => {
     setRuntimeDownloading((prev) => ({ ...prev, [version]: "downloading" }));
-    void invoke2("download_runtime", { source: runtimeSource, version }).then(() => {
-      setRuntimeDownloading((prev) => ({ ...prev, [version]: "downloaded" }));
+    void invoke2("download_runtime", { source: runtimeSource, version }, { noTimeout: true }).then(() => {
       void refreshRuntimes();
-      showToast(`dsh ${version} \u4E0B\u8F7D\u5B8C\u6210`, true);
     }).catch((err) => {
       const text = String(err);
       if (text.includes("\u5DF2\u6709\u8FD0\u884C\u65F6\u4E0B\u8F7D\u4EFB\u52A1")) {
@@ -2130,55 +2199,56 @@ function DesktopSettingsPanel() {
         });
         return;
       }
-      const reason = text.replace(/^下载失败：?/i, "");
+      const reason = stripDownloadErrorPrefix(text);
       setRuntimeDownloading((prev) => ({ ...prev, [version]: { failed: reason || "\u672A\u77E5\u9519\u8BEF" } }));
       showToast(`dsh ${version} \u4E0B\u8F7D\u5931\u8D25\uFF1A${reason || "\u672A\u77E5\u9519\u8BEF"}`, false);
     });
+  };
+  const handleCancelRuntimeDownload = (version) => {
+    void invoke2("cancel_runtime_download", {}, { noTimeout: true }).then((r) => {
+      if (r.cancelled) showToast(`\u6B63\u5728\u53D6\u6D88 dsh ${version} \u4E0B\u8F7D\u2026`, true, "info");
+    }).catch((err) => showToast(`\u53D6\u6D88\u5931\u8D25\uFF1A${String(err)}`, false));
   };
   (0, import_react3.useEffect)(() => {
     let sawActive = false;
     const timer = setInterval(() => {
       void invoke2("runtime_download_status").then((s) => {
-        if (s.active) {
-          sawActive = true;
-          setRuntimeDownloading(
-            (prev) => prev[s.version] === "downloading" ? prev : { ...prev, [s.version]: "downloading" }
-          );
-          setDlProgress({ version: s.version, resolved: s.resolved, downloaded: s.downloaded, added: s.added });
-          return;
-        }
-        setDlProgress(null);
-        if (!sawActive) {
-          if (s.version !== "" && s.error !== "") {
-            const reason = s.error.replace(/^下载失败：?/i, "") || "\u672A\u77E5\u9519\u8BEF";
+        const decision = decideRuntimeDownload(s, sawActive);
+        if (s.active) sawActive = true;
+        else if (sawActive) sawActive = false;
+        setDlProgress(decision.progress);
+        const entry = decision.entry;
+        if (entry !== null) {
+          const version = entry.version;
+          if ("remove" in entry) {
             setRuntimeDownloading((prev) => {
-              if (typeof prev[s.version] === "object") return prev;
-              return { ...prev, [s.version]: { failed: reason } };
+              if (prev[version] === void 0) return prev;
+              const next = { ...prev };
+              delete next[version];
+              return next;
             });
+          } else {
+            const value = entry.value;
+            setRuntimeDownloading(
+              (prev) => (
+                // 同值不重写：否则每 600ms 一拍会把终态反复重置，失败原因闪一下就没
+                sameDownloadEntry(prev[version], value) ? prev : { ...prev, [version]: value }
+              )
+            );
           }
-          return;
         }
-        sawActive = false;
-        const ok = !s.error;
-        setRuntimeDownloading((prev) => {
-          const next = { ...prev };
-          if (ok) delete next[s.version];
-          else next[s.version] = { failed: s.error.replace(/^下载失败：?/i, "") || "\u672A\u77E5\u9519\u8BEF" };
-          return next;
-        });
-        void refreshRuntimes();
-        showToast(
-          ok ? `dsh ${s.version} \u4E0B\u8F7D\u5B8C\u6210` : `dsh ${s.version} \u4E0B\u8F7D\u5931\u8D25\uFF1A${s.error.replace(/^下载失败：?/i, "")}`,
-          ok
-        );
+        const toast = decision.toast;
+        if (toast !== null) {
+          showToast(toast.text, toast.tone === "ok", toast.tone === "info" ? "info" : void 0);
+          void refreshRuntimes();
+        }
       }).catch(() => {
       });
     }, 600);
     return () => clearInterval(timer);
   }, [refreshRuntimes]);
   const handleSwitchRuntime = (version) => {
-    const isBuiltin = runtimeCatalog?.builtin === version;
-    void nsSave({ dsh_runtime: isBuiltin ? null : version, dsh_mode: "builtin" }).then(() => invoke2("restart_dsh_service")).then(() => {
+    void nsSave({ dsh_runtime: version, dsh_mode: "builtin" }).then(() => invoke2("restart_dsh_service")).then(() => {
       setMsg({ ok: true, text: `\u5DF2\u5207\u6362\u5230 dsh ${version}\uFF0C\u6B63\u5728\u91CD\u542F\u2026` });
       void refreshRuntimes();
     }).catch((err) => setMsg({ ok: false, text: `\u5207\u6362\u5931\u8D25\uFF1A${String(err)}` }));
@@ -2564,7 +2634,11 @@ function DesktopSettingsPanel() {
       /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { marginTop: 8 }, children: [
         runtimeStatus.state === "error" && runtimeStatus.text && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DANGER_NOTE_STYLE, children: runtimeStatus.text }),
         runtimeCatalog && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { marginBottom: 6 }, children: runtimeCatalog.selected ? `\u5F53\u524D\u4F7F\u7528\uFF1A\u8FD0\u884C\u65F6 ${runtimeCatalog.selected}${runtimeCatalog.builtin ? "\uFF08\u5185\u7F6E\u515C\u5E95 " + runtimeCatalog.builtin + "\uFF09" : ""}` : runtimeCatalog.builtin ? `\u5F53\u524D\u4F7F\u7528\uFF1A\u5185\u7F6E dsh ${runtimeCatalog.builtin}\uFF08\u515C\u5E95\uFF09` : runtimeCatalog.running?.version ? `\u5F53\u524D\u4F7F\u7528\uFF1A\u8FD0\u884C\u65F6 ${runtimeCatalog.running.version}\uFF08${runtimeCatalog.running.kind}\uFF09` : "\u5F53\u524D\u65E0\u53EF\u7528 dsh" }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { marginBottom: 6 }, children: currentRuntimeLine({
+            selected: runtimeCatalog.selected,
+            builtin: runtimeCatalog.builtin,
+            running: runtimeCatalog.running
+          }) }),
           runtimeCatalog.note && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { ...DANGER_NOTE_STYLE, marginBottom: 6, whiteSpace: "pre-wrap" }, children: `\u26A0 ${runtimeCatalog.note}` }),
           (() => {
             const seen = /* @__PURE__ */ new Set();
@@ -2591,14 +2665,21 @@ function DesktopSettingsPanel() {
                 const isBuiltin = runtimeCatalog.builtin === c.version;
                 const isRunning = runtimeCatalog.running?.version !== null && runtimeCatalog.running?.version !== void 0 && runtimeCatalog.running.version === c.version;
                 const available = installed || isBuiltin || isRunning;
-                const isCurrent = runtimeCatalog.selected ? runtimeCatalog.selected === c.version : isBuiltin || isRunning;
+                const isCurrent = isRuntimeInUse(
+                  {
+                    selected: runtimeCatalog.selected,
+                    builtin: runtimeCatalog.builtin,
+                    running: runtimeCatalog.running
+                  },
+                  c.version
+                );
                 const tags = [];
                 if (c.channel) tags.push(c.channel);
                 if (isBuiltin) tags.push("\u5185\u7F6E");
                 else if (installed) tags.push("\u5DF2\u4E0B\u8F7D");
                 if (isRunning) tags.push("\u8FD0\u884C\u4E2D");
                 const downloadState = runtimeDownloading[c.version];
-                const failedReason = typeof downloadState === "object" ? downloadState.failed : "";
+                const failedReason = runtimeDownloadHint(downloadState);
                 const pct = dlProgress && dlProgress.version === c.version && dlProgress.resolved > 0 ? Math.min(100, Math.round(dlProgress.downloaded / dlProgress.resolved * 100)) : 0;
                 return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { margin: "4px 0" }, children: [
                   /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(
@@ -2611,15 +2692,18 @@ function DesktopSettingsPanel() {
                       },
                       children: [
                         /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: `${c.version}${tags.length ? "\uFF08" + tags.join(" \xB7 ") + "\uFF09" : ""}` }),
-                        !available ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-                          PfBtn,
-                          {
-                            variant: "ghost",
-                            disabled: downloadState === "downloading",
-                            onClick: () => handleDownloadRuntime(c.version),
-                            children: downloadState === "downloading" ? "\u4E0B\u8F7D\u4E2D\u2026" : failedReason ? "\u91CD\u8BD5\u4E0B\u8F7D" : downloadState === "downloaded" ? "\u5DF2\u4E0B\u8F7D" : "\u4E0B\u8F7D"
-                          }
-                        ) : /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { display: "flex", gap: 6, alignItems: "center" }, children: [
+                        !available ? /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { display: "flex", gap: 6, alignItems: "center" }, children: [
+                          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+                            PfBtn,
+                            {
+                              variant: "ghost",
+                              disabled: downloadState === "downloading",
+                              onClick: () => handleDownloadRuntime(c.version),
+                              children: runtimeDownloadButtonLabel(downloadState)
+                            }
+                          ),
+                          downloadState === "downloading" && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: () => handleCancelRuntimeDownload(c.version), children: "\u53D6\u6D88" })
+                        ] }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { display: "flex", gap: 6, alignItems: "center" }, children: [
                           /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
                             PfBtn,
                             {
@@ -2629,12 +2713,12 @@ function DesktopSettingsPanel() {
                               children: isCurrent ? "\u4F7F\u7528\u4E2D" : "\u5207\u6362\u5230\u6B64\u7248\u672C"
                             }
                           ),
-                          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+                          !isBuiltin && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
                             PfBtn,
                             {
                               variant: "danger",
-                              disabled: removingVersion !== null || isRunning || runtimeCatalog.selected === c.version || c.version === runtimeCatalog.builtin,
-                              title: isRunning ? "\u6B63\u5728\u8FD0\u884C\u7684\u7248\u672C\u4E0D\u53EF\u5378\u8F7D" : runtimeCatalog.selected === c.version ? "\u4F7F\u7528\u4E2D\u7684\u7248\u672C\u4E0D\u53EF\u5378\u8F7D\uFF0C\u8BF7\u5148\u5207\u6362" : c.version === runtimeCatalog.builtin ? "\u5185\u7F6E\u7248\u672C\u968F\u5E94\u7528\u5206\u53D1\uFF0C\u4E0D\u53EF\u5378\u8F7D" : "\u5220\u9664\u672C\u5730\u5DF2\u4E0B\u8F7D\u7684\u8FD0\u884C\u65F6",
+                              disabled: removingVersion !== null || isRunning || runtimeCatalog.selected === c.version,
+                              title: isRunning ? "\u6B63\u5728\u8FD0\u884C\u7684\u7248\u672C\u4E0D\u53EF\u5378\u8F7D" : runtimeCatalog.selected === c.version ? "\u4F7F\u7528\u4E2D\u7684\u7248\u672C\u4E0D\u53EF\u5378\u8F7D\uFF0C\u8BF7\u5148\u5207\u6362" : "\u5220\u9664\u672C\u5730\u5DF2\u4E0B\u8F7D\u7684\u8FD0\u884C\u65F6",
                               onClick: () => handleRemoveRuntime(c.version),
                               children: removingVersion === c.version ? "\u5378\u8F7D\u4E2D\u2026" : "\u5378\u8F7D"
                             }
@@ -2668,10 +2752,18 @@ function DesktopSettingsPanel() {
                     ),
                     /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: dlProgress && dlProgress.version === c.version ? `\u5B89\u88C5\u4F9D\u8D56\uFF1A\u5DF2\u4E0B\u8F7D ${dlProgress.downloaded} / ${dlProgress.resolved || "\u2026"} \u4E2A\u5305${dlProgress.resolved > 0 ? `\uFF08${pct}%\uFF09` : ""}` : "\u51C6\u5907\u4E2D\u2026" })
                   ] }),
-                  failedReason && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { ...DANGER_NOTE_STYLE, marginTop: 4, whiteSpace: "pre-wrap" }, children: [
-                    "\u4E0B\u8F7D\u5931\u8D25\uFF1A",
-                    failedReason
-                  ] })
+                  failedReason && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+                    "div",
+                    {
+                      style: {
+                        // #97：取消是中性终态，不能穿红色警告色、也不能顶着「下载失败：」的前缀
+                        ...downloadState !== void 0 && typeof downloadState === "object" && "cancelled" in downloadState ? NOTE_STYLE : DANGER_NOTE_STYLE,
+                        marginTop: 4,
+                        whiteSpace: "pre-wrap"
+                      },
+                      children: failedReason
+                    }
+                  )
                 ] }, c.version);
               }),
               rest.length > 0 && !runtimeExpanded && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(PfBtn, { variant: "ghost", style: { marginTop: 4 }, onClick: () => setRuntimeExpanded(true), children: [
