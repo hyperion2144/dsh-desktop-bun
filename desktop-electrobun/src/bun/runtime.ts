@@ -183,14 +183,19 @@ export function resolveRuntimeSelection(input: RuntimeSelectionInput = {}): Runt
   const appSupport = input.appSupport ?? appSupportDir(env)
   const installed = input.installed !== undefined ? input.installed : scanInstalledVersions(appSupport)
   const picked = selectRuntimeVersion({ installed, preferred: input.preferred ?? null })
+  // #79 回退可见化：偏好版本不在已装里（未装成/已卸载/树不完整）时，回退动作要带 note——
+  // service 把它写进 shell 日志 + pendingRuntimeNote 补发通知，面板也能展示，不再静默回退。
+  const requested = input.preferred ?? null
+  const fallbackNote = (fallback: string): string | null =>
+    requested !== null && requested !== '' ? `偏好版本 dsh ${requested} 未在已装目录中找到（可能未装成或已卸载），已回退${fallback}` : null
   if (picked !== null && isRuntimeVersion(picked)) {
     const root = runtimeDirOf(appSupport, picked)
-    return { kind: 'installed', root, layout: 'root', version: readRuntimeVersion(root) ?? picked, note: null }
+    return { kind: 'installed', root, layout: 'root', version: readRuntimeVersion(root) ?? picked, note: picked !== requested ? fallbackNote(`已装的最高版本 dsh ${picked}`) : null }
   }
   const builtin = input.builtinDir ?? null
   if (builtin !== null && builtin !== '') {
     const root = resolve(builtin)
-    return { kind: 'builtin', root, layout: 'root', version: readRuntimeVersion(root), note: null }
+    return { kind: 'builtin', root, layout: 'root', version: readRuntimeVersion(root), note: fallbackNote('随包内置运行时') }
   }
   throw new Error(
     `找不到可用的 dsh 运行时：已下载目录 ${runtimesDir(appSupport)} 为空，也没找到随包内置树（可用 DSH_SHELL_RUNTIME_DIR / DSH_SHELL_BUILTIN_DIR 指定）`

@@ -388,6 +388,7 @@ describe('createRuntimeDownloader', () => {
       },
       record: (version, source) => recorded.push({ version, source }),
     })
+    // 终态不完美也无妨：面板只在 active 期间读进度；装完后 downloaded 会对齐 resolved（#79）
     expect(downloader.status()).toEqual({ active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '' })
     const seenDuringRun: boolean[] = []
     const pending = downloader.start('9.9.9', 'npm')
@@ -395,8 +396,27 @@ describe('createRuntimeDownloader', () => {
     await expect(pending).resolves.toEqual({ ok: true, version: '9.9.9' })
     expect(seenDuringRun).toEqual([true])
     expect(recorded).toEqual([{ version: '9.9.9', source: 'npm' }])
-    expect(downloader.status()).toEqual({ active: false, version: '9.9.9', resolved: 5, downloaded: 4, added: 3, error: '' })
+    // #79：成功终态 downloaded 对齐 resolved（上次进度快照停在 538/625=86% 定格的假活就是这么来的）
+    expect(downloader.status()).toEqual({ active: false, version: '9.9.9', resolved: 5, downloaded: 5, added: 3, error: '' })
   })
+
+  test('成功终态：最后一条进度停在中间（如 538/625）也归一到 100%', async () => {
+    const downloader = createRuntimeDownloader({
+      install: async (_version, onProgress) => {
+        onProgress({ resolved: 625, downloaded: 538, added: 520 })
+        // pnpm default reporter 在下载阶段结束后不再打 Progress 行（linking 无进度可读），
+        // 现实里最后一条快照就停在这里
+      },
+      record: () => {},
+    })
+    await downloader.start('0.2.1-alpha.3', 'github')
+    const status = downloader.status()
+    expect(status.downloaded).toBe(625)
+    expect(status.resolved).toBe(625)
+    expect(status.added).toBe(520)
+    expect(status.error).toBe('')
+  })
+
 
   test('单飞：已有任务在跑时第二次 start 抛「已有运行时下载任务」', async () => {
     let release: () => void = () => {}
@@ -431,5 +451,21 @@ describe('createRuntimeDownloader', () => {
     expect(status.active).toBe(false)
     expect(status.error).toContain('ERR_PNPM_NO_MATCHING_VERSION')
     expect(status.version).toBe('9.9.9')
+  })
+
+  test('失败终态：保留最后进度快照与 error（面板拿它显示失败与已下载数，#79）', async () => {
+    const downloader = createRuntimeDownloader({
+      install: async (_version, onProgress) => {
+        onProgress({ resolved: 625, downloaded: 538, added: 520 })
+        throw new Error('dsh 0.2.1-alpha.3 安装失败（exit 1）：ETIMEDOUT')
+      },
+      record: () => {},
+    })
+    await downloader.start('0.2.1-alpha.3', 'github').catch(() => {})
+    const status = downloader.status()
+    expect(status.active).toBe(false)
+    expect(status.downloaded).toBe(538)
+    expect(status.resolved).toBe(625)
+    expect(status.error).toContain('ETIMEDOUT')
   })
 })

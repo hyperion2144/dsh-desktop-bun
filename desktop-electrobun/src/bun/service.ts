@@ -30,7 +30,7 @@ import type { ProfileOpRequest, ProfileOpResult } from './profile-dialog.ts'
 export type { ProfileOpRequest, ProfileOpResult } from './profile-dialog.ts'
 import { cleanupStagedPlugins, stagePlugins } from './plugin-staging.ts'
 import { createArbiter } from '../shared/power-arbiter.ts'
-import { resolveProxyEnv } from '../shared/proxy-env.ts'
+import { proxyEnvRecord, resolveProxyEnv } from '../shared/proxy-env.ts'
 import { detectSystemProxy } from './system-proxy.ts'
 import type { ProxyEnv } from '../shared/proxy-env.ts'
 import { createKeepAwake } from './keep-awake.ts'
@@ -234,7 +234,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   log(
     `运行时 = ${paths.runtimeDir}（${paths.runtimeKind}${paths.runtimeVersion === null ? '' : ` ${paths.runtimeVersion}`}）| dist = ${paths.distDir} | profile = ${paths.profile} | home = ${paths.home}`
   )
-  if (paths.runtimeNote !== null) log(`运行时回退：${paths.runtimeNote}`)
+
   if (paths.runtimeNote !== null) {
     log(`运行时回退：${paths.runtimeNote}`)
     // D6：notifier 在下面才建好，先记下，建好后补发
@@ -265,12 +265,16 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         hasNode: Bun.which('node') !== null,
         log,
       })
+      // #79：手动/系统代理注入 pnpm 安装环境（childProxy 在下方 connect 段定义，下载时才执行）；
+      // off = null → 不传 env，继承壳环境原样（与宿主 spawn 同语义：不动用户自己设的代理变量）
+      const proxy = childProxy()
       await installRuntime({
         appSupport: paths.appSupport,
         version,
         bunPath,
         pnpmCjs,
         nodeShimDir,
+        env: proxy === null ? undefined : proxyEnvRecord(proxy),
         onProgress,
         onLog: log,
       })
@@ -701,6 +705,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       activeKind: paths.runtimeKind,
       activeDir: paths.runtimeDir,
       selected: liveSettings.dshRuntime ?? null,
+      // #79：回退说明（偏好版本不在已装里时的用户可见原因；无回退为 null），面板直接展示
+      note: paths.runtimeNote,
       installed: listInstalledRuntimes(paths.appSupport),
     }
   }

@@ -336,14 +336,18 @@ export function createRuntimeDownloader(deps: DownloaderDeps): RuntimeDownloader
           status = { ...status, resolved: progress.resolved, downloaded: progress.downloaded, added: progress.added }
         })
         deps.record(version, source)
-        status = { active: false, version, resolved: status.resolved, downloaded: status.downloaded, added: status.added, error: '' }
+        // #79：成功终态把 downloaded 对齐 resolved——pnpm 的最后一条 Progress 行往往停在下载中段
+        // （linking 阶段不再打进度），原样保留就成了「86% 定格」的假活；装成了就是全部拉完。
+        status = { active: false, version, resolved: status.resolved, downloaded: status.resolved, added: status.added, error: '' }
         deps.log?.(`运行时安装完成：dsh ${version}（来源 ${source}）`)
         return { ok: true as const, version }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
+        // #79：失败终态原样保留最后进度快照 + error——面板靠 error 判定失败、靠数字展示「拉到哪断的」。
         status = { active: false, version, resolved: status.resolved, downloaded: status.downloaded, added: status.added, error: message }
         deps.log?.(`运行时安装失败：dsh ${version} —— ${message}`)
         throw error
+
       }
     },
   }

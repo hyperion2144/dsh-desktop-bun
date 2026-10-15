@@ -77,6 +77,8 @@ interface RuntimeCatalog {
   catalog: { version: string; channel: string }[]
   /** #107：目录拉取失败时的降级标记（此时 catalog 为空、installed 为本地全部已装） */
   error?: string
+  /** #79：运行时回退说明（偏好版本不在已装目录时的用户可见原因；无回退为 null） */
+  note?: string | null
   /** 当前真正在跑的那棵树（override | installed | builtin）：标记「运行中」并禁掉它的下载/卸载 */
   running?: { kind: string; version: string | null; dir: string | null } | null
 }
@@ -1084,12 +1086,26 @@ function DesktopSettingsPanel(): React.ReactElement {
             return
           }
           setDlProgress(null)
-          if (!sawActive) return
+          if (!sawActive) {
+            // #79：面板没开时结束的下载——挂载/重开后第一拍在这里恢复终态，不再静默。
+            // 失败终态写 {failed}（与 invoke catch 口径一致）；成功终态 error 为空且已进 installed，无需恢复。
+            if (s.version !== '' && s.error !== '') {
+              const reason = s.error.replace(/^下载失败：?/i, '') || '未知错误'
+              setRuntimeDownloading((prev) => {
+                // 已是失败态就别重置（轮询每 600ms 一拍，重置会闪）
+                if (typeof prev[s.version] === 'object') return prev
+                return { ...prev, [s.version]: { failed: reason } }
+              })
+            }
+            return
+          }
           sawActive = false
           const ok = !s.error
           setRuntimeDownloading((prev) => {
             const next = { ...prev }
-            delete next[s.version]
+            if (ok) delete next[s.version]
+            // #79：失败不再 delete（那会把失败洗成无状态）——写 {failed}，与 invoke catch 同口径
+            else next[s.version] = { failed: s.error.replace(/^下载失败：?/i, '') || '未知错误' }
             return next
           })
           void refreshRuntimes()
@@ -1574,6 +1590,9 @@ function DesktopSettingsPanel(): React.ReactElement {
                       ? `当前使用：运行时 ${runtimeCatalog.running.version}（${runtimeCatalog.running.kind}）`
                       : '当前无可用 dsh'}
               </div>
+              {runtimeCatalog.note && (
+                <div style={{ ...DANGER_NOTE_STYLE, marginBottom: 6, whiteSpace: 'pre-wrap' }}>{`⚠ ${runtimeCatalog.note}`}</div>
+              )}
               {(() => {
                 // 折叠（#95）：默认只显示各渠道头版 + 已下载版本，其余收进「展开全部」
                 const seen = new Set<string>()

@@ -522,8 +522,8 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     onHostGiveUp: (state, reason) => {
       console.error(`[shell] 宿主守护器放弃重启（${reason}）；页面停在 ${state.pageUrl}`)
     },
-    // #60：面板「重启 dsh 服务」= DSH 树级完整重启（壳/窗口不动）；无窗口模式回落宿主级
-    onFullRestart: noWindow ? undefined : () => fullRestartShell(),
+    // #79：面板「重启 dsh 服务」= 统一 restartDsh（树级全重启 + 关窗→splash→原样重开）；无窗口模式回落宿主级
+    onFullRestart: noWindow ? undefined : () => restartDsh(),
     notifier,
     // 同一个 UN 桥实例（状态与投递都走它；面板的权限徽标也从这里读）
     notifyBridge,
@@ -747,19 +747,48 @@ async function openProfileWindow(profile: string): Promise<void> {
 let restartingShell = false
 
 /**
- * #60：手动「重启 dsh 服务」的完整重启语义——DSH 侧等效「退出应用再启动」：
- * 宿主+伴生进程树整树灭确认后全新拉起；桌面壳本体（托盘/窗口/进程）不退出，窗口重载到新 pageUrl；
- * 启动 profile 的服务面引用与实例锁回填换新。
+ * #60 + #79：全壳统一的「重启 dsh 服务」入口——面板按钮、托盘重启、托盘切运行时都走这一条。
+ * 语义（维护者拍板）：DSH 侧等效「退出应用再启动」——宿主+伴生进程树整树灭确认后全新拉起；
+ * 桌面壳本体（托盘/进程）不退出。有窗口时：关窗 → 重启界面（复用冷启动 splash 通道，
+ * onStage 阶段照推）→ 服务面就绪后原样重开重启前开着的窗口；无窗口模式保持纯服务面重启。
  */
-async function fullRestartShell(): Promise<void> {
+async function restartDsh(): Promise<void> {
   if (restartingShell || quitting) return
   restartingShell = true
   try {
-    // #60 语义（维护者澄清）：「完整重启」= DSH 侧（宿主 + 全部伴生进程树）树灭后全新拉起；
-    // 桌面壳本体（托盘/窗口/进程）不退出——窗口等服务面回来后重载到新 pageUrl。
     const restartProfiles = [...services.keys()]
     const serviceCount = restartProfiles.length
-    console.log(`[shell] 完整重启：DSH 树级重启 ${String(serviceCount)} 份服务面（壳与窗口保持不动）`)
+    // #79：重启前开着的窗口就绪后原样重开；没开的不趁机弹窗（关窗回托盘的语义）
+    const reopenProfiles = [...windows.keys()]
+    const showSplash = !noWindow && reopenProfiles.length > 0
+    console.log(`[shell] 完整重启：DSH 树级重启 ${String(serviceCount)} 份服务面（壳与托盘保持不动）`)
+    // ---- 阶段〇：关窗 → 重启界面（splash 复用冷启动通道：onStage/pushStage 写同一组模块变量）----
+    if (showSplash) {
+      splash = new BrowserWindow({
+        title: APP_NAME,
+        html: splashHtml(),
+        renderer: 'cef',
+        titleBarStyle: 'hiddenInset',
+        frame: { width: SPLASH_WIDTH, height: SPLASH_HEIGHT },
+      })
+      // 冷启动的 splash 早已收掉（主窗 dom-ready 收尾）；这里重新立一面。dom-ready 前不能推 JS
+      //（原生层 FATAL，见启动段注释），先记阶段，dom-ready 后补推。
+      splashReady = false
+      lastStage = 'instance'
+      splash.on('dom-ready', () => {
+        splashReady = true
+        pushStage()
+      })
+      for (const profile of reopenProfiles) {
+        // 关窗绕过关窗策略（回托盘/退进程的判断是给用户手关用的；重启关窗是壳自己的动作）
+        stoppingProfiles.add(profile)
+        windows.get(profile)?.window.close()
+      }
+      // close 事件异步落账（windows Map 清理在 close 回调里），等一拍再动服务面
+      await Bun.sleep(100)
+      for (const profile of reopenProfiles) stoppingProfiles.delete(profile)
+      windowVisible = false
+    }
     // ---- 阶段一：树级停止（host.stop 树级契约：伴生进程随宿主退场，树灭确认后才返回）----
     await Promise.all(
       restartProfiles.map(async (profile) => {
@@ -773,7 +802,7 @@ async function fullRestartShell(): Promise<void> {
         services.delete(profile)
       }),
     )
-    // ---- 阶段二：全新服务面（新宿主、新 token），起好后窗口重载到新 pageUrl ----
+    // ---- 阶段二：全新服务面（新宿主、新 token）；重启前开着的窗口原样重开 ----
     for (const profile of restartProfiles) {
       const fresh = await ensureService(profile).catch(() => null)
       if (fresh === null) {
@@ -785,7 +814,25 @@ async function fullRestartShell(): Promise<void> {
         service = fresh
         updateInstance(instanceFile, process.pid, { origin: fresh.state.origin, pageUrl: fresh.state.pageUrl })
       }
-      reloadWindow(profile, fresh.state.pageUrl)
+      if (reopenProfiles.includes(profile)) {
+        // 重开（createProfileWindow：几何记忆/关窗策略/RPC 全套语义重新接上；
+        // 启动 profile 的窗口 dom-ready 会收掉重启界面并回填 mainWindowReady）
+        try {
+          await createProfileWindow(profile, fresh)
+        } catch (error) {
+          console.error(`[shell] 完整重启：重开窗口失败（${profile}）：${String(error)}`)
+        }
+      } else {
+        reloadWindow(profile, fresh.state.pageUrl)
+      }
+    }
+    // ---- 收尾：重启界面收掉（启动 profile 窗口的 dom-ready 也会收，这里是兜底）----
+    if (showSplash) {
+      try {
+        splash?.close()
+      } catch {}
+      splash = null
+      splashReady = false
     }
     console.log(`[shell] 完整重启完成（服务面 ${String(serviceCount)} 份）`)
   } finally {
@@ -798,7 +845,7 @@ async function fullRestartShell(): Promise<void> {
 async function restartServiceFromTray(): Promise<void> {
   console.log('[shell] 托盘：重启 dsh 服务')
   try {
-    await fullRestartShell()
+    await restartDsh()
   } catch (error) {
     console.error(`[shell] 重启 dsh 服务失败：${String(error)}`)
   }
@@ -816,16 +863,9 @@ async function switchRuntimeFromTray(action: TrayAction): Promise<void> {
   uiService().save(patch)
   refreshTray()
   try {
-    // 运行时是壳级设置：把所有已起的服务面都重启一遍（各自守护器带走新运行时）
-    await Promise.all(
-      [...services.values()].map(async (svc) => {
-        try {
-          await svc.restartHost()
-        } catch (error) {
-          console.error(`[shell] 重启服务面失败（${svc.paths.profile}）：${String(error)}`)
-        }
-      })
-    )
+    // #79（拍板 Q2）：切运行时与面板/托盘重启同一条 restartDsh——树级全重启 + splash UX，
+    // 不再是宿主级 restartHost（那条路留给守护器自愈）
+    await restartDsh()
   } catch (error) {
     console.error(`[shell] 切换运行时失败：${String(error)}`)
   }
