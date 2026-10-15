@@ -150,6 +150,8 @@ function harness(options: {
 
   files?: Record<string, string>
   dshResolved?: string | null
+  /** 系统入口（/usr/local/bin/dsh、~/.local/bin/dsh）当前指向哪（快探测用；null = 入口不存在） */
+  linkTo?: string | null
   runStatus?: number
   whereResolved?: string | null
   runStderr?: string
@@ -193,6 +195,7 @@ function harness(options: {
     realpath: (path) => path,
     env: { USER: 'tester', SHELL: '/bin/zsh' },
     home: options.home ?? '/home/tester',
+    readlink: (path) => (options.linkTo !== undefined && path.endsWith('/dsh') ? options.linkTo : null),
   })
   return { cli, files, calls, logs }
 }
@@ -347,6 +350,32 @@ describe('createRegisterCli（IO 外壳，全部注入）', () => {
     const script = Buffer.from(ps[ps.indexOf('-EncodedCommand') + 1] ?? '', 'base64').toString('utf16le')
     const value = /-Value '([^']*)'/.exec(script)?.[1] ?? ''
     expect(value).toBe('C:\\other;/app-support/runtime/bin-dsh')
+  })
+
+  test('刷新闩锁：连着两次强制刷新各自实测（不得拿第一次那个已兑现的 Promise 糊弄）', async () => {
+    const opts: { platform: string; dshResolved: string | null } = { platform: 'darwin', dshResolved: null }
+    const wired = harness(opts)
+    expect((await wired.cli.refresh({ force: true })).kind).toBe('missing')
+    // 环境变了：同一条注入跑第二次必须重新实测，而不是复述第一次的结论
+    opts.dshResolved = '/app-support/runtime/bin-dsh/dsh'
+    expect((await wired.cli.refresh({ force: true })).kind).toBe('registered')
+  })
+
+  test('保鲜快探测：系统入口指向本壳 shim 就算已注册，不 spawn 登录 shell', async () => {
+    const spawned: string[][] = []
+    const probe = harness({
+      platform: 'darwin',
+      dshResolved: null,
+      linkTo: '/app-support/runtime/bin-dsh/dsh',
+    })
+    expect(probe.cli.poll().kind).toBe('registered')
+    expect(spawned).toEqual([])
+    expect(probe.calls.some((argv) => argv.includes('-ilc'))).toBe(false)
+  })
+
+  test('保鲜快探测：入口不存在时判不出来（交给慢路径），不误报', () => {
+    const none = harness({ platform: 'darwin', dshResolved: null })
+    expect(none.cli.poll().kind).toBe('unknown')
   })
 
   test('win32：写回成功即乐观置已注册（TTL 内不被重测打回）', async () => {

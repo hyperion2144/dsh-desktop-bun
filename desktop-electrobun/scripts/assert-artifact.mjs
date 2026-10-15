@@ -1,18 +1,20 @@
 #!/usr/bin/env bun
 /**
- * 构建产物断言（CI 门禁 + 本地手验）：每个平台的包都要证明「它真的带 CEF」。
- *
+ * 构建产物断言（CI 门禁 + 本地手验）：每个平台的包都要证明「它的渲染器载荷与平台策略一致」。
  * 为什么必须有这道门：Electrobun 里 `renderer: 'cef'` 在**没打 CEF** 时会静默回落系统
  * webview（mac `nativeWrapper.mm:8359`、win `nativeWrapper.cpp:8944`、linux `nativeWrapper.cpp:591`），
  * 界面上看不出任何异常——但那就等于把 #200 那族 JavaScriptCore 崩溃原样带回来。所以不靠
- * 「构建时没报错」，而是打包后直接翻产物：payload 归档里有 CEF 运行时、`version.json` 的
- * channel 与更新源对得上。
+ * 「构建时没报错」，而是打包后直接翻产物：
+ *   · mac/linux（bundleCEF:true）→ payload 里必须有 CEF 运行时，缺了即断言失败；
+ *   · win（#84 起 bundleCEF:false，走系统 WebView2）→ **不得**出现 CEF 载荷——出现即
+ *     渲染器策略回归 / 包体回胖。
+ * 两条路都还要求 `version.json` 的 channel 与更新源对得上。
  *
  * 用法：
  *   bun run scripts/assert-artifact.mjs                 # 自动找 build/ 下最新的 <env>-<os>-<arch>
  *   bun run scripts/assert-artifact.mjs <构建目录|.app>  # 指定产物
  *
- * 退出码：0 = 通过；1 = 断言失败（缺 CEF / 缺 version.json / 读不出归档）。
+ * 退出码：0 = 通过；1 = 断言失败（缺/多出 CEF 载荷 / 缺 version.json / 读不出归档）。
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -23,7 +25,7 @@ import { dshVersionFromPackageJson, readBuiltinRuntimeDeclaration } from '../src
 const projectRoot = resolve(import.meta.dir, '..')
 const buildRoot = join(projectRoot, 'build')
 
-/** 各平台的 CEF 运行时标志（tar 列表里的路径片段）。 */
+/** 各平台**应带**的 CEF 运行时标志（tar 列表里的路径片段）。win 走系统 WebView2（#84），不打 CEF ⇒ 空。 */
 function cefMarkers(platform) {
   if (platform === 'darwin') {
     return [
@@ -31,8 +33,14 @@ function cefMarkers(platform) {
       'Chromium Embedded Framework.framework/Libraries/libcef_sandbox.dylib',
     ]
   }
-  if (platform === 'win32') return ['libcef.dll', 'chrome_elf.dll']
+  if (platform === 'win32') return []
   return ['libcef.so', 'chrome-sandbox']
+}
+
+/** 各平台**不得带**的 CEF 载荷标志（#84 反向断言）：win 产物出现即渲染器策略回归 / 包体回胖。 */
+function forbiddenCefMarkers(platform) {
+  if (platform === 'win32') return ['libcef.dll', 'chrome_elf.dll']
+  return []
 }
 
 function listDir(path) {
@@ -204,7 +212,7 @@ function findVersionJsonOnDisk(root, depth = 0) {
 
 const diskVersionFiles = findVersionJsonOnDisk(target)
 // Windows 的产物是「exe + Resources/<hash>.tar.zst 载荷」两段式：version.json 落在 app 目录里，
-// 不在归档里。这时不再要求归档带它（CEF 标志仍必须在归档里），改验磁盘上那份。
+// 不在归档里。这时不再要求归档带它（渲染器载荷断言照跑），改验磁盘上那份。
 const needVersionInArchive = diskVersionFiles.length === 0
 if (diskVersionFiles.length > 0) {
   console.log(`[assert] 磁盘上发现 ${String(diskVersionFiles.length)} 份 version.json（app 目录布局）`)
@@ -237,7 +245,7 @@ function tarExtractTo(archive, member, dest) {
 
 /**
  * 断言一份归档。两类都认：
- *   · 叶子（真正的应用 payload）→ 必须有 CEF 运行时 + 可用的 version.json；
+ *   · 叶子（真正的应用 payload）→ 渲染器载荷符合平台策略（mac/linux 必有 CEF；win 不得有）+ 可用的 version.json；
  *   · 包装层（Windows 的 `*-Setup.tar.zst` 就是这种）→ 里面还有内层 `*.tar.zst`，
  *     解出来递归断言。
  * 路径比较一律先把 `\` 归一成 `/`：Windows 上 tar 列表用的是反斜杠（CI 实测）。
@@ -270,6 +278,9 @@ function inspect(archive, label, depth = 0) {
   const joined = norm.join('\n')
   for (const marker of cefMarkers(platform)) {
     if (!joined.includes(marker)) problems.push(`${label} 里缺 CEF 标志：${marker}`)
+  }
+  for (const marker of forbiddenCefMarkers(platform)) {
+    if (joined.includes(marker)) problems.push(`${label} 里多出 CEF 标志：${marker}（本平台应走系统 WebView2，包体不该带 CEF）`)
   }
   // 贴进包里的壳插件：缺了就是「装完设置面板全空」（维护者实机报的），必须在门槛里拦住。
   for (const required of REQUIRED_PAYLOAD_FILES) {
@@ -305,7 +316,7 @@ function inspect(archive, label, depth = 0) {
 let diskChecked = false
 if (platform === 'win32') {
   // Windows：载荷已在打包期解并进应用树（setup 装完即用），不再随包发 *.tar.zst
-  // ⇒ 断言改为「应用目录磁盘树」：CEF 标志 + 壳插件 + 内置 dsh 树直接在文件系统上找。
+  // ⇒ 断言改为「应用目录磁盘树」：渲染器载荷（#84 win 反向核验 CEF 不出现）+ 壳插件 + 内置 dsh 树直接在文件系统上找。
   const appDirs = findLauncherDirs(target)
   if (appDirs.length === 0) {
     problems.push('Windows 构建目录里找不到应用根（含 launcher.exe 的目录）')
@@ -315,6 +326,9 @@ if (platform === 'win32') {
     const joined = rels.join('\n')
     for (const marker of cefMarkers(platform)) {
       if (!joined.includes(marker)) problems.push(`应用树缺 CEF 标志：${marker}`)
+    }
+    for (const marker of forbiddenCefMarkers(platform)) {
+      if (joined.includes(marker)) problems.push(`应用树多出 CEF 标志：${marker}（#84 起 win 走系统 WebView2，包体不该带 CEF）`)
     }
     for (const required of REQUIRED_PAYLOAD_FILES) {
       if (!rels.some((line) => line.endsWith(`/app/${required}`) || line.endsWith(`/${required}`))) {
@@ -331,7 +345,7 @@ if (platform === 'win32') {
         }
       }
     }
-    console.log(`[assert] 应用树（磁盘）：${rels.length} 个文件，_required 与 CEF 标志已核对`)
+    console.log(`[assert] 应用树（磁盘）：${rels.length} 个文件，_required 与渲染器载荷策略已核对`)
     diskChecked = true
   }
 }
@@ -356,4 +370,4 @@ if (problems.length > 0) {
   for (const problem of problems) console.error(`  · ${problem}`)
   process.exit(1)
 }
-console.log(`[assert] 通过：${payloads.length} 份 payload 都带 CEF 运行时与可用的 version.json`)
+console.log(`[assert] 通过：${payloads.length} 份 payload 的渲染器载荷与可用 version.json 都符合平台策略`)

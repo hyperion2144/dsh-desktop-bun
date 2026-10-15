@@ -29,6 +29,8 @@ import {
   windowsUserPathEntries,
   windowsUserPathWrite,
   registrationScript,
+  REGISTER_TARGET,
+  samePath,
   shimPathOf,
   shimScript,
   type RegisterKind,
@@ -59,6 +61,8 @@ export interface RegisterCliOptions {
   exists?: (path: string) => boolean
   realpath?: (path: string) => string | null
   home?: string
+  /** 读系统入口（follow 符号链接，拿不到回 null）——菜单保鲜的 fs 级快探测用（#62） */
+  readlink?: (path: string) => string | null
   username?: string
   now?: () => number
 }
@@ -78,6 +82,8 @@ export interface RegisterCli {
   ensureShim: () => { path: string; verdict: ShimVerdict }
   register: (options?: { force?: boolean }) => Promise<RegisterResult>
   describe: () => string
+  /** 保鲜轮询：只跑 fs 级快探测（不 spawn）；判不出来或没变化时返回现有缓存 */
+  poll: () => RegisterState
 }
 
 const EMPTY_STATE: RegisterState = { kind: 'unknown', resolved: null, shimReady: false, at: 0 }
@@ -92,6 +98,7 @@ export function createRegisterCli(options: RegisterCliOptions): RegisterCli {
   const writeText = options.writeText ?? defaultWriteText
   const exists = options.exists ?? defaultExists
   const realpath = options.realpath ?? defaultRealpath
+  const readlink = options.readlink ?? defaultReadlink
 
   let cached: RegisterState = { ...EMPTY_STATE }
   let inflight: Promise<RegisterState> | null = null
@@ -185,22 +192,67 @@ export function createRegisterCli(options: RegisterCliOptions): RegisterCli {
   }
 
   async function refresh(refreshOptions: { force?: boolean } = {}): Promise<RegisterState> {
-    const fresh = refreshOptions.force !== true && now() - lastAt < CACHE_TTL_MS && cached.kind !== 'unknown'
+    const forced = refreshOptions.force === true
+    const fresh = !forced && now() - lastAt < CACHE_TTL_MS && cached.kind !== 'unknown'
     if (fresh) return cached
-    if (inflight !== null) return inflight
-    inflight = (async () => {
-      try {
-        const next = classify()
-        lastAt = now()
-        const changed = next.kind !== cached.kind || next.resolved !== cached.resolved
-        cached = next
-        if (changed) options.log(`[register] 注册状态：${describeRegisterState(next)}`)
-        return cached
-      } finally {
-        inflight = null
-      }
+    // 在途刷新只服务非强制请求。强制刷新要的是「此刻的结论」，在途那次是在状态改动之前起的，
+    // 合并进来等于把旧结论当新结论（#62 实测：注册成功后菜单不消失、直到重启才对）。
+    if (inflight !== null) {
+      if (!forced) return inflight
+      await inflight
+    }
+    // classify() 是同步的：任务在微任务里就结束，闩锁必须在微任务里解，否则后续每次刷新
+    // 都会拿到第一次那个已兑现的 Promise（#62：状态永远停在启动那一次的判定）。
+    const task: Promise<RegisterState> = (async () => {
+      const next = classify()
+      lastAt = now()
+      const changed = next.kind !== cached.kind || next.resolved !== cached.resolved
+      cached = next
+      if (changed) options.log(`[register] 注册状态：${describeRegisterState(next)}`)
+      return cached
     })()
-    return inflight
+    inflight = task
+    const release = (): void => {
+      if (inflight === task) inflight = null
+    }
+    void task.then(release, release)
+    return task
+  }
+
+  /**
+   * fs 级快探测：直接问系统入口当前指向谁（微秒级，不 spawn）。菜单保鲜必须便宜，
+   * 否则只能靠 30s TTL 的旧结论，菜单里长期是打开那一刻之前的真相（#62）。
+   * Windows 的用户 PATH 在注册表里（要 spawn reg），这里返回 null 交给慢路径。
+   */
+  function cheapState(): RegisterState | null {
+    if (platform === 'win32') return null
+    const home = options.home ?? env.HOME ?? ''
+    const target = platform === 'darwin' ? REGISTER_TARGET : home === '' ? null : linuxRegistrationTarget(home)
+    if (target === null) return null
+    const linked = readlink(target)
+    if (linked === null) return null
+    const shimReady = ensureShim().verdict !== 'absent' && exists(shimPath)
+    const raw = samePath(linked, shimPath, platform) ? shimPath : (realpath(linked) ?? linked)
+    const resolved = realpath(raw) ?? raw
+    const kind = classifyResolution({
+      shimPath: realpath(shimPath) ?? shimPath,
+      shimReady,
+      resolved,
+      platform,
+    })
+    return { kind, resolved, shimReady, at: now() }
+  }
+
+  /** 保鲜轮询：快探测判出变化就落缓存并打日志；没变化只续 TTL，不打扰菜单。 */
+  function poll(): RegisterState {
+    const next = cheapState()
+    if (next === null) return cached
+    lastAt = now()
+    const changed = next.kind !== cached.kind || next.resolved !== cached.resolved
+    if (!changed) return cached
+    cached = next
+    options.log(`[register] 注册状态：${describeRegisterState(cached)}`)
+    return cached
   }
 
   async function register(registerOptions: { force?: boolean } = {}): Promise<RegisterResult> {
@@ -291,6 +343,7 @@ export function createRegisterCli(options: RegisterCliOptions): RegisterCli {
     ensureShim,
     register,
     describe: () => describeRegisterState(cached),
+    poll,
   }
 }
 
@@ -328,6 +381,15 @@ function defaultExists(path: string): boolean {
 }
 
 function defaultRealpath(path: string): string | null {
+  try {
+    return realpathSync(path)
+  } catch {
+    return null
+  }
+}
+
+/** 读符号链接（follow）——快探测专用；路径不存在或不是链接时回 null。 */
+function defaultReadlink(path: string): string | null {
   try {
     return realpathSync(path)
   } catch {

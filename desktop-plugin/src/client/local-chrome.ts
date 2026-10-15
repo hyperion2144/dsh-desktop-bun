@@ -85,6 +85,8 @@ function buildWindowControls(platform: DesktopClientPlatform): HTMLElement {
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') syncMaximizeIcon()
     })
+    // 启动轮询（收 hack 轮已删）：竞态由「先挂 onMessage 再首查」+ 壳侧 focus 唯一断言点闭环，
+    // 事件驱动的 focus/visibilitychange 重查保留。
   }
   return box
 }
