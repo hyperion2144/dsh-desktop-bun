@@ -52,7 +52,10 @@ function harness(overrides: Partial<CommandDeps> = {}): {
     closeWindow: () => {
       calls.closed += 1
     },
-    playSound: (name) => calls.sounds.push(name),
+    playSound: (name) => {
+      calls.sounds.push(name)
+      return true
+    },
     ...overrides,
   }
   return {

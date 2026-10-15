@@ -5,7 +5,8 @@
 //   · 有 Electrobun 时用它的 `Utils.showNotification`（index.ts 注入 `show`）——原生横幅 + 通知中心；
 //   · 没注入时按平台退到命令行（macOS `osascript`、Linux `notify-send`、Windows 只记日志）：
 //     黑盒测试与服务面（不起窗口）也能看到「本该弹什么」。
-// 自定义音：`$DSH_HOME/sounds/<名>`，白名单（扩展名 + 名字）过了才放行，`afplay -t 10` 截断。
+// 自定义音：`$DSH_HOME/sounds/<名>`，白名单（扩展名 + 名字）过了才放行；三平台各自的播放后端
+// 与能力探测在 `./sound-playback.ts`（macOS afplay / Windows SoundPlayer·WPF / Linux 播放器表）。
 //
 // 不做的事（与规格一致）：通知**点击回调**（Electrobun 上游 #384 未支持）、通知中心去重。
 
@@ -19,9 +20,21 @@ import {
   MAX_SOUND_BYTES,
   MAX_SOUND_SECONDS,
   soundFormatMatches,
+  soundExtension,
   soundsDir,
   type NotifyDecision,
 } from '../shared/notify-policy.ts'
+import {
+  createSoundProbe,
+  resolveSoundBackend,
+  shellPlaysDefaultTone,
+  soundCapabilityOf,
+  systemDefaultTone,
+  type SystemTone,
+  type SoundCapability,
+  type SoundProbe,
+  type SoundProbeDeps,
+} from './sound-playback.ts'
 import type { NotificationsConfig } from '../shared/settings.ts'
 
 export interface ShowNotificationOptions {
@@ -38,8 +51,14 @@ export interface NotifierOptions {
   appName?: string
   /** Electrobun 的原生通知；缺省走命令行兜底。 */
   show?: (options: ShowNotificationOptions) => void
-  /** 播放自定义音（测试注入）；缺省 `afplay`。 */
-  playCustom?: (path: string) => void
+  /** 播放自定义音（测试注入：注入即视为整个平台播放层被替换）；缺省按平台后端挑命令。 */
+  playCustom?: (path: string) => boolean | void
+  /** 播放命令的执行缝（测试注入：拿到命令即视为已起进程）；缺省 `Bun.spawn` 分离子进程。 */
+  spawnSound?: (command: string[]) => boolean
+  /** 平台播放能力探测依赖（测试注入 PATH / WPF / 子进程）。 */
+  soundProbe?: SoundProbeDeps
+  /** 直接给定能力报告（测试注入；给了就不再探测）。 */
+  soundCapability?: SoundCapability
   /** 当前是否全屏（免打扰的「全屏静默」用）；缺省 false。 */
   isFullscreen?: () => boolean
   /** 当前本地时刻；缺省 `new Date()`。 */
@@ -55,8 +74,10 @@ export interface Notifier {
   decide: (scenarioId: string) => NotifyDecision
   /** 自定义音的绝对路径；名字非法或文件不合规时返回 null。 */
   soundPath: (name: string) => string | null
-  /** 试听：能放就放（返回是否真的放了） */
+  /** 试听：真的放出去了才 true（本机没后端时 false，不假报成功）。 */
   previewSound: (name: string) => boolean
+  /** 本机播放能力（设置面板据此禁用没有后端的格式）。 */
+  soundCapability: () => SoundCapability
 }
 
 /** 命令行兜底：把通知文本转义后交给平台工具。 */
@@ -123,39 +144,6 @@ export function importSound(home: string, source: string): string {
 }
 
 
-/**
- * 系统默认提示音（D7，旧壳 rodio 的跨平台等价物；试听 `default` 档用）：
- * macOS afplay 播 Ping.aiff；Windows 用 PowerShell 播系统事件音（无需额外依赖）；
- * Linux 有 aplay 就播 freedesktop 主题音，没有就退 null（静默）。
- */
-export function systemDefaultSoundCommand(platform: NodeJS.Platform): string[] | null {
-  if (platform === 'darwin') {
-    return ['afplay', '-t', String(MAX_SOUND_SECONDS), '/System/Library/Sounds/Ping.aiff']
-  }
-  if (platform === 'win32') {
-    // PowerShell 播系统事件音（无需额外依赖；-STA 避免 COM 报错）
-    return [
-      'powershell',
-      '-NoProfile',
-      '-STA',
-      '-Command',
-      '[System.Media.SystemSounds]::Asterisk.Play(); Start-Sleep -Milliseconds 600',
-    ]
-  }
-  if (platform === 'linux') {
-    const candidates = [
-      '/usr/share/sounds/freedesktop/stereo/complete.oga',
-      '/usr/share/sounds/freedesktop/stereo/bell.oga',
-    ]
-    for (const candidate of candidates) {
-      if (existsSync(candidate)) {
-        return ['aplay', '-q', candidate]
-      }
-    }
-    return null
-  }
-  return null
-}
 
 export function createNotifier(options: NotifierOptions): Notifier {
   const log = options.onLog ?? ((): void => {})
@@ -189,23 +177,66 @@ export function createNotifier(options: NotifierOptions): Notifier {
       }
     })
 
-  const playCustom =
-    options.playCustom ??
-    ((path: string): void => {
-      if (platform !== 'darwin') {
-        log(`[notify] 自定义音只在 macOS 上播放：${path}`)
-        return
-      }
+  // 播放能力是一座机器一份：探测（Windows 的 WPF 那条要起一次 PowerShell）只做一次
+  let probeCache: SoundProbe | null = null
+  const probe = (): SoundProbe => (probeCache ??= createSoundProbe(options.soundProbe, platform))
+  let capabilityCache: SoundCapability | null = options.soundCapability ?? null
+  const capability = (): SoundCapability => (capabilityCache ??= soundCapabilityOf(platform, probe()))
+
+  const spawnSound =
+    options.spawnSound ??
+    ((command: string[]): boolean => {
       try {
-        const child = Bun.spawn(['afplay', '-t', String(MAX_SOUND_SECONDS), path], {
-          stdout: 'ignore',
-          stderr: 'ignore',
-        })
+        const child = Bun.spawn(command, { stdout: 'ignore', stderr: 'ignore' })
         child.unref?.()
+        // 时长上限的第二道闸：到点还没退就杀（afplay -t / Start-Sleep 之外的地理兜底）
+        const watchdog = setTimeout(() => {
+          try {
+            child.kill()
+          } catch {
+            // 已经自己退了：kill 报错无所谓
+          }
+        }, (MAX_SOUND_SECONDS + 1) * 1000)
+        watchdog.unref?.()
+        return true
       } catch (error) {
         log(`[notify] 播放自定义音失败：${error instanceof Error ? error.message : String(error)}`)
+        return false
       }
     })
+
+  /** 默认播放：按平台后端挑命令；本机没后端就不播，也不假报成功（#74）。 */
+  const playDefault = (path: string): boolean => {
+    const extension = soundExtension(path)
+    if (extension === null) {
+      log(`[notify] 音效扩展名不在白名单，未播放：${basename(path)}`)
+      return false
+    }
+    const backend = resolveSoundBackend(platform, extension, probe())
+    if (backend === null) {
+      log(`[notify] 本机无法播放（${capability().formats[extension]?.reason ?? '没有可用播放后端'}）：${basename(path)}`)
+      return false
+    }
+    return spawnSound(backend.command(path))
+  }
+
+  /**
+   * 系统默认提示音的投递侧播放（试听 `default` 档走 service.ts 的同名能力）。
+   * `tone === null`（本机没有可用后端）时如实记日志、返回 false——不假报成功（#74）；
+   * 命令由调用方先算好，因为「通道要不要安静」取决于壳真的放不放得出这一声。
+   */
+  const playSystemTone = (tone: SystemTone | null): boolean => {
+    if (tone === null) {
+      log('[notify] 系统默认提示音：本机没有可用播放后端，壳不播也未出声（是否响由通知通道决定）')
+      return false
+    }
+    const played = spawnSound(tone.command)
+    log(played ? `[notify] 系统默认提示音：${tone.label}` : '[notify] 系统默认提示音没能起播')
+    return played
+  }
+
+  const playCustom: (path: string) => boolean =
+    options.playCustom === undefined ? playDefault : (path) => options.playCustom?.(path) !== false
 
   const soundPath = (name: string): string | null => {
     if (!isValidSoundName(name)) {
@@ -241,22 +272,41 @@ export function createNotifier(options: NotifierOptions): Notifier {
         return decision
       }
       const heading = title ?? appName
-      show({ title: heading, body, silent: decision.silent || decision.sound.kind === 'silent' })
+      // 非 darwin 的投递通道都不带音频：配置成「系统默认音」时壳自己放（见 shellPlaysDefaultTone）。
+      // 但只有壳真的放得出这一声，才让系统通知安静（免得跟壳放的重成两声）；壳放不出来就别替
+      // 通道做决定——静音一条本就没声的通知等于彻底无声，只剩日志（独立验证 R1）。
+      const selfTone = decision.sound.kind === 'os-default' && shellPlaysDefaultTone(platform)
+      const tone = selfTone ? systemDefaultTone(platform, options.soundProbe) : null
+      show({
+        title: heading,
+        body,
+        silent: decision.silent || decision.sound.kind === 'silent' || tone !== null,
+      })
       if (decision.sound.kind === 'custom') {
         const path = soundPath(decision.sound.name)
-        if (path !== null) playCustom(path)
+        if (path !== null) {
+          const played = playCustom(path)
+          log(
+            played
+              ? `[notify] 播放自定义音：${decision.sound.name}`
+              : `[notify] 自定义音未出声（本机没有可用播放后端）：${decision.sound.name}`,
+          )
+        }
+      } else if (selfTone) {
+        playSystemTone(tone)
       }
       log(`[notify] ${scenarioId}：${body}${decision.silent ? '（静默）' : ''}`)
       return decision
     },
     soundPath,
+    soundCapability: capability,
     // 设置面板的「试听」：只放自定义音（OS 默认音由系统自己弹，试听没意义）
     previewSound: (name: string): boolean => {
       const path = soundPath(name)
       if (path === null) return false
-      playCustom(path)
-      log(`[notify] 试听音效：${name}`)
-      return true
+      const played = playCustom(path)
+      log(played ? `[notify] 试听音效：${name}` : `[notify] 试听未出声（本机没有可用播放后端）：${name}`)
+      return played
     },
   }
 }

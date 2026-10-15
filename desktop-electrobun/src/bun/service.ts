@@ -36,7 +36,8 @@ import { detectSystemProxy } from './system-proxy.ts'
 import type { ProxyEnv } from '../shared/proxy-env.ts'
 import { createKeepAwake } from './keep-awake.ts'
 import { startNotifyServer } from './notify-server.ts'
-import { createNotifier, importSound as importSoundFile, systemDefaultSoundCommand, type Notifier } from './notifications.ts'
+import { createNotifier, importSound as importSoundFile, type Notifier } from './notifications.ts'
+import { systemDefaultSoundCommand } from './sound-playback.ts'
 import { createNativeNotify, type NativeNotify } from './notify-un.ts'
 import type { ViewRegistry } from '../shared/view-grant.ts'
 import type { GuestCommands } from './guest-manager.ts'
@@ -1179,21 +1180,22 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       profiles: () => listProfiles(home, paths.profile),
       openExternal: options.onOpenExternal,
       closeWindow: options.onCloseWindow,
-      playSound: (name) => {
-        notifier.previewSound(name)
-      },
+      playSound: (name) => notifier.previewSound(name),
       playSystemSound: () => {
         const command = systemDefaultSoundCommand(options.platform ?? process.platform)
         if (command === null) {
-          log('[notify] 系统默认提示音只在 macOS 上试听')
-          return
+          // 没有后端就如实回 false：面板会提示「本机不支持」，不再假报成功（#74）
+          log('[notify] 系统默认提示音：本机没有可用播放后端，未出声')
+          return false
         }
         try {
           const child = Bun.spawn(command, { stdout: 'ignore', stderr: 'ignore' })
           child.unref?.()
           log(`[notify] 试听系统提示音：${command.join(' ')}（pid = ${String(child.pid)}）`)
+          return true
         } catch (error) {
           log(`[notify] 系统音试听失败：${error instanceof Error ? error.message : String(error)}`)
+          return false
         }
       },
       pickSoundFile: options.pickSoundFile,
