@@ -69,26 +69,75 @@ export function nodeShimScript(bunPath: string): string {
   return `#!/bin/sh\nexec "${bunPath}" "$@"\n`
 }
 
-export function ensureNodeShim(input: {
+/** pnpm 垫片（#70）：宿主 PATH 上的 `pnpm` → 我们的 Bun 跑内置 pnpm.cjs（不再依赖系统装了 pnpm）。 */
+export function pnpmShimScript(bunPath: string, pnpmCjs: string): string {
+  return `#!/bin/sh\nexec "${bunPath}" "${pnpmCjs}" "$@"\n`
+}
+
+/**
+ * Windows 垫片形态（.cmd）：execa 在 Windows 上把裸命令交给 cmd.exe 解析，只认得到 `.cmd`；
+ * `@` 免回显、`%*` 透传参数，CRLF 保险。
+ */
+export function shimCmdScript(bunPath: string, pnpmCjs?: string): string {
+  const target = pnpmCjs === undefined ? '' : ` "${pnpmCjs}"`
+  return `@"${bunPath}"${target} %*\r\n@exit /b %ERRORLEVEL%\r\n`
+}
+
+export interface EnsureShimDirInput {
   appSupport: string
   bunPath: string
   hasNode: boolean
-  isFileImpl?: (path: string) => boolean
+  /** 内置 pnpm.cjs（#70 宿主 PATH 垫片）；null/缺省 = 只管 node 垫片（旧通道语义） */
+  pnpmCjs?: string | null
   log?: (line: string) => void
-}): string | null {
-  // 系统里有 node 就不插手：让构建脚本用它最稳（我们不改用户的工具链）。
-  if (input.hasNode) return null
+}
+
+/**
+ * 物化垫片目录（`<appSupport>/runtimes/.node-shim`，POSIX 与 Windows 形态都写、互相无害）：
+ * 目录名沿用 node 垫片时代的 `.node-shim`（历史名，现同时容纳 pnpm 垫片；已落盘的持久路径，不改名以免留孤儿）。
+ * - 没有 node 时写 `node`/`node.cmd`（pnpm 构建脚本要找 node；有系统 node 就不插手）；
+ * - 有 pnpmCjs 时写 `pnpm`/`pnpm.cmd`（#70：宿主子进程解析到内置 pnpm，全新机器也可解析）。
+ * - pnpmCjs 显式为 null（宿主通道、解析不到）时清掉陈旧 pnpm 垫片（不留死垫片）；旧通道
+ *   （pnpmCjs 缺省，ensureNodeShim）从不写/删 pnpm 垫片，行为与 #70 前完全一致。
+ * 返回垫片目录；没有可写的垫片（或写失败）回 null，调用方就不动 PATH。
+ */
+export function ensureShimDir(input: EnsureShimDirInput): string | null {
+  const wantsNode = !input.hasNode
+  const hostChannel = input.pnpmCjs !== undefined // 旧通道（ensureNodeShim）与 pnpm 垫片无涉：不写也不删
+  const wantsPnpm = hostChannel && input.pnpmCjs !== null && input.pnpmCjs !== ''
+  // 宿主通道 + 解析不到：清掉陈旧 pnpm 垫片——只写不删的话，切运行时/删树后宿主 PATH 会踩到
+  // 指向已删 pnpm.cjs 的死垫片（报「模块找不到」而非干净 ENOENT，更难排查）。
+  const cleanPnpm = hostChannel && !wantsPnpm
+  if (!wantsNode && !wantsPnpm && !cleanPnpm) return null
   const dir = join(runtimesDir(input.appSupport), '.node-shim')
-  const link = join(dir, 'node')
   try {
     mkdirSync(dir, { recursive: true })
-    writeFileSync(link, nodeShimScript(input.bunPath), { mode: 0o755 })
-    input.log?.(`运行时安装：PATH 上没有 node，已用 Bun 垫片（${link}）`)
-    return dir
+    if (wantsNode) {
+      // 系统里有 node 就不插手：让构建脚本用它最稳（我们不改用户的工具链）。
+      writeFileSync(join(dir, 'node'), nodeShimScript(input.bunPath), { mode: 0o755 })
+      writeFileSync(join(dir, 'node.cmd'), shimCmdScript(input.bunPath), { mode: 0o755 })
+      input.log?.(`垫片：PATH 上没有 node，已用 Bun 垫片（${join(dir, 'node')}）`)
+    }
+    if (wantsPnpm && input.pnpmCjs) {
+      writeFileSync(join(dir, 'pnpm'), pnpmShimScript(input.bunPath, input.pnpmCjs), { mode: 0o755 })
+      writeFileSync(join(dir, 'pnpm.cmd'), shimCmdScript(input.bunPath, input.pnpmCjs), { mode: 0o755 })
+      input.log?.(`垫片：内置 pnpm 已进宿主 PATH（${dir}）`)
+    }
+    if (cleanPnpm) {
+      rmSync(join(dir, 'pnpm'), { force: true })
+      rmSync(join(dir, 'pnpm.cmd'), { force: true })
+      input.log?.(`垫片：pnpm.cjs 解析不到，已清掉陈旧 pnpm 垫片（${dir}）`)
+    }
+    return wantsNode || wantsPnpm ? dir : null
   } catch (error) {
-    input.log?.(`运行时安装：node 垫片创建失败（${error instanceof Error ? error.message : String(error)}）`)
+    input.log?.(`垫片目录创建失败（${error instanceof Error ? error.message : String(error)}）`)
     return null
   }
+}
+
+/** 旧通道（运行时安装/profile 依赖重建）的 node 垫片：语义与 #70 前完全一致（有 node 就不插手）。 */
+export function ensureNodeShim(input: Omit<EnsureShimDirInput, 'pnpmCjs'>): string | null {
+  return ensureShimDir(input)
 }
 
 export interface ResolvePnpmInput {

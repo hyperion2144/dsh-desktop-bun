@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { decide, isCrossSite, normalizeRel, stripToken } from '../src/shared/admission.ts'
 import { contentTypeFor, isNoContentAsset, resolveAsset } from '../src/shared/asset-path.ts'
-import { resolve } from 'node:path'
+import { delimiter, resolve } from 'node:path'
 import { buildChildEnv, assertChildEnv, missingEnvKeys, CHILD_RESOURCE_CONDITIONS } from '../src/shared/child-env.ts'
 import { scrubRequestHeaders, scrubResponseHeaders, shouldNoStore } from '../src/shared/headers.ts'
 
@@ -196,6 +196,34 @@ describe('dsh 子进程环境整表', () => {
     expect(bad.DSH_DESKTOP_PORT).toBeUndefined()
     expect(bad.DSH_MOBILE_LANE_PORT).toBeUndefined()
     expect(bad.DSH_MOBILE_ENABLED).toBeUndefined()
+  })
+
+  test('PATH 前置垫片目录（#70）：前置最前、保留原 PATH；Windows 的 Path 键不整出双键', () => {
+    const prepended = buildChildEnv({
+      base: { PATH: '/usr/bin:/bin' },
+      clientVersion: '0.12.0',
+      profile: 'desktop',
+      pathPrepend: '/shims',
+    })
+    expect(prepended.PATH).toBe(`/shims${delimiter}/usr/bin:/bin`)
+
+    // Windows 的 env 键可能是 `Path`：按既有键名前置，不能整出 PATH/Path 双键
+    const pathCase = buildChildEnv({
+      base: { Path: 'C:\\Windows' },
+      clientVersion: '0.12.0',
+      profile: 'desktop',
+      pathPrepend: 'C:\\shims',
+    })
+    expect(pathCase.Path).toBe(`C:\\shims${delimiter}C:\\Windows`)
+    expect(pathCase.PATH).toBeUndefined()
+
+    // 基线没有 PATH：垫片目录就是唯一入口（GUI 最小 PATH 场景）
+    const noPath = buildChildEnv({ base: {}, clientVersion: '0.12.0', profile: 'desktop', pathPrepend: '/shims' })
+    expect(noPath.PATH).toBe('/shims')
+
+    // 不给 pathPrepend：完全不动 PATH（缺省不改基线）
+    const untouched = buildChildEnv({ base: { PATH: '/usr/bin' }, clientVersion: '0.12.0', profile: 'desktop' })
+    expect(untouched.PATH).toBe('/usr/bin')
   })
 
   test('cloudflared 透传（旧壳 lifecycle.rs:414-417）：设置里有路径才注入，空白串当没设置', () => {
