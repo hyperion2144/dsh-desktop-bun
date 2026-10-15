@@ -380,21 +380,46 @@ function refreshTray(): void {
 
 /**
  * #80：THICKFRAME 无边框窗在「最大化→最小化→恢复」往返可能被系统按隐形缩放边框
- * 外扩落位（顶部越出屏幕）。焦点时只读自检：仍处最大化但帧相对所在显示器工作区
- * 外扩超容差 → 判定落位损坏 → 纯原生 unmaximize()+maximize() 重摆（零自算坐标，
- * 落位由 Windows 重算，与首次最大化同一条已验证路径）。Win+方向键半屏贴靠
- * IsZoomed=false 天然不触发；任务栏恢复/托盘找回/Alt-Tab 都走 focus。
+ * 外扩落位（顶部越出屏幕）。只读自检：仍处最大化但帧相对所在显示器工作区外扩超
+ * 容差 → 判定落位损坏 → 纯原生 unmaximize()+maximize() 重摆（零自算坐标，落位由
+ * Windows 重算，与首次最大化同一条已验证路径）。Win+方向键半屏贴靠 IsZoomed=false
+ * 天然不触发。触发面：focus + resize（去抖）+ focus 后延迟复查——实机证明落位
+ * 外扩在恢复动画完成后才定格，focus 当拍检查经常早于损坏成形；resize 则在最终
+ * 摆位后必到。每次判定都落日志（含 workArea 取不取得到），实机排查有据可查。
  */
-function healMaximizedPlacement(win: BrowserWindow): void {
+const healCheckTimers = new Map<string, ReturnType<typeof setTimeout>>()
+/** 去抖窗口：resize 连发期间只做最后一次检查，重摆引发的 resize 不叠加。 */
+const HEAL_DEBOUNCE_MS = 250
+/** focus 后延迟复查：给恢复动画留出定格时间。 */
+const HEAL_RECHECK_DELAY_MS = 350
+
+function healMaximizedPlacement(win: BrowserWindow, profile: string, reason: string): void {
   if (process.platform !== 'win32') return
   if (!win.isMaximized()) return
   const frame = win.getFrame()
   const workArea = getWorkAreaForFrame(frame)
-  if (workArea === null) return
-  if (deriveMaximized(frame, workArea, true)) return
-  console.log('[shell] #80 检测到最大化落位外扩，原生重摆')
+  if (workArea === null) {
+    console.log(`[shell] #80 heal 检查（${reason}）：workArea 取不到（ffi 失败？），跳过`)
+    return
+  }
+  if (deriveMaximized(frame, workArea, true)) {
+    console.log(`[shell] #80 heal 检查（${reason}）：落位正常，不干预`)
+    return
+  }
+  console.log(`[shell] #80 heal 检查（${reason}）：落位外扩 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}，原生重摆`)
   win.unmaximize()
   win.maximize()
+}
+
+/** resize/focus 入口的去抖包装：同窗连发只留最后一次。 */
+function scheduleHealCheck(win: BrowserWindow, profile: string, reason: string): void {
+  if (process.platform !== 'win32') return
+  const previous = healCheckTimers.get(profile)
+  if (previous !== undefined) clearTimeout(previous)
+  healCheckTimers.set(profile, setTimeout(() => {
+    healCheckTimers.delete(profile)
+    healMaximizedPlacement(win, profile, reason)
+  }, HEAL_DEBOUNCE_MS))
 }
 
 function showMainWindow(): void {
@@ -632,8 +657,9 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
     frame,
   })
   // D3 反馈：上次是最大化收场的，这次直接最大化（几何记忆只当还原帧用）。
-  // Windows 实测：从未显示过的窗上 maximize() 不落 WS_MAXIMIZE 旗标；dom-ready 补齐
-  // 实机也不稳（#73 两轮未过）——最终口径：focus 首焦断言补齐（见 focus 处理器）。
+  // Windows 实测：从未显示过的窗上 maximize() 不落 WS_MAXIMIZE 旗标（#73）。
+  // 收敛口径（收 hack 轮）：建窗时尽力而为，唯一断言点=首次 focus（届时必然可见）；
+  // dom-ready 二次补齐与定时补推两层已删——竞态由「focus 断言 + 客户端首查/onMessage」闭环。
   const startMaximized = readWindowMaximized(windowStateFileOf(profile))
   if (startMaximized) {
     ensureNativeMaximizeStyles()
@@ -656,30 +682,30 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
       mainWindowReady = true
     }
     windowVisible = true
-    if (startMaximized && !win.isMaximized()) {
-      // 启动 maximize 落在隐藏窗上没生效（Windows）：可见后补一次；尺寸已是最大化帧，视觉无感
-      ensureNativeMaximizeStyles()
-      win.maximize()
-      // #73：没人告诉页面 —— 推 window_state_changed，客户端重查图标（resize/focus 都不触发）。
-      shellRpcHandle.notifyWindowState()
-    }
+    // 启动最大化不在 dom-ready 补齐/补推（收 hack 轮已删）：旗标由建窗时或首次 focus
+    // 断言立起；客户端首查晚于两者则直接查到真值，早于则收 window_state_changed 再查。
     refreshTray()
   })
   win.on('focus', () => {
     focusedProfile = profile
-    healMaximizedPlacement(win)
-    // lane 稳定接入点跟随焦点（旧壳 forwarder.rs：新连接落焦点实例，存量不动）
+    scheduleHealCheck(win, profile, 'focus')
+    // 实机证据：落位外扩在恢复动画完成后才定格，focus 当拍检查常早于损坏成形，
+    // 延迟复查一次兜住。
+    setTimeout(() => healMaximizedPlacement(win, profile, 'focus+350ms'), HEAL_RECHECK_DELAY_MS)
     // lane 稳定接入点跟随焦点（旧壳 forwarder.rs：新连接落焦点实例，存量不动）。
-    // #73：启动恢复最大化断言——Windows 上从未显示/刚显示的窗 maximize 可能不落
-    // 旗标（建窗时、dom-ready 时各试过一次都不稳），首次获得焦点时窗口必然已可见，
-    // 再补一次并推送图标重查；断言成功即清 pending，之后不再干预。
+    // #73：启动恢复最大化断言（唯一断言点）——Windows 上从未显示的窗 maximize 可能不落
+    // 旗标（建窗时试过不稳），首次获得焦点时窗口必然已可见，再补一次并推送图标重查；
+    // 断言成功即清 pending，之后不再干预。
     if (pendingStartMaximized.has(profile)) {
       if (!win.isMaximized()) {
         ensureNativeMaximizeStyles()
         win.maximize()
+      }
+      if (win.isMaximized()) {
+        // 旗标已立也要推：客户端首查可能发生在旗标立起之前（实机「偶发才对」的竞态源）
+        pendingStartMaximized.delete(profile)
         shellRpcHandle.notifyWindowState()
       }
-      if (win.isMaximized()) pendingStartMaximized.delete(profile)
     }
     // 转发器挂在先起的那份服务面上，这里找到它再指目标。
     focusedLaneForwarder()?.setTarget(services.get(profile)?.state.lanePort ?? 0)
@@ -726,6 +752,9 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
     refreshTray()
   })
   // D3：每窗各自记几何（windowStateFileOf 按 profile 分文件；scheduleFrameSave 带目标文件）
+  // #80：resize 也纳入 heal 触发面——任务栏恢复的落位外扩在最终摆位后才定格，
+  // resize 必到且晚于损坏成形；与 focus 去抖共用一套计时器。
+  win.on('resize', () => scheduleHealCheck(win, profile, 'resize'))
   win.on('resize', () => scheduleFrameSave(win, profile))
   win.on('move', () => scheduleFrameSave(win, profile))
   return win
