@@ -209,6 +209,7 @@ describe('宿主停止：等到真退出，超时就升级 SIGKILL', () => {
       hostScript,
       repoRoot: dir,
       resourcesDir: null,
+      launcherPath: null,
       runtimeKind: 'override' as const,
       runtimeVersion: null,
       runtimeNote: null,
@@ -290,6 +291,8 @@ describe('宿主 PATH 垫片透传（#70）', () => {
       runtimeKind: 'override' as const,
       runtimeVersion: null,
       runtimeNote: null,
+      // 布局里的 launcher 锚定（#62）：测试字面量不走探测，显式 null 跳过
+      launcherPath: null,
     }
   }
 

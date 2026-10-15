@@ -25,6 +25,7 @@ export const SCENARIO = {
   TASK_COMPLETE: 'task.complete',
   CONFIG_ERROR: 'config.error',
   CONFIG_INFO: 'config.info',
+  REGISTER_CLI: 'register.cli',
   DSH_APPROVAL: 'dsh.approval',
   DSH_ERROR: 'dsh.error',
 } as const

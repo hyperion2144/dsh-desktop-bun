@@ -48,8 +48,10 @@ import { activeProfile, type DesktopSettings } from '../shared/settings.ts'
 import { closeAction, offsetFrame, planWindowOpen, windowKey } from '../shared/window-targets.ts'
 import type { LaneForwarder } from './lane-forwarder.ts'
 import { createNotifier, type Notifier } from './notifications.ts'
+import { showWindowsBalloon } from './notify-win.ts'
 import { SCENARIO } from '../shared/notify-policy.ts'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { existsSync } from 'node:fs'
 import { createRegisterCli } from './register-cli.ts'
 import { registerTrayLabel } from '../shared/register-cli.ts'
 
@@ -1083,6 +1085,24 @@ async function registerDshCliFromTray(): Promise<void> {
   }
   const result = await registerCli.register({ force })
   console.log(`[register] ${result.ok ? '注册成功' : '注册未完成'}：${result.message}`)
+  try {
+    notifier.notify(
+      SCENARIO.REGISTER_CLI,
+      result.message,
+      result.ok
+        ? 'dsh 命令注册成功'
+        : result.code === 'canceled'
+          ? 'dsh 命令注册取消'
+          : result.code === 'conflict'
+            ? 'dsh 命令注册有冲突'
+            : 'dsh 命令注册失败',
+    )
+  } catch (error) {
+    // 通知挂了不能连累托盘刷新——「出错了但没有日志、菜单不更新」的嫌疑路径（#62 实测）
+    console.log(`[register] 通知投递失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+  // 菜单只走 setState 更新：refreshTray 内部已有「异步刷新完再 setState」的延时更新，
+  // 这里不再额外 await/重复刷——菜单开着时多余的动作会把它顶掉（用户口径：拒绝所有菜单重建）
   refreshTray()
 }
 
@@ -1149,7 +1169,14 @@ const registerCli = createRegisterCli({
   appSupport: appSupportDir(),
   shellCommand: () => {
     const paths = uiService().paths
-    return [process.execPath, '--no-install', '--preload', paths.preloadFile, join(paths.dshLibDir, 'bin.js')]
+    // shim 里的 bun 优先取 launcher 旁的运行时（Electrobun 约定 <app 树>/bin/，bun.exe 就在 launcher 旁边）——
+    // 自定义安装/解压目录说了算；拿不到（dev 等）再退回当前进程的执行器（#62）
+    const bunBesideLauncher =
+      paths.launcherPath !== null
+        ? join(dirname(paths.launcherPath), process.platform === 'win32' ? 'bun.exe' : 'bun')
+        : null
+    const bun = bunBesideLauncher !== null && existsSync(bunBesideLauncher) ? bunBesideLauncher : process.execPath
+    return [bun, '--no-install', '--preload', paths.preloadFile, join(paths.dshLibDir, 'bin.js')]
   },
 })
 
@@ -1168,7 +1195,13 @@ const notifier: Notifier = createNotifier({
     ) {
       return
     }
-    Utils.showNotification?.(options)
+    // Electrobun 自带的原生通道（上上版 Windows 注册成功走的就是它，别抢它前面）
+    if (Utils.showNotification) {
+      Utils.showNotification(options)
+      return
+    }
+    // 连原生通道都没有的平台才退到 PowerShell 气泡（notify-win.ts）
+    showWindowsBalloon({ title: options.title, body: options.body ?? '' })
   },
   isFullscreen: () => mainWindow?.isFullScreen() ?? false,
   onLog: (line) => console.log(line),
@@ -1283,6 +1316,16 @@ if (!noWindow) {
       },
       log: (line) => console.log(line)
     })
+    // 菜单保鲜（#62）：状态每 5s 走一次 fs 级快探测（不 spawn）。Electrobun 的 Tray 只有
+    // tray-clicked 一个事件、拿不到「菜单即将打开」的钩子，所以保鲜靠轮询而不是打开时现查；
+    // 只有状态真变了才 refreshTray()（它内部对菜单 JSON 去重，没变就完全不碰原生菜单）。
+    setInterval(() => {
+      if (tray === null) return
+      const before = registerCli.cached()
+      const after = registerCli.poll()
+      if (after.kind === before.kind && after.resolved === before.resolved) return
+      refreshTray()
+    }, 5_000)
     refreshTray()
   }
   // macOS Dock 图标被点（无可见窗口时）：把主窗带回来

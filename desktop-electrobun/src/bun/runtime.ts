@@ -6,9 +6,9 @@
 // 都要认（appSupport/runtimes 是 root 布局，override 指到 dsh 包根时是 package 布局）。
 
 import { profileDirOf } from './profile-scaffold.ts'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 import {
   externalVersion,
@@ -49,6 +49,8 @@ export interface ShellLayout {
   repoRoot: string
   /** 打包态资源根（`Contents/Resources`）；开发态为 null */
   resourcesDir: string | null
+  /** launcher 可执行文件路径（ELECTROBUN_LAUNCHER_PID/ppid 解析；拿不到为 null） */
+  launcherPath: string | null
 }
 
 export interface LayoutInput {
@@ -61,6 +63,10 @@ export interface LayoutInput {
   preferred?: string | null
   /** 随包内置树目录（缺省按打包态 resources/dsh、开发态仓根 resources/builtin 找） */
   builtinDir?: string | null
+  /** 运行中主进程的可执行文件（打包布局的进程锚定；缺省 process.execPath，测试可注入） */
+  execPath?: string
+  /** launcher 可执行路径覆盖（测试用；undefined = 按 ELECTROBUN_LAUNCHER_PID/ppid 探测，null = 跳过探测） */
+  launcherPath?: string | null
 }
 
 export function dshHome(env: Record<string, string | undefined> = process.env): string {
@@ -254,6 +260,117 @@ function packagedResources(startDir: string): string | null {
   return null
 }
 
+/**
+ * 打包布局的「运行进程锚定」探测（#62）：以主进程可执行文件所在目录向上走——
+ * 解压式自定义安装（<安装目录>/<应用树>/bin/bun.exe + <应用树>/Resources/app/runtime/*）、
+ * NSIS 自定义目录、hutch 默认安装都认；dev 态 execPath 是工具链 bun，祖先里没有这些
+ * 标记 → null（调用方回落 import.meta 链）。shim 与布局必须跟「运行进程所在目录」，
+ * 而不是模块编译期的 import.meta。
+ */
+export function packagedRootFromProcess(
+  execPath: string,
+  exists: (path: string) => boolean = existsSync,
+): string | null {
+  let dir = dirname(resolve(execPath))
+  for (let depth = 0; depth < 12; depth += 1) {
+    if (exists(join(dir, 'runtime', 'dsh-host.mjs'))) return dir
+    const nested = join(dir, 'Resources', 'app')
+    if (exists(join(nested, 'runtime', 'dsh-host.mjs'))) return nested
+    const parent = resolve(dir, '..')
+    if (parent === dir) return null
+    dir = parent
+  }
+  return null
+}
+
+/** 同上：打包态资源根（认 `plugins/<壳插件>`；返回值是装着 `plugins/` 的目录）。 */
+export function packagedResourcesFromProcess(
+  execPath: string,
+  exists: (path: string) => boolean = existsSync,
+): string | null {
+  let dir = dirname(resolve(execPath))
+  for (let depth = 0; depth < 12; depth += 1) {
+    if (exists(join(dir, 'plugins', 'dsh-desktop-bun', 'package.json'))) return dir
+    const nested = join(dir, 'Resources', 'app')
+    if (exists(join(nested, 'plugins', 'dsh-desktop-bun', 'package.json'))) return nested
+    const parent = resolve(dir, '..')
+    if (parent === dir) return null
+    dir = parent
+  }
+  return null
+}
+
+/** launcher 可执行文件路径：Electrobun 拉起 app 时会带 ELECTROBUN_LAUNCHER_PID；缺了退回 ppid。
+ *  拿 PID 按平台解析 exe 路径（win32 用 PowerShell CIM，darwin 用 ps，linux 读 /proc）。
+ *  任何一步不确定都返回 null——调用方逐级兜底（进程锚 → import.meta 链）。 */
+export function resolveLauncherExecutablePath(
+  env: Record<string, string | undefined> = process.env,
+  ppid: number = process.ppid,
+  run: (argv: string[], timeoutMs: number) => { status: number; stdout: string } = defaultLauncherRun,
+  readlink: (path: string) => string | null = defaultLauncherReadlink,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  const raw = env.ELECTROBUN_LAUNCHER_PID
+  const pid = raw !== undefined && /^\d+$/.test(raw) ? raw : ppid > 1 ? String(ppid) : null
+  if (pid === null) return null
+  if (platform === 'win32') {
+    const out = run(
+      ['powershell', '-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").ExecutablePath`],
+      8_000,
+    )
+    const line = out.status === 0 ? out.stdout.split(/\r?\n/).find((candidate) => candidate.trim() !== '') : undefined
+    return line === undefined || line.trim() === '' ? null : line.trim()
+  }
+  if (platform === 'darwin') {
+    const out = run(['/bin/ps', '-p', pid, '-o', 'comm='], 4_000)
+    const line = out.status === 0 ? out.stdout.split('\n').find((candidate) => candidate.trim() !== '') : undefined
+    return line === undefined || line.trim() === '' ? null : line.trim()
+  }
+  if (platform === 'linux') return readlink(`/proc/${pid}/exe`)
+  return null
+}
+
+function defaultLauncherRun(argv: string[], timeoutMs: number): { status: number; stdout: string } {
+  try {
+    const result = Bun.spawnSync({ cmd: argv, stdout: 'pipe', stderr: 'pipe', timeout: timeoutMs })
+    return { status: result.exitCode ?? 124, stdout: result.stdout?.toString() ?? '' }
+  } catch {
+    return { status: 124, stdout: '' }
+  }
+}
+
+function defaultLauncherReadlink(path: string): string | null {
+  try {
+    return realpathSync(path)
+  } catch {
+    return null
+  }
+}
+
+/** 以 launcher 为锚（Electrobun 约定：<app 树>/bin/launcher.exe，app 树在 <bin>/../Resources/app）。
+ *  自定义安装/解压目录里的完整树就认这里；标记不在 → null（调用方逐级兜底）。 */
+export function packagedRootFromLauncher(
+  launcherExe: string | null,
+  exists: (path: string) => boolean = existsSync,
+): string | null {
+  if (launcherExe === null) return null
+  const appRoot = resolve(dirname(launcherExe), '..', 'Resources', 'app')
+  return exists(join(appRoot, 'runtime', 'dsh-host.mjs')) ? appRoot : null
+}
+
+/** 同上：资源根（认 `plugins/<壳插件>`；新旧布局分别在 <bin>/../Resources 与其 app 子目录）。 */
+export function packagedResourcesFromLauncher(
+  launcherExe: string | null,
+  exists: (path: string) => boolean = existsSync,
+): string | null {
+  if (launcherExe === null) return null
+  const base = resolve(dirname(launcherExe), '..')
+  for (const candidate of [join(base, 'Resources'), join(base, 'Resources', 'app')]) {
+    if (exists(join(candidate, 'plugins', 'dsh-desktop-bun', 'package.json'))) return candidate
+  }
+  return null
+}
+
 export function layout(input: LayoutInput = {}): ShellLayout {
   const env = input.env ?? process.env
   const home = dshHome(env)
@@ -263,12 +380,16 @@ export function layout(input: LayoutInput = {}): ShellLayout {
       : env.DSH_PROFILE !== undefined && env.DSH_PROFILE !== ''
         ? env.DSH_PROFILE
         : 'desktop'
-  // 项目根：开发时是 desktop-electrobun/（源码里的 import.meta.dir 往上找）；
-  // 打包后是包内 <app>/Contents/Resources/app（主进程在 app/bun/index.js），
-  // 那里由构建期 build.copy 放一份 runtime/{dsh-host.mjs,bun-preload.mjs}。
-  const projectRoot = env.DSH_SHELL_PROJECT ?? findProjectRoot(import.meta.dir) ?? packagedRoot(import.meta.dir) ?? resolve(import.meta.dir, '..', '..')
+  // 项目根与资源根按「launcher.exe 所在目录」向上锚定（Electrobun 约定 <app 树>/bin/launcher.exe）——
+  // 自定义安装/解压目录说了算；core 把进程从规范根拉起也不改口径。探测逐级兜底：
+  // launcher 锚 → 进程锚 → import.meta 链（dev 态最终落这里）。
+  const launcherExe = input.launcherPath !== undefined ? input.launcherPath : resolveLauncherExecutablePath(env)
+  const execPath = input.execPath ?? process.execPath
+  const projectRoot =
+    env.DSH_SHELL_PROJECT ?? packagedRootFromLauncher(launcherExe) ?? packagedRootFromProcess(execPath) ?? findProjectRoot(import.meta.dir) ?? packagedRoot(import.meta.dir) ?? resolve(import.meta.dir, '..', '..')
   const repoRoot = resolve(projectRoot, '..')
-  const resourcesDir = env.DSH_SHELL_RESOURCES ?? packagedResources(import.meta.dir)
+  const resourcesDir =
+    env.DSH_SHELL_RESOURCES ?? packagedResourcesFromLauncher(launcherExe) ?? packagedResourcesFromProcess(execPath) ?? packagedResources(import.meta.dir)
   // 运行时选中：显式覆盖 > 设置点名的版本（内置优先，其次已下载目录）> 随包内置兜底（#97）
   const selection = resolveRuntimeSelection({
     env,
@@ -302,6 +423,7 @@ export function layout(input: LayoutInput = {}): ShellLayout {
     hostScript,
     repoRoot,
     resourcesDir,
+    launcherPath: launcherExe,
   }
   const missing = [
     ['dsh lib', dshLibDir],
