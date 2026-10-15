@@ -162,6 +162,33 @@ describe('物化进 profile 模块池', () => {
     materializePoolPackage(pool, '@scope/pkg', scoped)
     expect(readlinkSync(join(pool, '@scope/pkg'))).toBe(scoped)
   })
+  test('悬空链接占位：目标没了再挂新目标，先摘残链不撞 EEXIST（#78）', () => {
+    const root = tempDir()
+    const pool = join(root, 'pool')
+    const a = fakePackage(join(root, 'a'), 'pkg-a')
+    const b = fakePackage(join(root, 'b'), 'pkg-a')
+
+    materializePoolPackage(pool, 'pkg-a', a)
+    // 模拟旧安装被卸载/挪窝：链接还在、目标目录没了 → 悬空（existsSync 返 false）
+    rmSync(a, { recursive: true, force: true })
+    expect(existsSync(join(pool, 'pkg-a'))).toBe(false)
+
+    materializePoolPackage(pool, 'pkg-a', b) // 修复前在这里抛 EEXIST
+    expect(readlinkSync(join(pool, 'pkg-a'))).toBe(b)
+  })
+
+  test('实体目录复制体占位（旧壳遗留）：照样摘掉重挂', () => {
+    const root = tempDir()
+    const pool = join(root, 'pool')
+    const dir = fakePackage(join(root, 'a'), 'pkg-a')
+    const copy = join(pool, 'pkg-a')
+    mkdirSync(copy, { recursive: true })
+    writeFileSync(join(copy, 'stale.txt'), 'old-shell-copy')
+
+    materializePoolPackage(pool, 'pkg-a', dir)
+    expect(readlinkSync(copy)).toBe(dir)
+    expect(existsSync(join(copy, 'stale.txt'))).toBe(false)
+  })
 })
 
 describe('stagePlugins（端到端：池 + 注入清单）', () => {
@@ -255,6 +282,35 @@ describe('stagePlugins（端到端：池 + 注入清单）', () => {
       runtimeVersion: '0.2.1-alpha.2',
     })
     expect(readlinkSync(join(result.pool, 'dsh-desktop-bun'))).toBe(packaged)
+  })
+  test('单插件物化失败不阻断：其余照挂、清单只写挂上的（#78）', () => {
+    const root = tempDir()
+    const home = join(root, 'dsh-home')
+    const appSupport = join(root, 'app-support')
+    const repoRoot = join(root, 'repo')
+    fakePackage(join(repoRoot, 'desktop-plugin'), 'dsh-desktop-bun')
+    fakePackage(join(repoRoot, 'plugins', 'dsh-mobile-access'), 'dsh-mobile-access')
+
+    const warns: string[] = []
+    const result = stagePlugins({
+      home,
+      profile: 'desktop',
+      appSupport,
+      paths: { repoRoot, resourcesDir: null },
+      runtimeVersion: '0.2.1-alpha.2',
+      warn: (line) => warns.push(line),
+      materialize: (_pool, linkName) => {
+        if (linkName === 'dsh-mobile-access') throw new Error('EEXIST: 测试注入的失败')
+      },
+    })
+    expect(result.staged.map((entry) => entry.name)).toEqual(['dsh-desktop-bun'])
+    expect(result.failed).toEqual(['dsh-mobile-access'])
+    expect(result.missing).toEqual(['dsh-web-mobile'])
+    const yml = readFileSync(result.injectFile, 'utf8')
+    expect(yml).toContain('- id: dsh-desktop-bun')
+    expect(yml).not.toContain('- id: dsh-mobile-access')
+    expect(warns.join('\n')).toContain('物化失败')
+    expect(warns.join('\n')).toContain('dsh-mobile-access')
   })
 })
 
