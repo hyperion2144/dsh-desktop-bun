@@ -2148,12 +2148,22 @@ function DesktopSettingsPanel() {
           return;
         }
         setDlProgress(null);
-        if (!sawActive) return;
+        if (!sawActive) {
+          if (s.version !== "" && s.error !== "") {
+            const reason = s.error.replace(/^下载失败：?/i, "") || "\u672A\u77E5\u9519\u8BEF";
+            setRuntimeDownloading((prev) => {
+              if (typeof prev[s.version] === "object") return prev;
+              return { ...prev, [s.version]: { failed: reason } };
+            });
+          }
+          return;
+        }
         sawActive = false;
         const ok = !s.error;
         setRuntimeDownloading((prev) => {
           const next = { ...prev };
-          delete next[s.version];
+          if (ok) delete next[s.version];
+          else next[s.version] = { failed: s.error.replace(/^下载失败：?/i, "") || "\u672A\u77E5\u9519\u8BEF" };
           return next;
         });
         void refreshRuntimes();
@@ -2555,6 +2565,7 @@ function DesktopSettingsPanel() {
         runtimeStatus.state === "error" && runtimeStatus.text && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DANGER_NOTE_STYLE, children: runtimeStatus.text }),
         runtimeCatalog && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
           /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { marginBottom: 6 }, children: runtimeCatalog.selected ? `\u5F53\u524D\u4F7F\u7528\uFF1A\u8FD0\u884C\u65F6 ${runtimeCatalog.selected}${runtimeCatalog.builtin ? "\uFF08\u5185\u7F6E\u515C\u5E95 " + runtimeCatalog.builtin + "\uFF09" : ""}` : runtimeCatalog.builtin ? `\u5F53\u524D\u4F7F\u7528\uFF1A\u5185\u7F6E dsh ${runtimeCatalog.builtin}\uFF08\u515C\u5E95\uFF09` : runtimeCatalog.running?.version ? `\u5F53\u524D\u4F7F\u7528\uFF1A\u8FD0\u884C\u65F6 ${runtimeCatalog.running.version}\uFF08${runtimeCatalog.running.kind}\uFF09` : "\u5F53\u524D\u65E0\u53EF\u7528 dsh" }),
+          runtimeCatalog.note && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { ...DANGER_NOTE_STYLE, marginBottom: 6, whiteSpace: "pre-wrap" }, children: `\u26A0 ${runtimeCatalog.note}` }),
           (() => {
             const seen = /* @__PURE__ */ new Set();
             const heads = [];
