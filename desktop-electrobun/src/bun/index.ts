@@ -365,6 +365,25 @@ function refreshTray(): void {
   })
 }
 
+/**
+ * #80：THICKFRAME 无边框窗在「最大化→最小化→恢复」往返可能被系统按隐形缩放边框
+ * 外扩落位（顶部越出屏幕）。焦点时只读自检：仍处最大化但帧相对所在显示器工作区
+ * 外扩超容差 → 判定落位损坏 → 纯原生 unmaximize()+maximize() 重摆（零自算坐标，
+ * 落位由 Windows 重算，与首次最大化同一条已验证路径）。Win+方向键半屏贴靠
+ * IsZoomed=false 天然不触发；任务栏恢复/托盘找回/Alt-Tab 都走 focus。
+ */
+function healMaximizedPlacement(win: BrowserWindow): void {
+  if (process.platform !== 'win32') return
+  if (!win.isMaximized()) return
+  const frame = win.getFrame()
+  const workArea = getWorkAreaForFrame(frame)
+  if (workArea === null) return
+  if (deriveMaximized(frame, workArea, true)) return
+  console.log('[shell] #80 检测到最大化落位外扩，原生重摆')
+  win.unmaximize()
+  win.maximize()
+}
+
 function showMainWindow(): void {
   const win = focusedWindow()
   if (win === null) return
@@ -635,6 +654,7 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
   })
   win.on('focus', () => {
     focusedProfile = profile
+    healMaximizedPlacement(win)
     // lane 稳定接入点跟随焦点（旧壳 forwarder.rs：新连接落焦点实例，存量不动）
     // lane 稳定接入点跟随焦点（旧壳 forwarder.rs：新连接落焦点实例，存量不动）。
     // #73：启动恢复最大化断言——Windows 上从未显示/刚显示的窗 maximize 可能不落
