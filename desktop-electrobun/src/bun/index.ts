@@ -65,16 +65,23 @@ function fail(message: string, code: number): never {
   process.exit(code)
 }
 
-// CEF 三处开关的最后一处：构建期 bundleCEF、defaultRenderer 之外，运行期还要断言
-// 「这个包里真的可用 CEF」——否则 renderer:"cef" 会被静默忽略、回落系统 webview
-// （macOS 上就是我们要离开的 WKWebView）。
+// 渲染器三处开关（平台条件化，#84）：构建期 bundleCEF/defaultRenderer + 每窗 renderer +
+// 这里的平台化启动断言。win 走系统 WebView2（构建不打 CEF）；mac/linux 必须有 CEF——
+// renderer 请求不可用的渲染器会被静默回落（mac 回落 WKWebView），断言把静默变显式。
 const build = BuildConfig.getSync()
 const available: string[] = build.availableRenderers ?? []
-if (!available.includes('cef')) {
-  fail(`availableRenderers 不含 cef（实际：${available.join(',') || '空'}）：包里没打 CEF，renderer:"cef" 会静默回落系统 webview`, 3)
+const wantsCef = available.includes('cef')
+const renderer: 'cef' | 'native' = wantsCef ? 'cef' : 'native'
+const isWinBuild = process.platform === 'win32'
+if (isWinBuild && wantsCef) {
+  fail(`win 构建不应打 CEF（#84 切 WebView2；availableRenderers：${available.join(',')}）：检查 electrobun.config.ts 的 win.bundleCEF`, 3)
 }
-if (build.defaultRenderer !== 'cef') {
-  console.warn('[shell] defaultRenderer 不是 cef；建窗时显式传 renderer:"cef" 兜住')
+if (!isWinBuild && !wantsCef) {
+  fail(`availableRenderers 不含 cef（实际：${available.join(',') || '空'}）：mac/linux 必须走 CEF（系统 webview 的 WebKit 渲染一致性不可接受）`, 3)
+}
+const expectedDefaultRenderer = isWinBuild ? 'native' : 'cef'
+if (build.defaultRenderer !== expectedDefaultRenderer) {
+  console.warn(`[shell] defaultRenderer=${build.defaultRenderer} 与平台期望 ${expectedDefaultRenderer} 不符；建窗时显式传 renderer 兜住`)
 }
 
 const noWindow = process.env.DSH_SHELL_NO_WINDOW === '1'
@@ -119,6 +126,7 @@ const instanceProfile = activeProfile(bootSettings, process.env)
 // 所以启动决策放这里做完；菜单可见 ⇔ 口已开（同一份 plan 推出，禁中间态）。
 const devToolsPlan = await planDevToolsBoot({
   isPackaged: build.isPackaged,
+  cefAvailable: wantsCef,
   settingOn: bootSettings.devTools === true,
   envOverride: process.env[DEVTOOLS_PORT_OVERRIDE_ENV],
   isFree: isPortBindable,
@@ -139,6 +147,8 @@ if (devToolsPlan.reason === 'enabled-by-setting') {
   console.error(`[shell] 开发者工具：${DEVTOOLS_PORT_OVERRIDE_ENV} 非法（需要 1-65535 整数），按未开启处理`)
 } else if (devToolsPlan.reason === 'dev-build') {
   console.log('[shell] 开发者工具：dev 构建，DevTools 菜单恒可见（打包态才吃 dev_tools 开关）')
+} else if (devToolsPlan.reason === 'cef-only') {
+  console.log('[shell] 开发者工具：本构建不含 CEF（win 走 WebView2），CEF CDP 桥不适用——打包态不出 DevTools 菜单；dev 构建照常（openDevTools 与后端无关）')
 } else {
   console.log('[shell] 开发者工具：未开启（设置 dev_tools）——不监听调试口、不出菜单')
 }
@@ -166,7 +176,7 @@ const guests = createGuestManager({
     if (hit === undefined) return null
     const view = new BrowserView({
       url: GUEST_DEFAULT_URL,
-      renderer: 'cef',
+      renderer,
       // #58：guest 页也可能有 MIME 形式的 file input；shim 只做 DOM 归一化，无 RPC，sandbox 下安全
       preload: acceptShimScript(platform),
       partition,
@@ -639,7 +649,7 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
     navigationRules: navRulesFor({ origin: svc.state.origin }),
     title: isBoot ? APP_NAME : `${APP_NAME} · ${profile}`,
     url: svc.state.pageUrl,
-    renderer: 'cef',
+    renderer,
     preload: bootPreloadScript(locale, platform, svc.state.origin, grant.token),
     rpc: shellRpcHandle.rpc,
     // hidden = 纯无边框方框（实机报的「方形无边框」）。mac 两态都以 hiddenInset 出红绿灯。
@@ -796,7 +806,7 @@ async function restartDsh(): Promise<void> {
       splash = new BrowserWindow({
         title: APP_NAME,
         html: splashHtml(),
-        renderer: 'cef',
+        renderer,
         titleBarStyle: 'hiddenInset',
         frame: { width: SPLASH_WIDTH, height: SPLASH_HEIGHT },
       })
@@ -1019,7 +1029,7 @@ function openProfileOpDialog(kind: ProfileOpDialogKind): void {
   const dialog = new BrowserWindow({
     title: kind === 'create' ? '新建 Profile' : '迁移 Profile',
     html: profileDialogHtml(kind, listProfiles(dshHome(), instanceProfile)),
-    renderer: 'cef',
+    renderer,
     titleBarStyle: 'hiddenInset',
     frame: { width: 460, height: kind === 'create' ? 240 : 330 },
   })
@@ -1121,7 +1131,7 @@ if (!noWindow) {
   splash = new BrowserWindow({
     title: APP_NAME,
     html: splashHtml(),
-    renderer: 'cef',
+    renderer,
     titleBarStyle: 'hiddenInset',
     frame: { width: SPLASH_WIDTH, height: SPLASH_HEIGHT },
   })

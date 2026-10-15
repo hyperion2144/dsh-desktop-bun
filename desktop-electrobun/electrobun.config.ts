@@ -70,12 +70,13 @@ export default {
     bun: {
       entrypoint: 'src/bun/index.ts',
     },
-    // 渲染一律不用系统 webview：三处开关（构建期打 CEF、默认渲染器、每窗口请求）
-    // 这里落前两处，第三处在 src/bun/index.ts 建窗时显式 renderer: 'cef'，
-    // 并在启动时断言 BuildConfig.availableRenderers 含 cef（否则静默回落 WKWebView）。
+    // 渲染器平台条件化（#84）：win 走系统 WebView2（同为 Chromium 内核，窗口直绘，无 CEF OSR
+    // 的 30fps 上限/全帧 memcpy/GDI 提交税，且包体 -150MB）；mac/linux 保持 bundleCEF——系统
+    // webview 是 WKWebView/WebKitGTK，渲染一致性是我们当初 bundle CEF 的原因，不随 win 改变。
+    // 三处开关：这里两处 + src/bun/index.ts 建窗 renderer（取自 availableRenderers）+ 平台化启动断言。
     mac: { bundleCEF: true, defaultRenderer: 'cef' },
     linux: { bundleCEF: true, defaultRenderer: 'cef' },
-    win: { bundleCEF: true, defaultRenderer: 'cef', icon: 'resources/app-icon.ico' },
+    win: { bundleCEF: false, defaultRenderer: 'native', icon: 'resources/app-icon.ico' },
     // 包内资源：宿主脚本（Bun 跑 dsh 的等价物）与 Bun 兼容层（由 scripts/prepare-bundle.mjs
     // 从仓内单一来源物化到 runtime/）。落地位置＝<app>/Contents/Resources/app/<dest>，
     // 与 runtime.ts 的 packagedRoot() 约定一致。

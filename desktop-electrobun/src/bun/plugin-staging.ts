@@ -11,7 +11,7 @@
 // 与旧壳的一处**有意差异**：注入行只写「真的物化成功的包」。旧壳固定写三行，缺包时交给 dsh
 // 报解析失败；新壳在缺包时干脆不写那一行并留日志（worktree 里 `mobile/` 子模块没拉时也能起）。
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createDirLink, readDirLink } from '../shared/dir-link.ts'
 import { dirname, join, resolve } from 'node:path'
 
@@ -46,6 +46,8 @@ export interface StageResult {
   staged: StagedPlugin[]
   /** 想挂但没找到包目录的（会在注入清单里被略过） */
   missing: string[]
+  /** 找到了包目录但物化失败的（单个失败不阻断启动，#78） */
+  failed: string[]
 }
 
 /** 定位一个包目录：打包态资源优先（安装后仓库不在身边），开发态回退仓库活代码。 */
@@ -77,7 +79,7 @@ export function mobilePackageDir(paths: PluginPaths, name: string, rel: string):
 }
 
 /**
- * 挂进 profile 模块池（幂等）。已挂对目标就什么都不做；挂到别处（或旧复制体）先摘干净。
+ * 挂进 profile 模块池（幂等）。已挂对目标就什么都不做；位置被占（旧复制体、悬空链接）先摘干净。
  * scoped 包名（`@scope/name`）会自动补父目录。
  */
 export function materializePoolPackage(pool: string, linkName: string, dir: string): void {
@@ -87,8 +89,12 @@ export function materializePoolPackage(pool: string, linkName: string, dir: stri
   const target = resolve(dir)
   const existing = readDirLink(link)
   if (existing !== null && resolve(existing) === target) return
-  // 不是链接（可能不存在，也可能是旧复制体）
-  if (existsSync(link)) rmSync(link, { recursive: true, force: true })
+  // 只要位置还被占着就先摘掉（#78）：悬空链接 existsSync 是 false，用它判「没人占」会漏删，
+  // 落到 createDirLink 直接 EEXIST——旧安装被卸载/挪窝后，首次启动就起不来。
+  // lstat 不跟随链接：悬空链接、实体目录（旧壳复制体）都算「占着」。
+  if (lstatSync(link, { throwIfNoEntry: false }) !== undefined) {
+    rmSync(link, { recursive: true, force: true })
+  }
   createDirLink(target, link)
 }
 
@@ -108,6 +114,8 @@ export function stagePlugins(options: {
   log?: (line: string) => void
   /** 警告通道：缺包这类「供给断了但不致命」的事走这里（不传则回落 log） */
   warn?: (line: string) => void
+  /** 测试注入口：换掉单包物化动作（缺省 materializePoolPackage），用于注入失败 */
+  materialize?: (pool: string, linkName: string, dir: string) => void
 }): StageResult {
   const log = options.log ?? ((): void => {})
   const warn = options.warn ?? ((line: string): void => console.warn(line))
@@ -117,12 +125,21 @@ export function stagePlugins(options: {
 
   const staged: StagedPlugin[] = []
   const missing: string[] = []
+  const failed: string[] = []
+  const materialize = options.materialize ?? materializePoolPackage
   const stage = (name: string, dir: string | null): void => {
     if (dir === null) {
       missing.push(name)
       return
     }
-    materializePoolPackage(pool, name, dir)
+    try {
+      materialize(pool, name, dir)
+    } catch (error) {
+      // 单个插件物化失败不阻断启动（#78）：少一个插件 dsh 只是解析不到那个包，服务面照常起
+      failed.push(name)
+      warn(`警告：插件物化失败跳过：${name}——${String(error)}`)
+      return
+    }
     staged.push({ name, dir, link: join(pool, name) })
   }
 
@@ -161,6 +178,7 @@ export function stagePlugins(options: {
   log(
     `插件物化：${staged.map((entry) => entry.name).join('、') || '（无）'}` +
       (missing.length > 0 ? ` | 缺包跳过：${missing.join('、')}` : '') +
+      (failed.length > 0 ? ` | 物化失败：${failed.join('、')}` : '') +
       ` | 注入清单 ${injectFile}`,
   )
   // 缺包不再纯静默：单独发一条警告，点名缺的包与补救办法（#20）
@@ -169,7 +187,7 @@ export function stagePlugins(options: {
       `警告：插件缺包跳过：${missing.join('、')}——缺的插件本次不注入；若来自子模块，先 git submodule update --init 拉取再启动`,
     )
   }
-  return { pool, injectFile, staged, missing }
+  return { pool, injectFile, staged, missing, failed }
 }
 
 /**

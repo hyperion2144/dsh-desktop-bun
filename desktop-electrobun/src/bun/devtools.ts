@@ -1,4 +1,6 @@
 // #69 开发者工具开关：打包态按设置决定是否给 CEF 开远程调试口并放出菜单。
+// #84 起构建可能不含 CEF（win 走系统 WebView2）：cefAvailable=false 时 CDP 桥整体不适用，
+// 打包态 fail-closed 出 reason='cef-only'（不开口不出菜单）；dev 态照旧（openDevTools 与后端无关）。
 import { dlopen } from 'bun:ffi'
 //
 // 背景（triage 结论）：Electrobun 的 dev 构建自动开 CEF remote debugging，打包构建默认关；
@@ -24,6 +26,7 @@ export type DevToolsBootReason =
   | 'disabled-by-setting' // 打包态 + 开关关（或缺省）：不碰 env、不出菜单
   | 'port-invalid' // 覆盖 env 不是 1-65535 整数：按未开启处理（fail-closed）
   | 'port-unavailable' // 口被占：本次不开（fail-closed），提示换口
+  | 'cef-only' // 构建不含 CEF（#84 win）：CEF CDP 桥不适用，打包态不开口不出菜单
 
 export interface DevToolsBootPlan {
   /** 是否给 CEF 写远程调试口 env（＝重启后口是否真的在听） */
@@ -71,7 +74,16 @@ export async function planDevToolsBoot(input: {
   settingOn: boolean
   envOverride?: string | undefined
   isFree: (port: number) => Promise<boolean>
+  /** 构建是否含 CEF（availableRenderers 含 cef）；缺省 true 兼容既有调用（#84 起 win 构建传 false） */
+  cefAvailable?: boolean
 }): Promise<DevToolsBootPlan> {
+  if ((input.cefAvailable ?? true) === false) {
+    // 无 CEF 构建：CDP 桥整体不适用。dev 态照旧（openDevTools 是后端无关 API）；打包态 fail-closed。
+    if (!input.isPackaged) {
+      return { enableCdp: false, port: null, menuEnabled: devToolsMenuEnabled({ isPackaged: false, settingOn: input.settingOn, cdpReady: false }), reason: 'dev-build' }
+    }
+    return { enableCdp: false, port: null, menuEnabled: false, reason: 'cef-only' }
+  }
   if (!input.isPackaged) {
     return { enableCdp: false, port: null, menuEnabled: devToolsMenuEnabled({ isPackaged: false, settingOn: input.settingOn, cdpReady: false }), reason: 'dev-build' }
   }
