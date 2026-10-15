@@ -180,6 +180,8 @@ export interface ShellService {
   profileOp: (request: ProfileOpRequest) => Promise<ProfileOpResult>
   /** profileOp 落地后的回调（create → 开窗，migrate → 刷新托盘）；测试可注入 */
   onProfileOpApplied: (op: 'create' | 'migrate', profile: string) => void
+  /** 官方 RPC 的命令表（惰性；壳 RPC 漏斗派发用，见 rpc-bridge.ts #50） */
+  rpcRouter: () => RpcRouter | null
 }
 
 export async function startService(options: ServiceOptions): Promise<ShellService> {
@@ -997,6 +999,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     paths,
     server,
     laneForwarder: forwarder,
+    rpcRouter: () => rpcRouter,
     notify: notifyBridge,
     settings: () => liveSettings,
     save: saveSettings,

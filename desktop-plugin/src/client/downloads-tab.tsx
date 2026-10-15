@@ -3,10 +3,11 @@
 // 注册模型照抄 dsh-context 的防御式可选注入：sidebarRightTabs 服务不存在
 // （老版 dsh / 未装 sidebar-right）时静默不注册，绝不搞挂页面；better-sidebar
 // ≥0.19 右列即原生右列，本注册天然双适应。
-// 数据源：轮询 invoke list_downloads（远程 origin 只有 __TAURI_INTERNALS__ 单
-// IPC 通道，event.listen 不可用；tab 打开时 600ms 轮询，空闲降频）。
+// 数据源：轮询 shellRpc.invoke list_downloads（远程 origin 只有中继单通道，
+// event.listen 不可用；tab 打开时 600ms 轮询，空闲降频）。
 // 主题只用 --dsw-alias-* 变量（带回退），禁 hash 类名（仓库血泪坑 #8）。
 import type { ClientContext } from './ctx-types.ts'
+import { shellRpc } from './shell-rpc.ts'
 import { Button, IconDownloadOutline16, IconDownloadOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 // #103：dsh 0.1.7 将图标导出 IconDownloadOutline16 重命名为 IconDownloadOutlineRegular；
 // CJS 产物（require）下不存在的命名导出为 undefined，?? 兼容两代运行时。
@@ -33,23 +34,7 @@ interface DownloadTask {
 const TAB_ID = 'dsh-desktop-tauriapp/downloads'
 const TAB_KIND = 'dsh-desktop-tauriapp/downloads'
 
-function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const w = window as unknown as {
-    __TAURI_INTERNALS__?: { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<T> }
-    __TAURI__?: { core?: { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<T> } }
-  }
-  if (w.__TAURI_INTERNALS__?.invoke) return w.__TAURI_INTERNALS__.invoke(cmd, args)
-  if (w.__TAURI__?.core?.invoke) return w.__TAURI__?.core.invoke(cmd, args)
-  return Promise.reject(new Error('no tauri ipc'))
-}
 
-function hasIpc(): boolean {
-  const w = window as unknown as {
-    __TAURI_INTERNALS__?: { invoke?: unknown }
-    __TAURI__?: { core?: { invoke?: unknown } }
-  }
-  return Boolean(w.__TAURI_INTERNALS__?.invoke || w.__TAURI__?.core?.invoke)
-}
 
 // ── 数据源：轮询 store ─────────────────────────────────
 
@@ -82,8 +67,8 @@ function DownloadsPanel(): React.ReactElement {
     let alive = true
     const refresh = async (): Promise<void> => {
       try {
-        const list = await invoke<DownloadTask[]>('list_downloads')
-        const settings = await invoke<{ concurrency: number }>('get_download_settings')
+        const list = await shellRpc.invoke<DownloadTask[]>('list_downloads')
+        const settings = await shellRpc.invoke<{ concurrency: number }>('get_download_settings')
         if (!alive) return
         setTasks(list)
         setConcurrency(settings.concurrency)
@@ -109,7 +94,7 @@ function DownloadsPanel(): React.ReactElement {
   const act = async (cmd: string, args: Record<string, unknown>): Promise<void> => {
     setBusy(true)
     try {
-      await invoke(cmd, args)
+      await shellRpc.invoke(cmd, args)
     } catch {
       /* 动作失败：下次轮询自然回真 */
     } finally {
@@ -259,8 +244,8 @@ type SlotsService = {
 }
 
 export function registerDownloadsTab(ctx: ClientContext): void {
-  if (!hasIpc()) {
-    ctx?.logger?.warn?.('downloads-tab: 无 Tauri IPC（纯浏览器），跳过注册')
+  if (!shellRpc.available()) {
+    ctx?.logger?.warn?.('downloads-tab: 无壳通道（纯浏览器），跳过注册')
     return
   }
   const root = ctx as unknown as {

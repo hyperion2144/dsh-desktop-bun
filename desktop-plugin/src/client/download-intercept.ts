@@ -2,30 +2,15 @@
 //
 // WKWebView 无法把 blob:/data: 的下载内容交给原生层，wry 的 on_download 只能
 // 拿到 URL 而拿不到内存态数据——所以在页面侧拦截（capture 阶段抢在默认行为
-// 前 preventDefault），用 fetch 拿到内容后经 Tauri IPC 分块交 Rust 写盘。
+// 前 preventDefault），用 fetch 拿到内容后经壳 RPC 分块交宿主写盘。
 // http(s) 下载不拦（走 on_download → Rust 下载管理器直连转交）。
-// 纯浏览器（无 Tauri IPC）不装，保持浏览器原生下载行为。
+// 纯浏览器（无壳通道）不装，保持浏览器原生下载行为。
 //
 // 保存框是异步的：start_blob_download 返回任务 id 时用户尚未选完路径，
 // 需轮询 list_downloads 等待状态变为 downloading（或被取消即中止）。
 
-function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const w = window as unknown as {
-    __TAURI_INTERNALS__?: { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<T> }
-    __TAURI__?: { core?: { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<T> } }
-  }
-  if (w.__TAURI_INTERNALS__?.invoke) return w.__TAURI_INTERNALS__.invoke(cmd, args)
-  if (w.__TAURI__?.core?.invoke) return w.__TAURI__?.core.invoke(cmd, args)
-  return Promise.reject(new Error('no tauri ipc'))
-}
+import { shellRpc } from './shell-rpc.ts'
 
-function hasIpc(): boolean {
-  const w = window as unknown as {
-    __TAURI_INTERNALS__?: { invoke?: unknown }
-    __TAURI__?: { core?: { invoke?: unknown } }
-  }
-  return Boolean(w.__TAURI_INTERNALS__?.invoke || w.__TAURI__?.core?.invoke)
-}
 
 interface InterceptTask {
   id: number
@@ -90,7 +75,7 @@ async function waitPathChosen(id: number, signal: { aborted: boolean }): Promise
   for (let i = 0; i < 600; i++) {
     if (signal.aborted) return false
     try {
-      const tasks = await invoke<InterceptTask[]>('list_downloads')
+      const tasks = await shellRpc.invoke<InterceptTask[]>('list_downloads')
       const t = tasks.find((x) => x.id === id)
       if (t === undefined) return false
       if (t.status === 'downloading') return true
@@ -103,9 +88,9 @@ async function waitPathChosen(id: number, signal: { aborted: boolean }): Promise
   return false
 }
 
-/** 安装拦截器（幂等）。仅在桌面壳 webview（有 Tauri IPC）生效。 */
+/** 安装拦截器（幂等）。仅在桌面壳 webview（有壳通道）生效。 */
 export function installDownloadInterceptor(): void {
-  if (!hasIpc()) return
+  if (!shellRpc.available()) return
   if ((window as unknown as { __dshDownloadsIntercept?: boolean }).__dshDownloadsIntercept === true) return
   ;(window as unknown as { __dshDownloadsIntercept?: boolean }).__dshDownloadsIntercept = true
 
@@ -139,17 +124,17 @@ async function transferBlobToShell(href: string, filename: string): Promise<void
     const resp = await fetch(href)
     if (!resp.ok) throw new Error(`fetch ${href} -> ${resp.status}`)
     const blob = await resp.blob()
-    const id = await invoke<number | null>('start_blob_download', { filename, total: blob.size })
+    const id = await shellRpc.invoke<number | null>('start_blob_download', { filename, total: blob.size })
     if (id === null || id === undefined) return
     const signal = { aborted: false }
     if (!(await waitPathChosen(id, signal))) return
     for (let offset = 0; offset < blob.size; offset += CHUNK_BYTES) {
       const chunk = blob.slice(offset, offset + CHUNK_BYTES)
       const b64 = base64Of(await chunk.arrayBuffer())
-      const ok = await invoke<boolean>('save_blob_chunk', { id, chunk: b64 })
+      const ok = await shellRpc.invoke<boolean>('save_blob_chunk', { id, chunk: b64 })
       if (!ok) return // 已暂停/取消：立即停发
     }
-    await invoke<boolean>('finish_blob_download', { id })
+    await shellRpc.invoke<boolean>('finish_blob_download', { id })
   } catch (err) {
     console.warn('[dsh-desktop] blob 下载转交失败：', err)
   }
@@ -163,7 +148,7 @@ async function transferBlobToShell(href: string, filename: string): Promise<void
 async function transferUrlToShell(href: string, filename: string): Promise<void> {
   try {
     const url = new URL(href, typeof location !== 'undefined' ? location.href : undefined).href
-    await invoke<number | null>('start_url_download', { url, filename })
+    await shellRpc.invoke<number | null>('start_url_download', { url, filename })
   } catch (err) {
     console.warn('[dsh-desktop] URL 下载转交失败：', err)
   }

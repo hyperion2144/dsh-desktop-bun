@@ -19,20 +19,13 @@
  *
  * 纯浏览器 / 远程窗口（无 dshDesktop 标记）不安装任何东西，行为不变。
  */
+import { shellRpc } from './shell-rpc.ts'
 
-interface Internals {
-  invoke: (cmd: string, args?: unknown, opts?: unknown) => Promise<unknown>
-}
 
-function internals(): Internals | undefined {
-  const w = window as unknown as { __TAURI_INTERNALS__?: Internals }
-  return w.__TAURI_INTERNALS__
-}
 
+/** 壳 RPC 统一通道（#50）：签名保持旧本地 invoke 不变，调用点零改动。 */
 function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const i = internals()
-  if (!i?.invoke) return Promise.reject(new Error('no-tauri-ipc'))
-  return i.invoke(cmd, args, undefined) as Promise<T>
+  return shellRpc.invoke<T>(cmd, args)
 }
 
 /** Rust 推送的 guest 快照（browser_guest_state / _receive 载荷）。 */

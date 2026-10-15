@@ -36,9 +36,11 @@ function accessLog(parts) {
 export const POLYFILL = '<script data-dsh-mobile-polyfill="1">!function(){if(self.crypto&&!self.crypto.randomUUID){self.crypto.randomUUID=function(){var b=new Uint8Array(16);self.crypto.getRandomValues(b);b[6]=b[6]&15|64;b[8]=b[8]&63|128;var h="";for(var i=0;i<16;i++){var x=b[i].toString(16);h+=(x.length<2?"0":"")+x;if(i===3||i===5||i===7||i===9)h+="-";}return h;}}}();</script>';
 
 /**
- * 远程命令桥（#47）：给**配对**远程页注入 `__TAURI_INTERNALS__.invoke` shim，把壳命令
- * 经 `/_loopback/<page>/__shell__/rpc` 送到壳页面服务。协议与壳侧 tauri-ipc.ts 逐字对齐
- * （200+{ok,value}→resolve(value)；{ok:false,error}→reject；非 200→reject）。
+ * 远程命令桥（#47，#50 去 Tauri 化）：给**配对**远程页注入 `__DSH_SHELL_RELAY__.invoke`
+ * 中继桥，把壳命令经 `/_loopback/<page>/__shell__/rpc` 送到壳页面服务。协议与壳 RPC HTTP
+ * 端点逐字对齐（200+{ok,value}→resolve(value)；{ok:false,error}→reject；非 200→reject）。
+ * 客户端（desktop-plugin client 的 shell-rpc.ts）探测该全局作为第二传输通道；远程页没有
+ * Electrobun 原生桥，HTTP 中继是物理上唯一通道（官方 Typed RPC 只活在壳自建 webview 里）。
  * 凭证与端口由壳经宿主 env 下发（DSH_SHELL_PAGE_PORT / DSH_SHELL_RPC_VIEW_TOKEN）；
  * 命令白名单在壳侧 view-grant 的 REMOTE_ALLOWED_COMMANDS，这里不做命令过滤（壳是唯一闸）。
  * pagePort/token 缺一 → 返回 null（不注入，远程页维持无桥现状）。
@@ -58,9 +60,7 @@ export function remoteInvokePatch(pagePort, token) {
     + 'if(res.status!==200)throw new Error("shell rpc failed: "+res.status);'
     + 'if(p&&p.ok===true)return p.value;'
     + 'throw new Error(p&&typeof p.error==="string"?p.error:"shell rpc failed");});});};'
-    + 'Object.defineProperty(globalThis,"__TAURI_INTERNALS__",{value:{invoke:invoke,'
-    + 'transformCallback:function(cb){return cb},metadata:{currentWindow:{label:"remote"}}},configurable:true});'
-    + 'Object.defineProperty(globalThis,"__TAURI__",{value:{core:{invoke:invoke}},configurable:true});'
+    + 'Object.defineProperty(globalThis,"__DSH_SHELL_RELAY__",{value:{invoke:invoke},configurable:true});'
     + '}catch(e){console.error("mobile remote rpc shim failed",e);}}();</script>';
 }
 

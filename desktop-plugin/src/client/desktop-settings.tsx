@@ -4,14 +4,15 @@
 // 禁止 document.createElement / innerHTML / appendChild，UI 全部由 JSX 返回；状态 useState/useEffect/useCallback 声明式管理。
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type { ClientContext } from './ctx-types.ts'
+import { shellRpc } from './shell-rpc.ts'
 
 import { ThemeSelect } from './theme-select.tsx'
 import { devToolsConfirmCopy, devToolsDisableCopy, devToolsSavedNote, planDevToolsUi } from './devtools-toggle.ts'
 export const inject = ['slots']
 
-// 设置项持久化走 Tauri IPC（nsSave → invoke('save_desktop_settings')，Rust 单写者
+// 设置项持久化走壳 RPC（nsSave → invoke('save_desktop_settings')，宿主单写者
 // 读改写私有 desktop-settings.json），不直接读写 settings.yaml；
-// Tauri IPC 另保留只读回显（get_proxy_settings 的 effective 预览、profile 目录扫描）与动作（重启/连通性测试/运行时刻录读取）。
+// 壳 RPC 另保留只读回显（get_proxy_settings 的 effective 预览、profile 目录扫描）与动作（重启/连通性测试/运行时刻录读取）。
 interface NsRpc {
   rpc: { call: (channel: string, endpoint: string, payload?: unknown) => Promise<NsRpcResponse> }
 }
@@ -23,22 +24,10 @@ interface NsRpcResponse {
 
 let nsRpc: NsRpc | null = null
 
-function hasIpc(): boolean {
-  const w = window as unknown as {
-    __TAURI_INTERNALS__?: { invoke?: unknown }
-    __TAURI__?: { core?: { invoke?: unknown } }
-  }
-  return Boolean(w.__TAURI_INTERNALS__?.invoke || w.__TAURI__?.core?.invoke)
-}
 
+/** 壳 RPC 统一通道（#50）：签名保持旧本地 invoke 不变，调用点零改动。 */
 function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const w = window as unknown as {
-    __TAURI_INTERNALS__?: { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<T> }
-    __TAURI__?: { core?: { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<T> } }
-  }
-  if (w.__TAURI_INTERNALS__?.invoke) return w.__TAURI_INTERNALS__.invoke(cmd, args)
-  if (w.__TAURI__?.core?.invoke) return w.__TAURI__?.core.invoke(cmd, args)
-  return Promise.reject(new Error('no tauri ipc'))
+  return shellRpc.invoke<T>(cmd, args)
 }
 
 
@@ -268,7 +257,7 @@ const DANGER_MSG_STYLE: React.CSSProperties = {
 
 // ── 持久化通道（nsSave / nsGet）──
 // #95 v0.1.7：dsh 废除 settings.yaml 插件命名空间——壳设置搬出 dsh，
-// 走壳自己的 Tauri IPC（Rust 单写者，$DSH_HOME/desktop-settings.json），不再经宿主 RPC。
+// 走壳自己的 RPC（宿主单写者，$DSH_HOME/desktop-settings.json），不再经宿主 RPC。
 async function nsSave(patch: Record<string, unknown>): Promise<void> {
   await invoke('save_desktop_settings', { patch })
 }
@@ -2051,7 +2040,7 @@ function DesktopSettingsPanel(): React.ReactElement {
 }
 
 export function registerDesktopSettings(ctx: ClientContext): void {
-  if (!hasIpc()) return
+  if (!shellRpc.available()) return
   // 捕获 connection RPC（dsh settings 服务的桌面壳命名空间读写通道）
   try {
     nsRpc =

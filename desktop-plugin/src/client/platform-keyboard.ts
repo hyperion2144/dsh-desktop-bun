@@ -15,7 +15,7 @@
  * - 按键：window 捕获层的 keydown/keyup 状态机（修饰键集合 + 双键重叠 + 顺序无关），
  *   只在「完整组合命中 dsh 当前目录（catalog）里的某个可吞绑定」时吞掉事件，并按桌面
  *   输入形状转发给 dsh 的原生键盘监听者；
- * - 偏好：`$DSH_HOME/desktop-keybindings.json` 读写适配器（Tauri IPC）
+ * - 偏好：`$DSH_HOME/desktop-keybindings.json` 读写适配器（壳 RPC）
  *   实现 dsh 的 DesktopShortcutsApi（get / edit / subscribe / recording）；
  * - 关窗：`closeWindow(revision)` 只在自己仍是最新配置时关（隐藏）当前窗口。
  *
@@ -30,6 +30,8 @@
  */
 
 import type { ClientContext } from './ctx-types.ts'
+import { shellRpc } from './shell-rpc.ts'
+
 
 // ── dsh 侧契约（照抄 @deepseek-ai/dsh-client-shortcuts 的 lib/types，避免依赖运行时包）──
 
@@ -290,17 +292,11 @@ export function applyShortcutEdit(
   return { ok: true, document: { ...document, schemaVersion: SHORTCUT_SCHEMA_VERSION, profiles } }
 }
 
-// ── 壳 IPC ──
+// ── 壳 RPC ──
 
-interface TauriInternals {
-  invoke: (cmd: string, args?: unknown, opts?: unknown) => Promise<unknown>
-}
-
+/** 壳 RPC 统一通道（#50）：签名保持旧 tauriInvoke 不变，调用点零改动。 */
 function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const w = window as unknown as { __TAURI_INTERNALS__?: TauriInternals }
-  const internals = w.__TAURI_INTERNALS__
-  if (!internals?.invoke) return Promise.reject(new Error('no-tauri-ipc'))
-  return internals.invoke(cmd, args, undefined) as Promise<T>
+  return shellRpc.invoke<T>(cmd, args)
 }
 
 function newRevision(): string {

@@ -5,11 +5,12 @@
  * 结构：权限卡（三态 + 申请/打开系统设置）→ 总开关 → 免打扰（时段+全屏静默）→
  * 场景区（6 组 12 行：名称+id·说明 | 开关 | 音效下拉 | 试听▶）。
  * 数据面：get_notifications_state 一次拉全；改动即时 set_notifications_config 落盘
- * （Rust 单写者）；音效选择经 choose_notification_sound + import_notification_sound。
+ * （宿主单写者）；音效选择经 choose_notification_sound + import_notification_sound。
  * 权限被拒（macOS 27 对 ad-hoc 签名的静默拒绝，#130/#142）：引导打开系统设置手动开启。
  */
 import React, { useCallback, useEffect, useState } from 'react'
 import type { ClientContext } from './ctx-types.ts'
+import { shellRpc } from './shell-rpc.ts'
 
 export const inject = ['slots']
 
@@ -33,14 +34,9 @@ interface NotificationState {
   sounds: string[]
 }
 
+/** 壳 RPC 统一通道（#50）：签名保持旧本地 invoke 不变，调用点零改动。 */
 function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const w = window as unknown as {
-    __TAURI_INTERNALS__?: { invoke: (cmd: string, args?: unknown) => Promise<T> }
-    __TAURI__?: { core?: { invoke: (cmd: string, args?: unknown) => Promise<T> } }
-  }
-  if (w.__TAURI_INTERNALS__?.invoke) return w.__TAURI_INTERNALS__.invoke(cmd, args)
-  if (w.__TAURI__?.core?.invoke) return w.__TAURI__!.core.invoke(cmd, args)
-  return Promise.reject(new Error('no tauri ipc'))
+  return shellRpc.invoke<T>(cmd, args)
 }
 
 const SYS_PREFS = 'x-apple.systempreferences:com.apple.Preference.Notifications'

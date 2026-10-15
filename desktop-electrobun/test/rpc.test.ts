@@ -1,7 +1,7 @@
 // 壳 ↔ 页面 RPC（缝 ② 纯逻辑 + 真 HTTP 用例）。
 //
 // 守的是什么：壳自己的客户端插件（设置面板、通知 tab、下载 tab、本地 chrome）是照 Tauri
-// 写的，全经 `__TAURI_INTERNALS__.invoke(cmd, args)`。新壳没有 Tauri，也没有真实的 IPC——
+// 写的，全经页面侧 invoke shim 与壳通信。新壳没有 Tauri，也没有真实的 IPC——
 // 这一层必须把 41 个命令里的每一个都给出**明确**答复：能做的做，做不了的报清楚原因；
 // 绝不能出现「resolve 了 undefined」这种让插件静默失效、面板永远转圈的情况。
 
