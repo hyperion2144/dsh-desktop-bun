@@ -6,7 +6,7 @@
 - 提交纪律：一票一提交；`git add` 点名文件（禁 `-A`）；改动后同步 `CHANGELOG.md` 的
   `## Unreleased`；PR 优先，未经维护者允许不合并。
 - 契约红线：设置文件键名、`/api` 与 `/plugins` 的 no-store、页面 token 路径前缀准入、
-  CEF 三处开关（config bundleCEF / defaultRenderer / 每窗 renderer:'cef'）与启动断言，
+  渲染器平台条件化（#84）：win=系统 WebView2（config `bundleCEF:false` + `defaultRenderer:'native'` + 建窗 renderer 随 availableRenderers），mac/linux=bundleCEF——三处开关与平台化启动断言，
   缺一即回归。
 
 ## Agent skills
