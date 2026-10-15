@@ -67,6 +67,9 @@ export interface CommandDeps {
   removeRuntime?: (version: string) => Promise<void>
   /** 下载并安装一个运行时（单飞；已有任务在跑时抛「已有运行时下载任务」） */
   downloadRuntime?: (version: string, source: RuntimeSource) => Promise<{ ok: true; version: string }>
+
+  /** #97：取消进行中的运行时安装（树级停止 + 清半成品 + 落 cancelled 终态；没有任务是幂等 no-op） */
+  cancelRuntimeDownload?: () => Promise<{ cancelled: boolean; version: string }>
   /** 下载进度（面板每 600ms 轮询；旧壳 runtime_download_status 同形状） */
   downloadStatus?: () => RuntimeDownloadStatus
   /** 默认下载目录（`~/Downloads`；`get_download_settings.download_dir` 用） */
@@ -312,7 +315,7 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
     },
 
     runtime_download_status: () =>
-      deps.downloadStatus?.() ?? { active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '' },
+      deps.downloadStatus?.() ?? { active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '', cancelled: false },
 
     // 下载安装：单飞（已有任务在跑时由 deps.downloadRuntime 抛「已有运行时下载任务」）
     download_runtime: async (args) => {
@@ -323,6 +326,13 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       const rawSource = argString(args, 'source')
       const source = (rawSource === undefined || rawSource === '' ? 'github' : rawSource) as RuntimeSource
       return deps.downloadRuntime(version, source)
+    },
+
+    // 取消运行时下载（#97）：与通用 cancel_download 并列——运行时安装不在下载管理器里，
+    // 走自己的单飞状态。幂等：没有任务时回报 cancelled:false，面板连点两次不报错。
+    cancel_runtime_download: async () => {
+      if (deps.cancelRuntimeDownload === undefined) return { cancelled: false, version: '' }
+      return deps.cancelRuntimeDownload()
     },
 
     // 卸载：正在用 / 内置的不允许删（旧壳同款守卫）

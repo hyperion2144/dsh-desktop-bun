@@ -279,7 +279,7 @@ describe('命令表', () => {
         started.push({ version, source })
         return { ok: true as const, version }
       },
-      downloadStatus: () => ({ active: true, version: '9.9.9', resolved: 12, downloaded: 3, added: 1, error: '' }),
+      downloadStatus: () => ({ active: true, version: '9.9.9', resolved: 12, downloaded: 3, added: 1, error: '', cancelled: false }),
     })
     try {
       await expect(h.table.download_runtime?.({ version: '9.9.9' })).resolves.toEqual({ ok: true, version: '9.9.9' })
@@ -294,6 +294,7 @@ describe('命令表', () => {
         downloaded: 3,
         added: 1,
         error: '',
+        cancelled: false,
       })
       // 没注入依赖时（旧调用方）仍要回一个结构完整的空闲态，别让面板炸
       const bare = harness()
@@ -305,8 +306,32 @@ describe('命令表', () => {
           downloaded: 0,
           added: 0,
           error: '',
+          cancelled: false,
         })
         await expect(bare.table.download_runtime?.({ version: '1.0.0' })).rejects.toThrow('运行时下载不可用')
+      } finally {
+        bare.cleanup()
+      }
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('取消运行时下载（#97）：命令走依赖的取消口，没注入依赖时是幂等 no-op', async () => {
+    const cancels: string[] = []
+    const h = harness({
+      cancelRuntimeDownload: async () => {
+        cancels.push('called')
+        return { cancelled: true, version: '9.9.9' }
+      },
+    })
+    try {
+      await expect(h.table.cancel_runtime_download?.({})).resolves.toEqual({ cancelled: true, version: '9.9.9' })
+      expect(cancels).toEqual(['called'])
+      // 没注入依赖时（旧调用方）不能抛错：面板连点两次取消不炸
+      const bare = harness()
+      try {
+        await expect(bare.table.cancel_runtime_download?.({})).resolves.toEqual({ cancelled: false, version: '' })
       } finally {
         bare.cleanup()
       }

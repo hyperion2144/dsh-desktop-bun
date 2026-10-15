@@ -175,11 +175,15 @@ describe('CLI 版本与选中', () => {
     expect(parseCliVersion('command not found')).toBeNull()
   })
 
-  test('偏好装着的用偏好；否则最高；都没有回 null（= 内置兜底）', () => {
+  test('设置指哪个用哪个；设置为空或拿不到就 null（= 内置兜底），不自动爬已装最高', () => {
     expect(selectRuntimeVersion({ installed: ['0.2.0', '0.2.1'], preferred: '0.2.0' })).toBe('0.2.0')
-    expect(selectRuntimeVersion({ installed: ['0.2.0', '0.2.1'], preferred: '0.9.9' })).toBe('0.2.1')
-    expect(selectRuntimeVersion({ installed: ['0.2.1-alpha.2', '0.2.1-alpha.10'], preferred: null })).toBe('0.2.1-alpha.10')
+    // 设置的版本没装 → null 交给内置兜底（**不是**已装最高）
+    expect(selectRuntimeVersion({ installed: ['0.2.0', '0.2.1'], preferred: '0.9.9' })).toBeNull()
+    expect(selectRuntimeVersion({ installed: ['0.2.1-alpha.2', '0.2.1-alpha.10'], preferred: null })).toBeNull()
     expect(selectRuntimeVersion({ installed: [], preferred: '0.2.1' })).toBeNull()
+    // 设置的版本就是随包内置的版本号 → 命中（壳拿它去走内置分支）
+    expect(selectRuntimeVersion({ installed: ['0.2.1'], preferred: '0.2.0', builtin: '0.2.0' })).toBe('0.2.0')
+    expect(selectRuntimeVersion({ installed: ['0.2.1'], preferred: null, builtin: '0.2.0' })).toBeNull()
   })
 
   test('mergeInstalled：清单提供来源与时间，目录扫描补漏', () => {
@@ -312,37 +316,49 @@ describe('运行时选中', () => {
     expect(runtimePathsOf(pkg, 'package').dshLibDir).toBe(join(pkg, 'lib'))
   })
 
-  test('已下载版本：偏好 > 最高；没有已装就回内置树', () => {
+  test('选中规则（#97）：设置指哪个用哪个；设置那个拿不到就回内置，不自动爬已装最高', () => {
     const appSupport = tempDir()
     makeRuntimeTree(runtimeDirOf(appSupport, '0.2.0'), '0.2.0')
     makeRuntimeTree(runtimeDirOf(appSupport, '0.2.1'), '0.2.1')
-    const preferred = resolveRuntimeSelection({ env: {}, appSupport, preferred: '0.2.0' })
+    const builtin = makeRuntimeTree(join(tempDir(), 'builtin'), '0.3.0')
+
+    // 设置点名了已装的 0.2.0 → 就用它（不是已装的更高版本 0.2.1）
+    const preferred = resolveRuntimeSelection({ env: {}, appSupport, builtinDir: builtin, preferred: '0.2.0' })
     expect(preferred.kind).toBe('installed')
     expect(preferred.version).toBe('0.2.0')
-
     expect(preferred.note).toBeNull()
-    const highest = resolveRuntimeSelection({ env: {}, appSupport })
-    expect(highest.version).toBe('0.2.1')
 
-    // 没设偏好（或偏好就是选中的那个）：不带 note
-    expect(highest.note).toBeNull()
+    // 设置点名的就是随包内置的版本号（同一版本号没装进已装目录）→ 直接用内置那一棵
+    const preferredBuiltin = resolveRuntimeSelection({ env: {}, appSupport, builtinDir: builtin, preferred: '0.3.0' })
+    expect(preferredBuiltin.kind).toBe('builtin')
+    expect(preferredBuiltin.version).toBe('0.3.0')
+    expect(preferredBuiltin.root).toBe(builtin)
 
-    const empty = tempDir()
-    const builtin = makeRuntimeTree(join(tempDir(), 'builtin'), '0.3.0')
-    const selection = resolveRuntimeSelection({ env: {}, appSupport: empty, builtinDir: builtin })
-    expect(selection.kind).toBe('builtin')
+    // 内置优先于已下载目录：设置点名 0.3.0、而 0.3.0 也恰好在已装列表里 → 仍然用内置那棵
+    const builtinFirst = resolveRuntimeSelection({
+      env: {},
+      appSupport,
+      builtinDir: builtin,
+      preferred: '0.3.0',
+      installed: ['0.2.0', '0.3.0'],
+    })
+    expect(builtinFirst.kind).toBe('builtin')
+    expect(builtinFirst.root).toBe(builtin)
+    expect(builtinFirst.note).toBeNull()
+    expect(preferredBuiltin.note).toBeNull()
 
-    expect(selection.note).toBeNull()
+    // 没设置（出厂默认）→ 用随包内置，**不是**已装最高 0.2.1：设置没点名就不替用户改选择
+    const noPreference = resolveRuntimeSelection({ env: {}, appSupport, builtinDir: builtin })
+    expect(noPreference.kind).toBe('builtin')
+    expect(noPreference.version).toBe('0.3.0')
+    expect(noPreference.note).toBeNull()
 
-    // #79 回退可见化：偏好版本不在已装里，回退要带 note（日志/通知/面板都用它）
-    const fallbackHighest = resolveRuntimeSelection({ env: {}, appSupport, preferred: '9.9.9' })
-    expect(fallbackHighest.version).toBe('0.2.1')
-    expect(fallbackHighest.note).toContain('9.9.9')
-    expect(fallbackHighest.note).toContain('0.2.1')
-    const fallbackBuiltin = resolveRuntimeSelection({ env: {}, appSupport: empty, builtinDir: builtin, preferred: '9.9.9' })
-    expect(fallbackBuiltin.kind).toBe('builtin')
-    expect(fallbackBuiltin.note).toContain('9.9.9')
-    expect(selection.version).toBe('0.3.0')
+    // 设置点名的版本既没装、也不是内置 → 回随包内置兜底，并如实带 note（#79 回退可见化）
+    const unavailable = resolveRuntimeSelection({ env: {}, appSupport, builtinDir: builtin, preferred: '9.9.9' })
+    expect(unavailable.kind).toBe('builtin')
+    expect(unavailable.version).toBe('0.3.0')
+    expect(unavailable.note).toContain('9.9.9')
+    expect(unavailable.note).toContain('随包内置')
   })
 
   test('什么都没有时抛清楚的错（带两个可用环境变量）', () => {

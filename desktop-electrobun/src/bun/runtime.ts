@@ -169,8 +169,12 @@ function versionOf(root: string, layout: RuntimeLayout): string | null {
 }
 
 /**
- * 生效运行时（旧壳 builtin.rs 的选中顺序）：
- * 显式覆盖 > 已下载版本（偏好 > 最高）> 随包内置。外部 dsh CLI 支持已移除（#3）。
+ * 生效运行时。运行时只有两个来源：随包内置 + 已下载目录（外置 dsh CLI 早已取消，#3）。
+ * 选中逻辑就一条：**设置文件里的运行时版本号是哪个版本，启动就用哪个版本**——
+ * ① 先看随包内置的版本号符不符合，符合就用内置那棵；
+ * ② 不符合，去已下载目录里找，找到就按它来；
+ * ③ 已下载目录里也没有 → 回退随包内置，并如实带 note 说明回退到了哪。
+ * 设置没点名版本号 → 直接用随包内置，**不会**自动爬到已装最高版本（#97）。
  */
 export function resolveRuntimeSelection(input: RuntimeSelectionInput = {}): RuntimeSelection {
   const env = input.env ?? process.env
@@ -182,20 +186,34 @@ export function resolveRuntimeSelection(input: RuntimeSelectionInput = {}): Runt
   }
   const appSupport = input.appSupport ?? appSupportDir(env)
   const installed = input.installed !== undefined ? input.installed : scanInstalledVersions(appSupport)
-  const picked = selectRuntimeVersion({ installed, preferred: input.preferred ?? null })
-  // #79 回退可见化：偏好版本不在已装里（未装成/已卸载/树不完整）时，回退动作要带 note——
-  // service 把它写进 shell 日志 + pendingRuntimeNote 补发通知，面板也能展示，不再静默回退。
-  const requested = input.preferred ?? null
-  const fallbackNote = (fallback: string): string | null =>
-    requested !== null && requested !== '' ? `偏好版本 dsh ${requested} 未在已装目录中找到（可能未装成或已卸载），已回退${fallback}` : null
-  if (picked !== null && isRuntimeVersion(picked)) {
-    const root = runtimeDirOf(appSupport, picked)
-    return { kind: 'installed', root, layout: 'root', version: readRuntimeVersion(root) ?? picked, note: picked !== requested ? fallbackNote(`已装的最高版本 dsh ${picked}`) : null }
-  }
   const builtin = input.builtinDir ?? null
-  if (builtin !== null && builtin !== '') {
-    const root = resolve(builtin)
-    return { kind: 'builtin', root, layout: 'root', version: readRuntimeVersion(root), note: fallbackNote('随包内置运行时') }
+  const builtinRoot = builtin !== null && builtin !== '' ? resolve(builtin) : null
+  // #97：内置树参与版本候选比较（selectRuntimeVersion 的 builtin 形参不再是摆设）——偏好恰好就是
+  // 内置版本时不得降级到更旧的已装版本（报告人：.2 明明是内置的，为什么要去已装目录找）。
+  const builtinVersion = builtinRoot === null ? null : readRuntimeVersion(builtinRoot)
+  const picked = selectRuntimeVersion({ installed, preferred: input.preferred ?? null, builtin: builtinVersion })
+  const requested = input.preferred ?? null
+  // #79 回退可见化 + #97：设置点名的版本当前拿不到时，回退动作要带 note——service 把它写进 shell
+  // 日志 + pendingRuntimeNote 补发通知，面板也能展示，不再静默回退。回退目标只有「随包内置」一个。
+  const fallbackNote = (): string | null =>
+    requested !== null && requested !== ''
+      ? `设置指定的 dsh ${requested} 当前不可用（未装成、已卸载，且与随包内置版本不同），已回退随包内置运行时`
+      : null
+  if (picked !== null && isRuntimeVersion(picked)) {
+    // ① 先看随包内置的版本号符不符合设置点名的那个：符合就用内置这棵。
+    // 内置优先于已下载目录——哪怕同一个版本号碰巧也下载过（维护者口径：优先看内置版本号，
+    // 符合使用内置）。不必再拿 runtimeDirOf 去拼目录，也不会把内置说成已下载。
+    if (builtinRoot !== null && builtinVersion !== null && picked === builtinVersion) {
+      return { kind: 'builtin', root: builtinRoot, layout: 'root', version: builtinVersion, note: null }
+    }
+    // ② 不符合内置，就去已下载目录里找；找到了就按它来（设置有效，没有回退、没有 note）。
+    if (installed.includes(picked)) {
+      const root = runtimeDirOf(appSupport, picked)
+      return { kind: 'installed', root, layout: 'root', version: readRuntimeVersion(root) ?? picked, note: null }
+    }
+  }
+  if (builtinRoot !== null) {
+    return { kind: 'builtin', root: builtinRoot, layout: 'root', version: readRuntimeVersion(builtinRoot), note: fallbackNote() }
   }
   throw new Error(
     `找不到可用的 dsh 运行时：已下载目录 ${runtimesDir(appSupport)} 为空，也没找到随包内置树（可用 DSH_SHELL_RUNTIME_DIR / DSH_SHELL_BUILTIN_DIR 指定）`
@@ -251,7 +269,7 @@ export function layout(input: LayoutInput = {}): ShellLayout {
   const projectRoot = env.DSH_SHELL_PROJECT ?? findProjectRoot(import.meta.dir) ?? packagedRoot(import.meta.dir) ?? resolve(import.meta.dir, '..', '..')
   const repoRoot = resolve(projectRoot, '..')
   const resourcesDir = env.DSH_SHELL_RESOURCES ?? packagedResources(import.meta.dir)
-  // 运行时选中：显式覆盖 > 已下载（偏好 > 最高）> 随包内置
+  // 运行时选中：显式覆盖 > 设置点名的版本（内置优先，其次已下载目录）> 随包内置兜底（#97）
   const selection = resolveRuntimeSelection({
     env,
     overrideDir: input.runtimeDir,
