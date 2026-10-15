@@ -243,7 +243,39 @@ Section "un.install"
   RMDir /r "$INSTDIR\\App"
   DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@"
   DeleteRegKey HKCU "Software\\@@APP_ID@@"
+  ; #78：清壳自有插件链接（.dsh 主目录不随卸载删除；残留悬空 junction 会让下次安装首次启动撞 EEXIST）
+  Call un.CleanShellPluginLinks
 SectionEnd`
+
+// 卸载器专用：尽力摘掉三件壳插件在各 profile 池里的挂载链接（DSH_HOME 优先，缺省 %USERPROFILE%\\.dsh，与壳 dshHome() 同源）。
+// 只 RMDir 链接本身：junction/symlink 按目录项摘除、不进目标内容；真实目录非空时 RMDir 静默失败，不会误删。
+const uninstallerCleanupFn = `
+Function un.CleanShellPluginLinks
+  ReadEnvStr $R0 "DSH_HOME"
+  StrCmp $R0 "" 0 un78_have
+  ReadEnvStr $R0 "USERPROFILE"
+  StrCmp $R0 "" 0 un78_default
+  Return
+un78_default:
+  StrCpy $R0 "$R0\\.dsh"
+un78_have:
+  FindFirst $R1 $R2 "$R0\\profiles\\*.*"
+un78_profile:
+  StrCmp $R2 "" un78_done
+  IfFileExists "$R0\\profiles\\$R2\\node_modules\\*.*" 0 un78_next
+  RMDir "$R0\\profiles\\$R2\\node_modules\\dsh-desktop-bun"
+  RMDir "$R0\\profiles\\$R2\\node_modules\\dsh-mobile-access"
+  RMDir "$R0\\profiles\\$R2\\node_modules\\dsh-web-mobile"
+un78_next:
+  FindNext $R1 $R2
+  Goto un78_profile
+un78_done:
+  FindClose $R1
+  ; 旧布局兜底：共享池曾直接放 <home>\\node_modules（#13 之前）
+  RMDir "$R0\\node_modules\\dsh-desktop-bun"
+  RMDir "$R0\\node_modules\\dsh-mobile-access"
+  RMDir "$R0\\node_modules\\dsh-web-mobile"
+FunctionEnd`
   // Windows 自解压约定（extractor/main.zig extractFromSelf）：exe 同目录的 .installer/<stem>.tar.zst + <stem>.metadata.json，
   // 退回同目录裸 <stem>.tar.zst/<stem>.metadata.json。hutch 产出的 payload 在 Resources/<hash>.tar.zst，装完就地改名挪过去。
   const payloadDir = join(appDir, 'Resources')
@@ -261,7 +293,7 @@ SectionEnd`
       `  Rename "$INSTDIR\\App\\Resources\\metadata.json" "$INSTDIR\\App\\bin\\.installer\\launcher.metadata.json"`,
     ].join('\n')
   }
-const nsi = nsiTemplate.replaceAll('@@PAYLOAD_RENAME@@', payloadRename).replaceAll('@@APP_NAME@@', 'DeepSeek Harness Desktop BUN').replaceAll('@@APP_ID@@', 'DeepSeekHarnessDesktopBUN').replaceAll('@@APP_DIR_NAME@@', appDirName).replaceAll('@@INSTALL_ROOT@@', 'DSHDesktopBun')
+const nsi = nsiTemplate.replaceAll('@@PAYLOAD_RENAME@@', payloadRename).replaceAll('@@APP_NAME@@', 'DeepSeek Harness Desktop BUN').replaceAll('@@APP_ID@@', 'DeepSeekHarnessDesktopBUN').replaceAll('@@APP_DIR_NAME@@', appDirName).replaceAll('@@INSTALL_ROOT@@', 'DSHDesktopBun') + uninstallerCleanupFn
 
 const nsiPath = join(projectRoot, 'build', 'installer-windows.nsi')
 // BOM 让 makensis 按 UTF-8 读脚本（中文快捷方式名不乱码）
