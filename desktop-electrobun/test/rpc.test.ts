@@ -422,6 +422,8 @@ describe('多窗口的数据面（列表类命令要看到别的 profile / 正�
         activeKind: 'override',
         activeDir: '/tmp/spike-rt/0.2.1-alpha.2',
         selected: null,
+
+        note: null,
         installed: [],
       }),
     })

@@ -137,6 +137,8 @@ export interface RuntimeSnapshot {
   activeDir: string | null
   /** 面板 select 的当前值：设置里的 dshRuntime */
   selected: string | null
+  /** #79：运行时回退说明（偏好版本不在已装里时的用户可见原因；无回退为 null） */
+  note: string | null
   installed: InstalledRuntime[]
 }
 
@@ -294,6 +296,7 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
         source,
         builtin: snapshot?.builtinVersion ?? null,
         selected: snapshot?.selected ?? null,
+        note: snapshot?.note ?? null,
         installed: snapshot?.installed ?? [],
         // 当前真正在跑的那棵树：面板要能把它标成「运行中」，
         // 并且不再把正在跑的版本当成「可下载」（dev 用 DSH_SHELL_RUNTIME_DIR 时内置树可能压根不在）

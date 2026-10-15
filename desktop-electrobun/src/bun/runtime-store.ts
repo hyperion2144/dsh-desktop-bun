@@ -99,9 +99,13 @@ export function writeInstalledManifest(appSupport: string, list: readonly Instal
   writeFileSync(path, serializeInstalledManifest(list))
 }
 
-/** 已装运行时行：清单为准、目录扫描补漏（面板的 installed 数组）。 */
+/** 已装运行时行：清单为准、目录扫描补漏；清单里的陈旧条目（树已不在，#79 安装失败窗口期）不进列表，
+ * 否则面板会把已失败的下载渲染成「切换/卸载」成功态。 */
 export function listInstalledRuntimes(appSupport: string): InstalledRuntime[] {
-  return mergeInstalled(readInstalledManifest(appSupport), scanInstalledVersions(appSupport))
+  const manifest = readInstalledManifest(appSupport).filter((row) =>
+    isRuntimeTreeValid(runtimeDirOf(appSupport, row.version)),
+  )
+  return mergeInstalled(manifest, scanInstalledVersions(appSupport))
 }
 
 export function recordInstalledRuntime(appSupport: string, entry: InstalledRuntime): InstalledRuntime[] {

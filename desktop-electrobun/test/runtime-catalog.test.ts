@@ -221,6 +221,16 @@ describe('运行时目录 IO', () => {
     expect(readInstalledManifest(appSupport)).toEqual([])
   })
 
+  test('清单里的陈旧条目（目录已不在）不进已装列表（#79：不渲染假成功态）', () => {
+    const appSupport = tempDir()
+    makeRuntimeTree(runtimeDirOf(appSupport, '0.2.0'), '0.2.0')
+    recordInstalledRuntime(appSupport, { version: '0.2.0', source: 'npm', installed_at: 11 })
+    // 安装失败窗口期：installRuntime 校验失败后把半成品树 rm 掉了，但 manifest 还记着这一条
+    recordInstalledRuntime(appSupport, { version: '0.2.1-alpha.3', source: 'github', installed_at: 22 })
+    rmSync(runtimeDirOf(appSupport, '0.2.1-alpha.3'), { recursive: true, force: true })
+    expect(listInstalledRuntimes(appSupport).map((row) => row.version)).toEqual(['0.2.0'])
+  })
+
   test('卸载先入回收站：目录消失、清单摘掉、purge 才真删', () => {
     const appSupport = tempDir()
     makeRuntimeTree(runtimeDirOf(appSupport, '0.2.0'), '0.2.0')
@@ -309,13 +319,29 @@ describe('运行时选中', () => {
     const preferred = resolveRuntimeSelection({ env: {}, appSupport, preferred: '0.2.0' })
     expect(preferred.kind).toBe('installed')
     expect(preferred.version).toBe('0.2.0')
+
+    expect(preferred.note).toBeNull()
     const highest = resolveRuntimeSelection({ env: {}, appSupport })
     expect(highest.version).toBe('0.2.1')
+
+    // 没设偏好（或偏好就是选中的那个）：不带 note
+    expect(highest.note).toBeNull()
 
     const empty = tempDir()
     const builtin = makeRuntimeTree(join(tempDir(), 'builtin'), '0.3.0')
     const selection = resolveRuntimeSelection({ env: {}, appSupport: empty, builtinDir: builtin })
     expect(selection.kind).toBe('builtin')
+
+    expect(selection.note).toBeNull()
+
+    // #79 回退可见化：偏好版本不在已装里，回退要带 note（日志/通知/面板都用它）
+    const fallbackHighest = resolveRuntimeSelection({ env: {}, appSupport, preferred: '9.9.9' })
+    expect(fallbackHighest.version).toBe('0.2.1')
+    expect(fallbackHighest.note).toContain('9.9.9')
+    expect(fallbackHighest.note).toContain('0.2.1')
+    const fallbackBuiltin = resolveRuntimeSelection({ env: {}, appSupport: empty, builtinDir: builtin, preferred: '9.9.9' })
+    expect(fallbackBuiltin.kind).toBe('builtin')
+    expect(fallbackBuiltin.note).toContain('9.9.9')
     expect(selection.version).toBe('0.3.0')
   })
 
