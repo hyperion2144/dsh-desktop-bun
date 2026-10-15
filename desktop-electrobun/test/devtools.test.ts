@@ -47,7 +47,8 @@ describe('applyCdpDebugPort（C environ 双写，#69 打包态根因修复）', 
     expect(env[DEVTOOLS_PORT_ENV]).toBe('9333')
   })
 
-  test('真 FFI 冒烟：setenv 写入后 C getenv 能读回（dylib 读的就是这个）', () => {
+  // libSystem.dylib 是 macOS 专属路径：Linux/Windows 上 dlopen 直接抛错——这条冒烟只能在 darwin 跑
+  test.skipIf(process.platform !== 'darwin')('真 FFI 冒烟：setenv 写入后 C getenv 能读回（dylib 读的就是这个）', () => {
     expect(applyCdpDebugPort(9344)).toBe(true)
     const libc = dlopen('/usr/lib/libSystem.dylib', {
       getenv: { args: ['cstring'], returns: 'ptr' },
