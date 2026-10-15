@@ -15,8 +15,9 @@
 
 import { execFileSync } from 'node:child_process'
 import { spawnSync } from 'node:child_process'
-import { readdirSync, statSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -78,4 +79,59 @@ console.log(`[sign-app] Identifier=${identifier}  Info.plist entries=${plistEntr
 if (plistEntries === '0') {
   console.error('[sign-app] Info.plist 没被绑进签名（通知授权仍会失败）；检查 .app 结构')
   process.exit(1)
+}
+
+// ── DMG 重建（交付面修复）：`hutch electrobun build` 是「先打 DMG、后由本脚本重签 .app」──
+// 它打包时用的是未重签的 .app（linker-signed，Info.plist=not bound，bundle 无 _CodeSignature），
+// 而上游 CI 上传的正是那份 DMG：用户装到的是签名不合法的包，macOS（arm64 至少要求合法 ad-hoc
+// 签名）直接报「已损坏，无法打开」。签完必须把 DMG 用签名后的 .app 重打一遍，并挂载复核。
+const artifactsDir = join(projectRoot, 'artifacts')
+const dmgFiles = existsSync(artifactsDir)
+  ? readdirSync(artifactsDir).filter((name) => name.endsWith('.dmg'))
+  : []
+
+if (dmgFiles.length === 0) {
+  console.log('[sign-app] artifacts/ 下没有 .dmg（本地开发常见），跳过 DMG 重建')
+} else {
+  for (const name of dmgFiles) {
+    const dmgPath = join(artifactsDir, name)
+    try {
+      repackDmg(dmgPath, target)
+    } catch (error) {
+      console.error(`[sign-app] DMG 重建失败（${dmgPath}）：${error instanceof Error ? error.message : String(error)}`)
+      process.exit(1)
+    }
+  }
+}
+
+/** 用已签名的 .app 重打 DMG（保留 /Applications 拖放入口），覆盖前先挂载复核签名。 */
+function repackDmg(dmgPath, appPath) {
+  const appName = basename(appPath)
+  const volumeName = appName.replace(/\.app$/, '')
+  const work = mkdtempSync(join(tmpdir(), 'dsh-dmg-'))
+  const root = join(work, 'root')
+  const outDmg = join(work, `${volumeName}.dmg`)
+  const mountPoint = join(work, 'mnt')
+  mkdirSync(root)
+  mkdirSync(mountPoint)
+  // ditto 比 cp -R 更忠于 Apple 元数据（资源叉/扩展属性/签名文件），别换成 fs.cpSync
+  execFileSync('ditto', [appPath, join(root, appName)], { stdio: 'inherit' })
+  execFileSync('ln', ['-s', '/Applications', join(root, 'Applications')], { stdio: 'inherit' })
+  execFileSync('hdiutil', ['create', '-volname', volumeName, '-srcfolder', root, '-ov', '-format', 'UDZO', '-fs', 'HFS+', outDmg], {
+    stdio: 'inherit',
+  })
+  try {
+    execFileSync('hdiutil', ['attach', '-nobrowse', '-readonly', '-mountpoint', mountPoint, outDmg], { stdio: 'inherit' })
+    try {
+      execFileSync('codesign', ['--verify', '--deep', '--strict', '--verbose=2', join(mountPoint, appName)], { stdio: 'inherit' })
+      console.log(`[sign-app] DMG 复核通过（签名合法）：${appName}`)
+    } finally {
+      execFileSync('hdiutil', ['detach', mountPoint], { stdio: 'inherit' })
+    }
+  } finally {
+    if (existsSync(mountPoint)) rmSync(mountPoint, { recursive: true, force: true })
+  }
+  renameSync(outDmg, dmgPath)
+  rmSync(work, { recursive: true, force: true })
+  console.log(`[sign-app] DMG 已用签名后的 .app 重打：${dmgPath}`)
 }
