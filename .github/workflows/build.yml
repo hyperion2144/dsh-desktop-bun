@@ -6,12 +6,13 @@ name: Build
 # 系统 webview（mac `nativeWrapper.mm:8359` / win `nativeWrapper.cpp:8944` / linux
 # `nativeWrapper.cpp:591`），外观上完全看不出——但那就等于把 #200 那族 JavaScriptCore 崩溃
 # 原样带回来。所以打包后立刻用 `scripts/assert-artifact.mjs` 翻产物（见该脚本注释）。
+# #84 起该断言的渲染器载荷口径平台条件化：mac/linux 仍要求 CEF 载荷，win 反向核验（出现 CEF 即策略回归/包体回胖）。
 #
 # 未验证假设（分支推送前 CI 跑不起来，首次跑要盯这几处）：
 #   1. hutch CLI 在 Windows/Linux runner 上的安装与 PATH（这里用 Git Bash 跑官方 install.sh）；
 #   2. Windows/Linux 自带 tar 是否支持 `--zstd`（assert 脚本已退到 `-tf`，但没有 zstd 时
 #      tar 可能仍读不了 zst）；
-#   3. Windows/Linux 产物里 CEF 标志名与 payload 布局（按 Electrobun 源码推断，未实机验证）。
+#   3. Windows 产物「无 CEF」反向核验口径与 Linux 产物里 CEF 标志名、payload 布局（按 Electrobun 源码推断，未实机验证）。
 on:
   workflow_dispatch:
   push:
@@ -24,7 +25,7 @@ on:
     - cron: '30 18 * * *'
 #
 # 触发策略（#7 方案 A + #8 定时兜底）：push(main) 与 pull_request 一律只跑检查（见 check.yml）——
-# 每次全量约 40 runner-分钟（三平台 CEF 打包 + NSIS + 冒烟），不该发生在每一轮
+# 每次全量约 40 runner-分钟（三平台打包 + NSIS + 冒烟），不该发生在每一轮
 # 迭代上。完整构建只留给手动 dispatch、tag push 与每日定时兜底（schedule，见 on:）；
 # main 打包链由兜底持续验证，hutch/NSIS/runner 镜像漂移最迟次日暴露。
 # 注：这里只做「构建 + 断言 + 存 CI 产物」。真正的发布（把安装包与 `<platformPrefix>-update.json` +
@@ -120,7 +121,7 @@ jobs:
         working-directory: desktop-electrobun
         run: bun test
 
-      - name: 打包（Electrobun，CEF）
+      - name: 打包（Electrobun）
         working-directory: desktop-electrobun
         shell: bash
         run: |
@@ -145,7 +146,7 @@ jobs:
           if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) { choco install nsis -y --no-progress }
           bun run build:installer
 
-      - name: 产物断言（CEF 运行时 + version.json）
+      - name: 产物断言（渲染器运行时 + version.json）
         working-directory: desktop-electrobun
         run: bun run assert:artifact
 

@@ -150,6 +150,20 @@ describe('planDevToolsBoot（启动决策）', () => {
       }
     }
   })
+
+  test('构建不含 CEF（#84 win）：打包态不出菜单、不开口（fail-closed）', async () => {
+    const plan = await planDevToolsBoot({ isPackaged: true, settingOn: true, isFree: alwaysFree, cefAvailable: false })
+    expect(plan.reason).toBe('cef-only')
+    expect(plan.enableCdp).toBe(false)
+    expect(plan.port).toBeNull()
+    expect(plan.menuEnabled).toBe(false)
+  })
+
+  test('构建不含 CEF：dev 态菜单恒可见（openDevTools 与后端无关）', async () => {
+    const plan = await planDevToolsBoot({ isPackaged: false, settingOn: false, isFree: neverFree, cefAvailable: false })
+    expect(plan.reason).toBe('dev-build')
+    expect(plan.menuEnabled).toBe(true)
+  })
 })
 
 describe('isPortBindable（真实探活）', () => {
