@@ -17,6 +17,7 @@
 - 运行时管理：内置/已下载两种来源的发现与切换；下载走 npm/GitHub 目录；卸载进回收站。
 - 应用内更新检查（Electrobun 更新器，基址为本仓 Releases）。
 - 页面右键菜单补齐（#21）：在既有系统 role 项与链接项之上，新增工作区文件行「打开」、文件夹行「打开文件夹」（dsh ui-sidebar-files 的 data-files-entry/data-files-path 稳定标记 → Utils.openPath，路径只认绝对路径）；dev 构建（未打包）菜单垫底「打开 DevTools」（BrowserView.openDevTools），release 不出现；「刷新页面」更名「刷新」。
+- 开发者工具开关（#69）：桌面设置新增默认关的「开发者工具」；变开先弹安全确认弹窗（取消不写入），保存即重启桌面壳。打包态重启后按设置在回环地址开 CEF 远程调试口（ELECTROBUN_CEF_REMOTE_DEBUGGING_PORT，默认 9333，DSH_SHELL_DEVTOOLS_PORT 可换），右键菜单才出现「打开 DevTools」——打包态菜单可见 ⇔ 口已开，禁中间态；口被占或覆盖 env 非法一律 fail-closed（不开口、不出菜单）。dev 构建行为不变（Electrobun 自动开调试口、菜单恒可见）。旧设置文件无 dev_tools 键按默认关。
 - CI 每日定时全量兜底（#8）：build.yml 新增 schedule（UTC 18:30 = 北京 02:30）；main 打包链（三平台打包 / NSIS / 断言 / 冒烟）由每日自动验证，防 hutch 与 runner 镜像漂移导致的静默腐坏。
 - loopback 数据面聚合（#54）：壳新增 `/__shell__/batch` 批量转发端点（一次 POST 携 ≤32 个子请求，并发转发按序聚合，单个失败不拖垮整批，整包 no-store）与相同 method+path+query 并发 GET 的单飞合并（≤256KB 且带 content-length 的响应共享给并发等待者，流式/大响应不缓冲）；`/__shell__/health` 新增 `proxiedInFlight`/`coalesced` 字段；proxy 慢请求日志由单段 ttfb 拆为 `ttfb`/`total` 两段（total 含流式体传输）。
 
