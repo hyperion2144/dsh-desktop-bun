@@ -7,6 +7,7 @@ import type { ClientContext } from './ctx-types.ts'
 import { shellRpc } from './shell-rpc.ts'
 
 import { ThemeSelect } from './theme-select.tsx'
+import { devToolsConfirmCopy, devToolsDisableCopy, devToolsSavedNote, planDevToolsUi } from './devtools-toggle.ts'
 export const inject = ['slots']
 
 // 设置项持久化走壳 RPC（nsSave → invoke('save_desktop_settings')，宿主单写者
@@ -50,6 +51,8 @@ interface DesktopData {
   desktop_layout_on_phones?: boolean | null
   /** #186 防休眠：有会话在跑时阻止系统休眠（缺省 true；屏幕仍会照常熄灭） */
   prevent_sleep?: boolean | null
+  /** #69 开发者工具：打包态重启后开 CEF 远程调试口并放出菜单（缺省 false；安全面） */
+  dev_tools?: boolean | null
 }
 
 interface DshSourceState {
@@ -191,6 +194,32 @@ const INPUT_BASE_STYLE: React.CSSProperties = {
 const INPUT_FULL_STYLE: React.CSSProperties = { ...INPUT_BASE_STYLE, width: '100%', boxSizing: 'border-box' }
 const ROW_STYLE: React.CSSProperties = { display: 'flex', gap: 8, alignItems: 'center' }
 const FLEX_1_STYLE: React.CSSProperties = { flex: 1 }
+// #69 开发者工具确认弹窗：遮罩/卡片/文字 token 与 local-chrome.ts 退出确认弹窗同款（--dsw-alias-* 带回退）
+const DEV_TOOLS_OVERLAY_STYLE: React.CSSProperties = {
+  position: 'fixed',
+  inset: 0,
+  zIndex: 2147483000,
+  background: 'rgba(0,0,0,0.45)',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+}
+const DEV_TOOLS_MODAL_STYLE: React.CSSProperties = {
+  background: 'var(--dsw-alias-bg-layer-1,#1e1e1e)',
+  border: '1px solid var(--dsw-alias-border-l2,#444)',
+  borderRadius: 12,
+  padding: '18px 20px',
+  minWidth: 320,
+  maxWidth: '80vw',
+  boxShadow: '0 12px 40px rgba(0,0,0,0.4)',
+  color: 'var(--dsw-alias-label-primary,#eee)',
+}
+const DEV_TOOLS_TITLE_STYLE: React.CSSProperties = { fontSize: 14, fontWeight: 600, marginBottom: 10 }
+const DEV_TOOLS_BODY_STYLE: React.CSSProperties = { fontSize: 12.5, lineHeight: 1.6, color: 'var(--dsw-alias-label-secondary,#bbb)' }
+const DEV_TOOLS_ACTIONS_STYLE: React.CSSProperties = { display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }
+// #69 确认弹窗文案纯静态：模块级算一次
+const DEV_TOOLS_CONFIRM = devToolsConfirmCopy()
+const DEV_TOOLS_DISABLE = devToolsDisableCopy()
 
 const BTN_PRIMARY_STYLE: React.CSSProperties = {
   background: 'var(--dsw-alias-brand-primary-new-color,#4176e6)',
@@ -379,6 +408,10 @@ function DesktopSettingsPanel(): React.ReactElement {
   // #147 路线 A：手机端是否改用桌面布局（不注入 dsh-web-mobile）；#144：网关 mux 心跳覆盖
   const [muxHeartbeatInput, setMuxHeartbeatInput] = useState<string>('30000')
   const [desktopLayoutOnPhones, setDesktopLayoutOnPhones] = useState(false)
+  // #69：开发者工具开关（缺省关；双向变更都先弹确认；确认后保存并重启桌面壳生效）
+  const [devToolsConfirmKind, setDevToolsConfirmKind] = useState<null | 'on' | 'off'>(null)
+  const [devTools, setDevTools] = useState(false)
+  const [devToolsNote, setDevToolsNote] = useState<string | null>(null)
   // #186：有会话在跑时阻止系统休眠（缺省开）
   const [preventSleep, setPreventSleep] = useState(true)
   const [preventSleepNote, setPreventSleepNote] = useState<string | null>(null)
@@ -387,9 +420,42 @@ function DesktopSettingsPanel(): React.ReactElement {
   useEffect(() => {
     setDesktopLayoutOnPhones(desktop.desktop_layout_on_phones === true)
     setPreventSleep(desktop.prevent_sleep !== false)
+    setDevTools(desktop.dev_tools === true)
     const hb = desktop.mux_heartbeat_ms
     setMuxHeartbeatInput(typeof hb === 'number' ? String(hb) : '30000')
   }, [desktop])
+
+  /** #69：开发者工具开关——两个方向的变更都先弹确认（取消不写入），确认才保存并重启桌面壳。 */
+  const handleToggleDevTools = (next: boolean): void => {
+    const plan = planDevToolsUi(devTools, next)
+    if (plan.action === 'idle') return
+    setDevToolsConfirmKind(plan.action === 'confirm-on' ? 'on' : 'off')
+  }
+
+  const saveDevToolsSetting = (on: boolean): void => {
+    setDevToolsConfirmKind(null)
+    setDevTools(on)
+    void nsSave({ dev_tools: on })
+      // 重启会把本调用连同页面一起重载（Failed to fetch）——这是完整重启的预期形态，不是失败；
+      // 只有真正的保存失败才报错并回滚勾选态。
+      .then(() => invoke('restart_dsh_service').catch(() => undefined))
+      .then(() => setDevToolsNote(devToolsSavedNote(on)))
+      .catch((e) => {
+        setDevTools(!on)
+        setDevToolsNote(`保存失败：${String(e)}`)
+      })
+  }
+
+  // #69：确认弹窗开着时 Escape = 取消（不写入），与 local-chrome 退出确认同款键盘可达
+  useEffect(() => {
+    if (devToolsConfirmKind === null) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setDevToolsConfirmKind(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [devToolsConfirmKind])
+  const devToolsActiveConfirm = devToolsConfirmKind === 'off' ? DEV_TOOLS_DISABLE : DEV_TOOLS_CONFIRM
   // 代理测试
   const [testResult, setTestResult] = useState<string | null>(null)
   const [testBusy, setTestBusy] = useState(false)
@@ -1804,6 +1870,44 @@ function DesktopSettingsPanel(): React.ReactElement {
           熄屏后若还有会话在跑，壳会持有系统防休眠断言（macOS 走 IOKit、Windows 走线程执行状态），
           直到会话跑完、dsh 实例停止或退出壳。屏幕该关还是照关，只是不让整机睡过去；合盖仍然会睡。改动立即生效。
         </div>
+      </SectionBox>
+      {/* ── 开发者工具（#69）── */}
+      <SectionBox title="开发者工具">
+        <div style={ROW_STYLE}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="checkbox"
+              data-desktop-settings="dev-tools"
+              checked={devTools}
+              onChange={(e) => handleToggleDevTools(e.target.checked)}
+            />
+            允许打开 DevTools（打包态默认关；改动重启桌面壳生效）
+          </label>
+        </div>
+        {devToolsNote && <div style={NOTE_STYLE}>{devToolsNote}</div>}
+        <div style={NOTE_STYLE}>
+          开启后桌面壳在本机回环地址监听一个远程调试口，本机任意程序可借它在页面里执行代码。只在自己排查问题时开启，用完记得关掉并重启。
+        </div>
+        {devToolsConfirmKind !== null && (
+          <div style={DEV_TOOLS_OVERLAY_STYLE}>
+            <div style={DEV_TOOLS_MODAL_STYLE} data-desktop-settings="dev-tools-confirm">
+              <div style={DEV_TOOLS_TITLE_STYLE}>{devToolsActiveConfirm.title}</div>
+              {devToolsActiveConfirm.lines.map((line) => (
+                <div key={line} style={DEV_TOOLS_BODY_STYLE}>
+                  {line}
+                </div>
+              ))}
+              <div style={DEV_TOOLS_ACTIONS_STYLE}>
+                <PfBtn variant="ghost" onClick={() => setDevToolsConfirmKind(null)}>
+                  {devToolsActiveConfirm.cancel}
+                </PfBtn>
+                <PfBtn variant="primary" onClick={() => saveDevToolsSetting(devToolsConfirmKind === 'on')}>
+                  {devToolsActiveConfirm.confirm}
+                </PfBtn>
+              </div>
+            </div>
+          </div>
+        )}
       </SectionBox>
       {/* ── 代理设置 ── */}
       <SectionBox title="代理设置">

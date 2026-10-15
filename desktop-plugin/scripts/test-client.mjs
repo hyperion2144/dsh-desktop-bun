@@ -487,6 +487,7 @@ assert.equal(area.value, 'xy', '输入框 value 里的控制字符也被擦掉')
 
 
 
+
 // ── shell-rpc（#50）：统一传输层，三通道选择 / wire 协议 / 超时 / 窗口三键 ──
 await build({
   entryPoints: [join(root, 'src/client/shell-rpc.ts')],
@@ -597,6 +598,45 @@ const { createShellRpc, sendWindowAction } = await import(pathToFileURL(join(tmp
   assert.equal(calls[0].url, '/__shell__/window', '无桥三键兑底到窗口端点')
   assert.deepEqual(JSON.parse(calls[0].init.body), { action: 'minimize' })
 }
+
+// ── devtools-toggle（#69）：开发者工具开关的状态机与安全面文案 ──
+await build({
+  entryPoints: [join(root, 'src/client/devtools-toggle.ts')],
+  outfile: join(tmp, 'devtools-toggle.mjs'),
+  format: 'esm',
+  platform: 'node',
+  target: 'node20',
+  logLevel: 'silent',
+})
+
+const dt = await import(pathToFileURL(join(tmp, 'devtools-toggle.mjs')).href)
+
+// 状态机：同值不动；两个方向的变更都先弹确认，确认才写入并重启
+assert.equal(dt.planDevToolsUi(false, false).action, 'idle', '关→关不动')
+assert.equal(dt.planDevToolsUi(true, true).action, 'idle', '开→开不动')
+assert.equal(dt.planDevToolsUi(false, true).action, 'confirm-on', '关→开先弹安全确认（取消不写入）')
+assert.equal(dt.planDevToolsUi(true, false).action, 'confirm-off', '开→关也弹确认（重启不静默）')
+
+// 关闭确认文案：点明重启与中断
+const dtOffCopy = dt.devToolsDisableCopy()
+assert.ok(dtOffCopy.title.includes('关闭'), '关闭弹窗标题点名关闭')
+assert.ok(dtOffCopy.confirm.includes('重启'), '关闭确认动作带重启语义')
+assert.ok(dtOffCopy.lines.some((l) => l.includes('中断')), '关闭文案提示页面会短暂中断')
+assert.equal(dtOffCopy.cancel, '取消', '取消不写入')
+
+// 确认弹窗文案：说清口开在哪、谁能用、能造成什么
+const dtCopy = dt.devToolsConfirmCopy()
+assert.ok(dtCopy.title.includes('开发者工具'), '标题点名功能')
+assert.ok(dtCopy.lines.some((l) => l.includes('回环')), '文案说明口在回环地址')
+assert.ok(dtCopy.lines.some((l) => l.includes('任意') && l.includes('代码')), '文案点破本机任意程序可执行代码')
+assert.ok(dtCopy.lines.some((l) => l.includes('凭据')), '文案点破会话内容含凭据')
+assert.ok(dtCopy.confirm.includes('重启'), '确认动作带重启语义')
+assert.equal(dtCopy.cancel, '取消', '取消不写入')
+
+// 保存后提示：两个方向都点明要重启
+assert.ok(dt.devToolsSavedNote(true).includes('重启'), '开启提示含重启')
+assert.ok(dt.devToolsSavedNote(false).includes('重启'), '关闭提示含重启')
+
 
 rmSync(tmp, { recursive: true, force: true })
 console.log('client 纯函数测试：全部通过 ✓')
