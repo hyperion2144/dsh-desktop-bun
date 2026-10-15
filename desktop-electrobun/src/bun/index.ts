@@ -190,6 +190,8 @@ const guests = createGuestManager({
 let windowVisible = false
 /** 隐藏回托盘前窗口是否处于最大化（ffi hide/show 往返会丢最大化，show 前补回，#50 验证反馈）。 */
 let hiddenWhileMaximized = false
+/** #73：启动要恢复最大化的窗——建窗/dom-ready 的 maximize 在 Windows 实测不稳，改在首次 focus 断言补齐。 */
+const pendingStartMaximized = new Set<string>()
 let quitting = false
 /** 关窗后是否只是隐藏：没有托盘（原生层没建成）时隐藏就叫不回来了，那时关窗等于退出。 */
 const closeToTray = (): boolean => tray !== null
@@ -581,11 +583,10 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
       if (action === 'close') win.close()
       else if (action === 'quit') void shutdown()
     },
-    // 手动最大化（window-max.ts）要用的帧读写（#50 验证反馈）。
+    // 漏斗状态推导要用的只读帧（本仓不做任何窗口摆位，#80）。
     getFrame: () => win.getFrame(),
-    setFrame: (frame: { x: number; y: number; width: number; height: number }) =>
-      win.setFrame(frame.x, frame.y, frame.width, frame.height),
   }
+  const shellRpcHandle = await attachShellRpc({ router: () => svc.rpcRouter(), grant, window: rpcWindow })
   win = new BrowserWindow({
     // D1：原生层同步评估的导航守卫——白名单页面 origin，其余导航被拦（外链交给 open_external）
     navigationRules: navRulesFor({ origin: svc.state.origin }),
@@ -593,19 +594,19 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
     url: svc.state.pageUrl,
     renderer: 'cef',
     preload: bootPreloadScript(locale, platform, svc.state.origin, grant.token),
-    // 官方 Typed RPC（#50）：窗口主视图直接挂 defineRPC，命令表/授权语义全在 rpc-bridge.ts
-    rpc: await attachShellRpc({ router: () => svc.rpcRouter(), grant, window: rpcWindow }),
+    rpc: shellRpcHandle.rpc,
     // hidden = 纯无边框方框（实机报的「方形无边框」）。mac 两态都以 hiddenInset 出红绿灯。
     titleBarStyle: 'hiddenInset',
     frame,
   })
   // D3 反馈：上次是最大化收场的，这次直接最大化（几何记忆只当还原帧用）。
-  // Windows 实测：从未显示过的窗上 maximize() 不落 WS_MAXIMIZE 旗标（IsZoomed=false），
-  // 图标状态推导原生旗标优先就会拿 false——dom-ready 后窗口已可见，再验证式补一次。
+  // Windows 实测：从未显示过的窗上 maximize() 不落 WS_MAXIMIZE 旗标；dom-ready 补齐
+  // 实机也不稳（#73 两轮未过）——最终口径：focus 首焦断言补齐（见 focus 处理器）。
   const startMaximized = readWindowMaximized(windowStateFileOf(profile))
   if (startMaximized) {
     ensureNativeMaximizeStyles()
     win.maximize()
+    pendingStartMaximized.add(profile)
   }
   windows.set(profile, { profile, window: win, ready: false })
   focusedProfile = profile
@@ -627,6 +628,8 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
       // 启动 maximize 落在隐藏窗上没生效（Windows）：可见后补一次；尺寸已是最大化帧，视觉无感
       ensureNativeMaximizeStyles()
       win.maximize()
+      // #73：没人告诉页面 —— 推 window_state_changed，客户端重查图标（resize/focus 都不触发）。
+      shellRpcHandle.notifyWindowState()
     }
     refreshTray()
   })
@@ -634,6 +637,17 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
     focusedProfile = profile
     // lane 稳定接入点跟随焦点（旧壳 forwarder.rs：新连接落焦点实例，存量不动）
     // lane 稳定接入点跟随焦点（旧壳 forwarder.rs：新连接落焦点实例，存量不动）。
+    // #73：启动恢复最大化断言——Windows 上从未显示/刚显示的窗 maximize 可能不落
+    // 旗标（建窗时、dom-ready 时各试过一次都不稳），首次获得焦点时窗口必然已可见，
+    // 再补一次并推送图标重查；断言成功即清 pending，之后不再干预。
+    if (pendingStartMaximized.has(profile)) {
+      if (!win.isMaximized()) {
+        ensureNativeMaximizeStyles()
+        win.maximize()
+        shellRpcHandle.notifyWindowState()
+      }
+      if (win.isMaximized()) pendingStartMaximized.delete(profile)
+    }
     // 转发器挂在先起的那份服务面上，这里找到它再指目标。
     focusedLaneForwarder()?.setTarget(services.get(profile)?.state.lanePort ?? 0)
     refreshTray()

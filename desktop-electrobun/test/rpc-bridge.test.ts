@@ -8,13 +8,13 @@
 
 import { describe, expect, test } from 'bun:test'
 import { createRpcRouter, type RpcHandler } from '../src/bun/rpc.ts'
-import { createShellRpcFunnel, type ShellRpcDeps } from '../src/bun/rpc-bridge.ts'
+import { createShellRpcFunnel, createWindowStateNotifier, type ShellRpcDeps } from '../src/bun/rpc-bridge.ts'
 import { deriveMaximized, type WindowFrame } from '../src/bun/window-max.ts'
 import { createViewRegistry } from '../src/shared/view-grant.ts'
 function makeDeps(overrides: Partial<ShellRpcDeps> = {}): ShellRpcDeps {
   const views = createViewRegistry()
   return {
-    // 默认 darwin（原生路径语义）；win32 手动最大化语义由显式用例钉死，别依赖 runner 平台
+    // 默认 darwin（原生路径语义）；win32 系统最大化语义由显式用例钉死，别依赖 runner 平台
     platform: 'darwin',
     router: () =>
       createRpcRouter({
@@ -34,7 +34,6 @@ function makeDeps(overrides: Partial<ShellRpcDeps> = {}): ShellRpcDeps {
       maximize: () => {},
       close: () => {},
       getFrame: () => ({ x: 0, y: 0, width: 0, height: 0 }),
-      setFrame: () => {},
     },
     ...overrides,
   }
@@ -86,7 +85,6 @@ describe('壳 RPC 漏斗（官方 Typed RPC → 命令表）', () => {
           maximize: () => calls.push('maximize'),
           close: () => calls.push('close'),
           getFrame: () => ({ x: 0, y: 0, width: 0, height: 0 }),
-          setFrame: () => {},
         },
       }),
     )
@@ -121,10 +119,6 @@ describe('壳 RPC 漏斗（官方 Typed RPC → 命令表）', () => {
         },
         close: () => calls.push('close'),
         getFrame: (): WindowFrame => frame,
-        setFrame: (next: WindowFrame) => {
-          frame = next
-          calls.push('setFrame')
-        },
       }
     }
 
@@ -141,25 +135,15 @@ describe('壳 RPC 漏斗（官方 Typed RPC → 命令表）', () => {
       expect(win.calls).toEqual(['maximize', 'unmaximize'])
     })
 
-    test('补丁失败 + ffi 可用：退手动 setFrame 工作区，还原回原帧', async () => {
+    test('补丁失败：仍走原生 maximize（#80 维护者指令：不做 setFrame 自绘兜底）', async () => {
       const win = makeStateWindow({ x: 100, y: 80, width: 800, height: 600 })
       const funnel = createShellRpcFunnel(
         makeDeps({ platform: 'win32', maximizeStylesPatched: () => false, workArea: () => WORK, window: win }),
       )
       await funnel('window_toggle_maximize', undefined)
-      expect(win.getFrame()).toEqual(WORK)
-      await funnel('window_toggle_maximize', undefined)
-      expect(win.getFrame()).toEqual({ x: 100, y: 80, width: 800, height: 600 })
-      expect(win.calls).toEqual(['setFrame', 'setFrame'])
-    })
-
-    test('补丁失败 + ffi 不可用：退原生 maximize，不比现状差', async () => {
-      const win = makeStateWindow({ x: 0, y: 0, width: 800, height: 600 })
-      const funnel = createShellRpcFunnel(
-        makeDeps({ platform: 'win32', maximizeStylesPatched: () => false, workArea: () => null, window: win }),
-      )
-      await funnel('window_toggle_maximize', undefined)
       expect(win.calls).toEqual(['maximize'])
+      await funnel('window_toggle_maximize', undefined)
+      expect(win.calls).toEqual(['maximize', 'unmaximize'])
     })
 
     test('guest 视图：window_get_state 也在白名单外，拒绝', async () => {
@@ -194,4 +178,20 @@ describe('壳 RPC 漏斗（官方 Typed RPC → 命令表）', () => {
     await funnel('echo', '不是对象')
     expect(seen).toEqual({})
   })
+
+describe('window_state_changed 推送（#73）', () => {
+  test('触发器语义：载荷恒空对象，状态真值由客户端重查 window_get_state', () => {
+    const sent: unknown[] = []
+    const notify = createWindowStateNotifier((payload) => sent.push(payload))
+    notify()
+    expect(sent).toEqual([{}])
+  })
+
+  test('发送失败只记日志不抛（推送是尽力而为，图标同步另有 resize/focus 兜底）', () => {
+    const notify = createWindowStateNotifier(() => {
+      throw new Error('桥断了')
+    })
+    expect(() => notify()).not.toThrow()
+  })
+})
 })

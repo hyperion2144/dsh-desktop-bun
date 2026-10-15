@@ -49,8 +49,11 @@ export interface ShellRpcInvokeOptions {
   timeoutMs?: number
 }
 
+export type ShellRpcMessageListener = (name: string, payload: unknown) => void
+
 export interface ShellRpcClient {
   invoke<T = unknown>(cmd: string, args?: Record<string, unknown>, options?: ShellRpcInvokeOptions): Promise<T>
+  onMessage(listener: ShellRpcMessageListener): () => void
   /** 是否存在任一可用通道（面板据此决定激活桌面 chrome 与否）。 */
   available(): boolean
 }
@@ -79,6 +82,7 @@ export function createShellRpc(deps?: Partial<ShellRpcDeps>): ShellRpcClient {
   const clearTimeoutImpl = deps?.clearTimeoutImpl ?? ((t) => clearTimeout(t))
 
   const pending = new Map<number, PendingRequest>()
+  const messageListeners = new Set<ShellRpcMessageListener>()
   let nextId = 0
   /** 接收面是否已接管（每文档一次；接管后宿主回包直达 handlePacket）。 */
   let receiveAttached = false
@@ -89,7 +93,22 @@ export function createShellRpc(deps?: Partial<ShellRpcDeps>): ShellRpcClient {
   }
 
   function handlePacket(packet: unknown): void {
-    if (!isRecord(packet) || packet.type !== 'response') return
+    if (!isRecord(packet)) return
+    // 壳→页面的主动推送（#73）：{type:'message', id:消息名, payload}。消息是触发器，
+    // 客户端收到就自重查真值（window_get_state 是唯一状态源）；一个监听器抛错不影响其余。
+    if (packet.type === 'message') {
+      const name = typeof packet.id === 'string' ? packet.id : ''
+      if (name === '') return
+      for (const listener of messageListeners) {
+        try {
+          listener(name, packet.payload)
+        } catch (error) {
+          console.error('shell rpc message listener failed', error)
+        }
+      }
+      return
+    }
+    if (packet.type !== 'response') return
     const id = typeof packet.id === 'number' ? packet.id : NaN
     const waiter = pending.get(id)
     if (waiter === undefined) return
@@ -172,6 +191,12 @@ export function createShellRpc(deps?: Partial<ShellRpcDeps>): ShellRpcClient {
       if (typeof readGlobals().__DSH_SHELL_RELAY__?.invoke === 'function') return relayInvoke<T>(cmd, rest)
       if (typeof readGlobals().__DSH_SHELL_VIEW_TOKEN__ === 'string') return fetchInvoke<T>(cmd, rest)
       return Promise.reject(new Error('shell rpc unavailable'))
+    },
+    onMessage(listener: ShellRpcMessageListener): () => void {
+      messageListeners.add(listener)
+      return () => {
+        messageListeners.delete(listener)
+      }
     },
     available(): boolean {
       const g = readGlobals()

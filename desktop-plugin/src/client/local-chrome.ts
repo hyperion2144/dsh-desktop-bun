@@ -69,6 +69,12 @@ function buildWindowControls(platform: DesktopClientPlatform): HTMLElement {
   // 初次尝试同步 + 窗口尺寸变化（含贴靠/手动最大化）后重同步（去抖 200ms，#50 验证反馈）
   if (platform !== 'darwin') {
     syncMaximizeIcon()
+    // 壳侧主动推的窗口状态变化（#73：启动恢复最大化后 dom-ready 补 maximize，页面无从感知）：
+    // 消息是触发器，收到就重查真值。先挂监听再首查——接管前抵达的推送由框架 preload
+    // 攒在 __electrobunPendingHostMessages，首查（ensureReceive）时排空分发。
+    shellRpc.onMessage((name) => {
+      if (name === 'window_state_changed') syncMaximizeIcon()
+    })
     let resizeTimer = 0
     window.addEventListener('resize', () => {
       window.clearTimeout(resizeTimer)

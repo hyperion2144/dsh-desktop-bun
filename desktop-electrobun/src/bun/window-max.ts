@@ -1,13 +1,14 @@
-// 窗口最大化几何（#50 验证反馈 1/3：Windows 无边框窗口最大化遮挡任务栏）。
+// 窗口最大化辅助（#50 验证反馈系列）。
 //
-// 无边框（WS_POPUP）窗口的默认 WM_GETMINMAXINFO 就是全显示器尺寸——Windows 只对
-// 带标题栏的窗口自动把最大化缩到工作区（work area = 屏幕减任务栏）。Electrobun 的
-// 原生 maximizeWindow 不处理这件事（原生层源码不在本仓），所以 Windows 上改「手动
-// 最大化」：bun:ffi 向 user32 取窗口所在显示器的 rcWork，setFrame 到工作区；还原
-// 时 setFrame 回记住的还原框。macOS/Linux 原生行为正常，仍走原生 maximize()。
+// 无边框（WS_POPUP）窗口的默认 WM_GETMINMAXINFO 是全显示器尺寸——Windows 只对
+// 带 WS_MAXIMIZEBOX 的窗口把系统最大化缩到工作区（work area = 屏幕减任务栏）。
+// 本模块提供三件事：①样式位补丁（ensureNativeMaximizeStyles：给本进程无边框窗补
+// maximize/minimize/sysmenu 位，之后 maximize()/unmaximize() 全走系统行为）；
+// ②工作区只读取法（getWorkAreaForFrame，bun:ffi user32）；③最大化态纯判定
+// （deriveMaximized：原生旗标优先、几何兜底）。
 //
-// 结构照搬 keep-awake.ts：纯几何判定（可单测）+ 平台实现注入（bun:ffi 懒加载，
-// 失败降级返回 null → 调用方退回原生 maximize，不比现状差）。
+// 维护者拍板（#80）：拒绝一切自绘窗口尺寸——本模块不做、仓内也不再有任何
+// setFrame 式摆位，摆位全部交给系统 API。
 //
 // 取显示器不走 MonitorFromPoint（POINT 按值传参，FFI 结构体对齐风险），
 // 走 MonitorFromRect（LPCRECT 指针）：把窗口帧装进 4×i32 缓冲即可。
@@ -31,7 +32,7 @@ export const FRAME_TOLERANCE_PX = 8
 /**
  * 纯判定：当前帧是否「已最大化」。原生旗标优先（系统最大化的权威信号，
  * 实机上 getFrame 的坐标空间与工作区物理像素不一致时必须仍能判出）；几何比对
- * 只补旗标盖不到的场景（系统贴靠 Win+方向键、补丁失败的手动 setFrame）。
+ * 只补旗标盖不到的场景（系统贴靠 Win+方向键、启动期旗标未落）。
  */
 export function deriveMaximized(
   frame: WindowFrame,
@@ -185,7 +186,7 @@ function loadStylePatchLib(): StylePatchSymbols | null {
  * 给本进程的可见顶层无边框窗补系统最大化样式位（幂等：已带的跳过）。
  * EnumWindows 本就只枚举顶层窗，pid + 可见 + 缺 WS_MAXIMIZEBOX 三重过滤足够。
  * 返回 false = 平台非 Windows / ffi 不可用 / 枚举失败（调用方走手动 setFrame 兑底）。
- * 不做全局记忆：多窗口各自漏斗首次 toggle 都会调，后建的窗也能补到。
+ * 返回 false = 平台非 Windows / ffi 不可用 / 枚举失败（调用方直接原生 maximize）。
  */
 export function ensureNativeMaximizeStyles(): boolean {
   if (process.platform !== 'win32') return false

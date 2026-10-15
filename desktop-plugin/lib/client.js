@@ -59,6 +59,7 @@ function createShellRpc(deps) {
   const setTimeoutImpl = deps?.setTimeoutImpl ?? ((fn, ms) => setTimeout(fn, ms));
   const clearTimeoutImpl = deps?.clearTimeoutImpl ?? ((t) => clearTimeout(t));
   const pending = /* @__PURE__ */ new Map();
+  const messageListeners = /* @__PURE__ */ new Set();
   let nextId = 0;
   let receiveAttached = false;
   function officialBridge() {
@@ -66,7 +67,20 @@ function createShellRpc(deps) {
     return typeof post === "function" ? post : void 0;
   }
   function handlePacket(packet) {
-    if (!isRecord(packet) || packet.type !== "response") return;
+    if (!isRecord(packet)) return;
+    if (packet.type === "message") {
+      const name = typeof packet.id === "string" ? packet.id : "";
+      if (name === "") return;
+      for (const listener of messageListeners) {
+        try {
+          listener(name, packet.payload);
+        } catch (error) {
+          console.error("shell rpc message listener failed", error);
+        }
+      }
+      return;
+    }
+    if (packet.type !== "response") return;
     const id = typeof packet.id === "number" ? packet.id : NaN;
     const waiter = pending.get(id);
     if (waiter === void 0) return;
@@ -144,6 +158,12 @@ function createShellRpc(deps) {
       if (typeof readGlobals().__DSH_SHELL_VIEW_TOKEN__ === "string") return fetchInvoke(cmd, rest);
       return Promise.reject(new Error("shell rpc unavailable"));
     },
+    onMessage(listener) {
+      messageListeners.add(listener);
+      return () => {
+        messageListeners.delete(listener);
+      };
+    },
     available() {
       const g = readGlobals();
       return officialBridge() !== void 0 || typeof g.__DSH_SHELL_RELAY__?.invoke === "function" || typeof g.__DSH_SHELL_VIEW_TOKEN__ === "string";
@@ -215,6 +235,9 @@ function buildWindowControls(platform) {
   });
   if (platform !== "darwin") {
     syncMaximizeIcon();
+    shellRpc.onMessage((name) => {
+      if (name === "window_state_changed") syncMaximizeIcon();
+    });
     let resizeTimer = 0;
     window.addEventListener("resize", () => {
       window.clearTimeout(resizeTimer);
