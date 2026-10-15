@@ -10,7 +10,8 @@
 // 这里作为显式方法挂进同一张 requests 表，与漏斗共用同一份错误语义。
 // Windows 最大化主管道是系统行为：首次三键前给本进程窗补 WS_MAXIMIZEBOX 等样式位
 // （window-max.ts，上游 electrobun#558 实测——系统最大化只在带该位时按工作区收缩，
-// 双屏跨屏也因此消失）；补丁失败退手动 setFrame，再失败退原生 maximize。
+// 双屏跨屏也因此消失）；补丁失败也直接原生 maximize（#80 维护者指令：拒绝一切
+// 自绘窗口尺寸，不做 setFrame 兜底）。
 // window_get_state 同源几何推导，页面用它切换最大化/还原图标。
 //
 // 超时：官方默认单请求 1000ms；「选择音效文件」「重启宿主」这类命令远超它，壳口径放宽。
@@ -28,9 +29,8 @@ export interface ShellRpcWindow {
   unmaximize(): void
   maximize(): void
   close(): void
-  /** 手动最大化（window-max.ts）要用：读当前帧 / 把窗口摆到指定帧。 */
+  /** 漏斗状态推导要用：读当前帧（只读——本仓不做任何窗口摆位，#80）。 */
   getFrame(): WindowFrame
-  setFrame(frame: WindowFrame): void
 }
 
 export interface ShellRpcDeps {
@@ -65,33 +65,22 @@ export function createShellRpcFunnel(deps: ShellRpcDeps): ShellRpcFunnel {
   const workAreaOf = deps.workArea ?? getWorkAreaForFrame
   // 样式补丁按漏斗实例记忆：本窗首次 toggle 枚举补丁一次，多窗口后建的窗也能补到。
   const stylesPatched = deps.maximizeStylesPatched ?? (() => (platform === 'win32' ? ensureNativeMaximizeStyles() : false))
-  // 手动兑底（补丁失败）时的还原框；系统最大化路径用原生还原，不碰它。
-  // 手动最大化的还原框：点最大化时记下当前帧，还原时用掉。期间系统贴靠改变帧
-  // 的话，下一次点最大化会重新记（还原到贴靠前的帧，行为与原生一致）。
-  let restoreFrame: WindowFrame | null = null
-  const deriveState = (): { maximized: boolean; workArea: WindowFrame | null } => {
+  const deriveState = (): { maximized: boolean } => {
     const frame = deps.window.getFrame()
     const workArea = platform === 'win32' ? workAreaOf(frame) : null
-    return { maximized: deriveMaximized(frame, workArea, deps.window.isMaximized()), workArea }
+    return { maximized: deriveMaximized(frame, workArea, deps.window.isMaximized()) }
   }
   const toggleMaximize = (): void => {
-    const { maximized, workArea } = deriveState()
-    // 主管道（win32 补丁成功 / 非 win32 原生本就对）：系统行为最大化——按所在显示器
-    // 工作区收缩、原生抽贴靠、原生还原，不自算任何几何（双屏跨屏修复）。
-    const systemMaximize = platform === 'win32' ? stylesPatched() : true
+    const { maximized } = deriveState()
     if (maximized) {
-      if (!systemMaximize && restoreFrame !== null) {
-        deps.window.setFrame(restoreFrame)
-        restoreFrame = null
-      } else {
-        deps.window.unmaximize()
-      }
+      deps.window.unmaximize()
       return
     }
-    restoreFrame = deps.window.getFrame()
-    if (systemMaximize) deps.window.maximize()
-    else if (platform === 'win32' && workArea !== null) deps.window.setFrame(workArea)
-    else deps.window.maximize()
+    // win32 先补系统最大化样式位（否则 SW_MAXIMIZE 不按工作区收缩，上游 #558）；
+    // 补丁失败也直接原生 maximize——维护者拍板（#80）：拒绝一切自绘窗口尺寸，
+    // 任何情况下不用 setFrame 自摆。
+    if (platform === 'win32') stylesPatched()
+    deps.window.maximize()
   }
   return async (method, params) => {
     // 授权先行：三键与命令一视同仁（shell 视图全放行；guest/remote 即便拿到
@@ -128,13 +117,37 @@ export function createShellRpcFunnel(deps: ShellRpcDeps): ShellRpcFunnel {
 
 /**
  * 官方 defineRPC 挂点：requests 表 = 窗口三键显式方法 + `_` 通配进命令表。
- * 返回值直接喂给 `new BrowserWindow({ rpc })`（框架把它接到窗口主视图）。
+ * 返回 ShellRpcHandle：rpc 喂 `new BrowserWindow({ rpc })`（框架接到窗口主视图），
+ * notifyWindowState 供壳侧状态变化点推送（#73）。
  */
-export async function attachShellRpc(deps: ShellRpcDeps): Promise<unknown> {
+/** attachShellRpc 的返回：rpc 实例喂给 BrowserWindow，推送口给壳侧状态变化点用。 */
+export interface ShellRpcHandle {
+  /** 官方 rpc 实例，原样喂给 `new BrowserWindow({ rpc })`。 */
+  rpc: unknown
+  /** 壳侧改了窗口状态（启动 dom-ready 补 maximize 等）时主动推给页面。 */
+  notifyWindowState: () => void
+}
+
+/**
+ * 窗口状态推送（#73）：消息只是触发器——载荷不携带状态，客户端收到就重查
+ * window_get_state（壳侧 deriveState 仍是唯一状态源，两处推导必然漂移）。
+ * 发送失败只记日志：推送是尽力而为，图标同步还有 resize/focus/可见性兜底。
+ */
+export function createWindowStateNotifier(send: (payload: unknown) => void): () => void {
+  return () => {
+    try {
+      send({})
+    } catch (error) {
+      console.error('[shell] window_state_changed 推送失败', error)
+    }
+  }
+}
+
+export async function attachShellRpc(deps: ShellRpcDeps): Promise<ShellRpcHandle> {
   // 惰性加载：漏斗保持纯逻辑可单测；electrobun 运行时只在真挂点（建窗）时才需要。
   const { BrowserView } = await import('electrobun/bun')
   const funnel = createShellRpcFunnel(deps)
-  return BrowserView.defineRPC({
+  const rpc = BrowserView.defineRPC({
     maxRequestTime: SHELL_RPC_MAX_REQUEST_TIME,
     handlers: {
       requests: {
@@ -146,5 +159,9 @@ export async function attachShellRpc(deps: ShellRpcDeps): Promise<unknown> {
         _: (method: string, params: unknown) => funnel(method, params),
       },
     },
-  })
+  }) as { send: { window_state_changed: (payload: unknown) => void } }
+  // bun→webview 的 messages 通道（官方 createRPC 的 send proxy）：Windows 无 socket 全走
+  // 原生桥 executeJS，mac/linux 未连 socket 时官方同样回退 executeJS——页面只接桥即覆盖。
+  const notifyWindowState = createWindowStateNotifier((payload) => rpc.send.window_state_changed(payload))
+  return { rpc, notifyWindowState }
 }

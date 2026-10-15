@@ -542,6 +542,63 @@ const { createShellRpc, sendWindowAction } = await import(pathToFileURL(join(tmp
   assert.deepEqual(globals.__electrobunPendingHostMessages, [], '接管后积压已排空')
 }
 
+// 壳→页面主动推送（#73）：{type:'message', id:消息名, payload} 分发给监听器
+{
+  const globals = {
+    __electrobunHostBridge: { postMessage: () => {} },
+    __electrobun: {},
+  }
+  const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
+  const seen = []
+  const off = rpc.onMessage((name, payload) => seen.push([name, payload]))
+  void rpc.invoke('ping').catch(() => {}) // 接管接收面（真页面上 handlePacket 也只在接管后可达）
+  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: { maximized: true } })
+  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 1, success: true, payload: 'x' })
+  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: { maximized: false } })
+  assert.deepEqual(seen, [['window_state_changed', { maximized: true }], ['window_state_changed', { maximized: false }]], 'message 包分发到监听器，response 不串台')
+  off()
+  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: {} })
+  assert.equal(seen.length, 2, '退订后不再分发')
+  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 7, payload: {} })
+  assert.equal(seen.length, 2, 'id 非字符串的 message 包丢弃')
+}
+
+// 接管前抵达的推送：preload 攒在 __electrobunPendingHostMessages，首查（ensureReceive）时排空分发
+{
+  const globals = {
+    __electrobunHostBridge: { postMessage: () => {} },
+    __electrobun: {},
+    __electrobunPendingHostMessages: [{ type: 'message', id: 'window_state_changed', payload: {} }],
+  }
+  const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
+  let pushed = 0
+  rpc.onMessage((name) => {
+    if (name === 'window_state_changed') pushed += 1
+  })
+  void rpc.invoke('x').catch(() => {})
+  assert.equal(pushed, 1, '积压的推送在首次 invoke 排空时分发（#73 启动竞态）')
+  assert.deepEqual(globals.__electrobunPendingHostMessages, [], '积压已排空')
+}
+
+// 多监听器隔离：一个抛错不影响其余
+{
+  const globals = {
+    __electrobunHostBridge: { postMessage: () => {} },
+    __electrobun: {},
+  }
+  const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
+  let second = 0
+  rpc.onMessage(() => {
+    throw new Error('第一个监听器炸了')
+  })
+  void rpc.invoke('ping').catch(() => {}) // 接管接收面（真页面上 handlePacket 也只在接管后可达）
+  rpc.onMessage((name) => {
+    if (name === 'window_state_changed') second += 1
+  })
+  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: {} })
+  assert.equal(second, 1, '一个监听器抛错不阻断其余监听器')
+}
+
 // 中继通道（mobile-access 远程页）
 {
   const globals = { __DSH_SHELL_RELAY__: { invoke: async (cmd, args) => ({ cmd, args }) } }
