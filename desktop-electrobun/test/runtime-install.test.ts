@@ -13,6 +13,7 @@ import {
   ensureNodeShim,
   ensureShimDir,
   installRuntime,
+  RuntimeInstallCancelledError,
   nodeShimScript,
   parsePnpmProgress,
   pickInstallerErrorTail,
@@ -21,6 +22,7 @@ import {
   shimCmdScript,
   tailLines,
 } from '../src/bun/runtime-install.ts'
+import { runtimeDirOf } from '../src/bun/runtime-store.ts'
 
 const tempDirs: string[] = []
 
@@ -389,7 +391,7 @@ describe('createRuntimeDownloader', () => {
       record: (version, source) => recorded.push({ version, source }),
     })
     // 终态不完美也无妨：面板只在 active 期间读进度；装完后 downloaded 会对齐 resolved（#79）
-    expect(downloader.status()).toEqual({ active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '' })
+    expect(downloader.status()).toEqual({ active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '', cancelled: false })
     const seenDuringRun: boolean[] = []
     const pending = downloader.start('9.9.9', 'npm')
     seenDuringRun.push(downloader.status().active)
@@ -397,7 +399,7 @@ describe('createRuntimeDownloader', () => {
     expect(seenDuringRun).toEqual([true])
     expect(recorded).toEqual([{ version: '9.9.9', source: 'npm' }])
     // #79：成功终态 downloaded 对齐 resolved（上次进度快照停在 538/625=86% 定格的假活就是这么来的）
-    expect(downloader.status()).toEqual({ active: false, version: '9.9.9', resolved: 5, downloaded: 5, added: 3, error: '' })
+    expect(downloader.status()).toEqual({ active: false, version: '9.9.9', resolved: 5, downloaded: 5, added: 3, error: '', cancelled: false })
   })
 
   test('成功终态：最后一条进度停在中间（如 538/625）也归一到 100%', async () => {
@@ -467,5 +469,151 @@ describe('createRuntimeDownloader', () => {
     expect(status.downloaded).toBe(538)
     expect(status.resolved).toBe(625)
     expect(status.error).toContain('ETIMEDOUT')
+  })
+
+  test('取消（#97）：abort 走树级停止 + 清半成品，以取消终态收场（不是失败）', async () => {
+    const appSupport = tempDir()
+    const stopped: number[] = []
+    const killedDirectly: boolean[] = []
+    let resolveExit: (code: number) => void = () => {}
+    const exited = new Promise<number>((resolve) => {
+      resolveExit = resolve
+    })
+    const controller = new AbortController()
+    const spawnImpl = (): {
+      exited: Promise<number>
+      stdout?: ReadableStream<Uint8Array> | null
+      stderr?: ReadableStream<Uint8Array> | null
+      kill?: () => void
+      pid?: number
+    } => ({
+      exited,
+      stdout: streamOf(''),
+      stderr: streamOf(''),
+      kill: () => {
+        killedDirectly.push(true)
+      },
+      pid: 4242,
+    })
+    const pending = installRuntime({
+      appSupport,
+      version: '9.9.9',
+      bunPath: '/bin/bun',
+      pnpmCjs: '/p/pnpm.cjs',
+      signal: controller.signal,
+      spawnImpl,
+      stopTree: async ({ rootPid }) => {
+        stopped.push(rootPid)
+        resolveExit(143)
+      },
+    })
+    controller.abort()
+    await expect(pending).rejects.toThrow('安装已取消')
+    // 树级停止用的是安装进程的 pid；只 kill 直接子进程的话 pnpm 的构建孙进程还活着，
+    // 管道写端不关，installRuntime 永远不 settle（面板进度条永久转圈的病根）
+    expect(stopped).toEqual([4242])
+    expect(killedDirectly).toEqual([])
+    // 半成品目录必须清掉：pnpm linking 阶段就写出 bin.js，留着会被已装扫描误判成「装好了」
+    expect(existsSync(runtimeDirOf(appSupport, '9.9.9'))).toBe(false)
+  })
+
+  test('超时（#97）：看门狗同样走树级停止，而不是只 kill 直接子进程', async () => {
+    const appSupport = tempDir()
+    const stopped: number[] = []
+    let resolveExit: (code: number) => void = () => {}
+    const exited = new Promise<number>((resolve) => {
+      resolveExit = resolve
+    })
+    const spawnImpl = (): {
+      exited: Promise<number>
+      stdout?: ReadableStream<Uint8Array> | null
+      stderr?: ReadableStream<Uint8Array> | null
+      kill?: () => void
+      pid?: number
+    } => ({
+      exited,
+      stdout: streamOf(''),
+      stderr: streamOf(''),
+      kill: () => {
+        resolveExit(143)
+      },
+      pid: 777,
+    })
+    await expect(
+      installRuntime({
+        appSupport,
+        version: '9.9.9',
+        bunPath: '/bin/bun',
+        pnpmCjs: '/p/pnpm.cjs',
+        timeoutMs: 20,
+        spawnImpl,
+        stopTree: async ({ rootPid }) => {
+          stopped.push(rootPid)
+          resolveExit(143)
+        },
+      }),
+    ).rejects.toThrow('安装超时')
+    expect(stopped).toEqual([777])
+  })
+
+  test('取消（#97）：cancel 中止安装、落 cancelled 终态、不报错也不记账', async () => {
+    const recorded: string[] = []
+    let abortedSeen = false
+    const downloader = createRuntimeDownloader({
+      install: async (version, _onProgress, signal) => {
+        await new Promise<never>((_resolve, reject) => {
+          // cancel() 必须 abort 传进来的那个 signal（面板点的取消要真的传到安装里）
+          signal.addEventListener('abort', () => {
+            abortedSeen = true
+            reject(new RuntimeInstallCancelledError(version))
+          })
+        })
+      },
+      record: (version) => recorded.push(version),
+    })
+    const pending = downloader.start('0.2.1-alpha.3', 'github')
+    const settled = pending.then(
+      () => 'resolved',
+      (error: unknown) => error,
+    )
+    expect(downloader.status().active).toBe(true)
+    await expect(downloader.cancel()).resolves.toEqual({ cancelled: true, version: '0.2.1-alpha.3' })
+    expect(await settled).toBeInstanceOf(RuntimeInstallCancelledError)
+    const status = downloader.status()
+    expect(status.active).toBe(false)
+    expect(status.cancelled).toBe(true)
+    // 取消不是失败：error 必须空着，面板才不会弹红色失败文案
+    expect(status.error).toBe('')
+    expect(recorded).toEqual([])
+    expect(abortedSeen).toBe(true)
+    // 幂等：没有任务时再点一次取消是 no-op（面板连点两次不报错）
+    await expect(downloader.cancel()).resolves.toEqual({ cancelled: false, version: '' })
+  })
+
+  test('取消（#97）：取消后单飞状态复位，同版本可以立刻重下', async () => {
+    let attempt = 0
+    const downloader = createRuntimeDownloader({
+      install: async (_version, _onProgress, signal) => {
+        attempt += 1
+        if (attempt > 1) return
+        await new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            reject(new RuntimeInstallCancelledError('0.2.1-alpha.3'))
+          })
+        })
+      },
+      record: () => {},
+    })
+    const first = downloader.start('0.2.1-alpha.3', 'github')
+    const settled = first.then(
+      () => 'resolved',
+      (error: unknown) => error,
+    )
+    await downloader.cancel()
+    expect(await settled).toBeInstanceOf(RuntimeInstallCancelledError)
+    await expect(downloader.start('0.2.1-alpha.3', 'github')).resolves.toEqual({ ok: true, version: '0.2.1-alpha.3' })
+    expect(attempt).toBe(2)
+    expect(downloader.status().active).toBe(false)
+    expect(downloader.status().cancelled).toBe(false)
   })
 })

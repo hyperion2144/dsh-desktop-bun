@@ -176,6 +176,8 @@ export interface ShellService {
   downloadStatus: () => RuntimeDownloadStatus
   /** 下载并安装一个运行时（单飞） */
   download: (version: string, source: RuntimeSource) => Promise<{ ok: true; version: string }>
+  /** #97：取消进行中的运行时安装（托盘与面板共用；没有任务是幂等 no-op） */
+  cancelRuntimeDownload: () => Promise<{ cancelled: boolean; version: string }>
   /** 新建 / 迁移 profile（F9：托盘弹框的落点；结果回给弹框展示） */
   profileOp: (request: ProfileOpRequest) => Promise<ProfileOpResult>
   /** profileOp 落地后的回调（create → 开窗，migrate → 刷新托盘）；测试可注入 */
@@ -257,7 +259,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   })
   if (pnpmCjs === null) log('运行时下载：没找到 pnpm.cjs（可用 DSH_SHELL_PNPM 指定），面板点下载会失败')
   const downloader = createRuntimeDownloader({
-    install: async (version, onProgress) => {
+    // #97：signal 是取消信号——面板点取消 → downloader.cancel() abort 它 → installRuntime 树级停树
+    install: async (version, onProgress, signal) => {
       if (pnpmCjs === null) throw new Error('找不到 pnpm.cjs（可用 DSH_SHELL_PNPM 指定内置的那份）')
       const nodeShimDir = ensureNodeShim({
         appSupport: paths.appSupport,
@@ -276,6 +279,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         nodeShimDir,
         env: proxy === null ? undefined : proxyEnvRecord(proxy),
         onProgress,
+        signal,
         onLog: log,
       })
     },
@@ -1014,6 +1018,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log }),
     downloadStatus: () => downloader.status(),
     download: (version, source) => downloader.start(version, source),
+    // #97：托盘与面板共用同一个取消口，取消后两边都从轮询快照看到 cancelled 终态
+    cancelRuntimeDownload: () => downloader.cancel(),
     profileOp: async (request) => {
       if (request.op === 'create') {
         const name = request.target ?? ''
@@ -1186,6 +1192,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       },
       downloadRuntime: (version, source) => downloader.start(version, source),
       downloadStatus: () => downloader.status(),
+      cancelRuntimeDownload: () => downloader.cancel(),
       downloads,
       logPageConsole,
       diagnostics: () => diagnosticsSnapshot(),

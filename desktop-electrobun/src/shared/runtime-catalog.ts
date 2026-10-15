@@ -192,8 +192,14 @@ export function parseCliVersion(text: string): string | null {
 }
 
 /**
- * 选中哪个已下载版本（旧壳语义）：
- * 偏好版本仍装着就用它；否则用装着的最高版本；一个都没有就返回 null（= 回内置兜底）。
+ * 选中哪个运行时版本（#97 维护者定：**设置指哪个就用哪个**）。
+ *
+ * - 偏好版本命中已装目录，或**就是随包内置的版本号** → 用它（内置那棵直接用内置）。
+ * - 偏好为空 / 偏好当前拿不到（未装成、已卸载，且与内置版本不同）→ 返回 null，
+ *   交由调用方回随包内置兜底。
+ *
+ * 刻意**没有**「否则用已装最高版本」这一层：设置没点名却自动爬到已装最高，等于替用户改了选择
+ *（报告人原话：.2 明明是内置的，为什么要去已装目录找，还回退到 .1）。
  */
 export function selectRuntimeVersion(input: {
   installed: readonly string[]
@@ -202,9 +208,10 @@ export function selectRuntimeVersion(input: {
 }): string | null {
   const installed = input.installed.filter(isRuntimeVersion)
   const preferred = input.preferred ?? null
-  if (preferred !== null && preferred !== '' && installed.includes(preferred)) return preferred
-  const sorted = sortRuntimeVersionsDesc(installed)
-  return sorted[0] ?? null
+  const builtin = input.builtin ?? null
+  const preferredIsBuiltin = builtin !== null && builtin !== '' && preferred === builtin
+  if (preferred !== null && preferred !== '' && (installed.includes(preferred) || preferredIsBuiltin)) return preferred
+  return null
 }
 
 /** 已安装版本行（设置面板的 installed 数组）：清单为准、目录扫描补漏。 */

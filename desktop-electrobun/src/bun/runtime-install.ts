@@ -14,7 +14,19 @@ import { delimiter, join } from 'node:path'
 import { NPM_PACKAGE, isRuntimeVersion } from '../shared/runtime-catalog.ts'
 import { runtimeNpmrc, runtimeWorkspaceYaml } from '../shared/profile-template.ts'
 import { isRuntimeTreeValid, runtimeDirOf, runtimesDir } from './runtime-store.ts'
+import { createPlatformProbe, stopProcessTree } from './process-tree.ts'
 
+
+/**
+ * 用户取消安装（#97）——**独立终态，不是失败**：面板据此显示中性「已取消」而不是红色失败，
+ * 也不会回落成「安装失败（exit -15）」那种吓人的报错文案。
+ */
+export class RuntimeInstallCancelledError extends Error {
+  constructor(version: string) {
+    super(`dsh ${version} 安装已取消`)
+    this.name = 'RuntimeInstallCancelledError'
+  }
+}
 export const INSTALL_TIMEOUT_MS = 15 * 60_000
 /** 失败报错里保留的输出行数（旧壳同口径：stderr 去噪后截尾 12 行） */
 export const OUTPUT_TAIL_LINES = 12
@@ -215,7 +227,11 @@ export interface InstallRuntimeInput {
   timeoutMs?: number
   onProgress?: (progress: PnpmProgress) => void
   onLog?: (line: string) => void
-  spawnImpl?: (command: string[], options: Record<string, unknown>) => { exited: Promise<number>; stdout?: unknown; stderr?: unknown; kill?: () => void }
+  /** #97：取消信号。到达后树级停止安装进程树 + 清半成品，并以 RuntimeInstallCancelledError 收场 */
+  signal?: AbortSignal
+  /** #97：树级停止实现（默认 process-tree.stopProcessTree；单测注入假实现，不真杀进程） */
+  stopTree?: (input: { rootPid: number; rootExited: Promise<number> }) => Promise<void>
+  spawnImpl?: (command: string[], options: Record<string, unknown>) => { exited: Promise<number>; stdout?: unknown; stderr?: unknown; kill?: () => void; pid?: number }
 }
 
 /**
@@ -255,6 +271,47 @@ export async function installRuntime(input: InstallRuntimeInput): Promise<void> 
     stdout?: ReadableStream<Uint8Array> | null
     stderr?: ReadableStream<Uint8Array> | null
     kill?: () => void
+    pid?: number
+  }
+
+  // #97：取消与超时都走**树级**停止。安装进程是 pnpm，再往下是它的构建/lifecycle 子进程，那些
+  // 子进程继承着 stdout/stderr 的写端——只杀直接子进程，管道迟迟等不到 EOF，installRuntime 就
+  // 永远不 settle，面板进度条也就永久转圈（与「装完了却一直转圈」同一个病根）。仓里已有
+  // process-tree 的树级停止（#60），这里接上；单测通过 stopTree 注入假实现，不真杀进程。
+  const stopTree =
+    input.stopTree ??
+    (async ({ rootPid, rootExited }): Promise<void> => {
+      await stopProcessTree({
+        rootPid,
+        rootExited,
+        probe: createPlatformProbe(),
+        onLog: (line) => {
+          input.onLog?.(line)
+        },
+      })
+    })
+  const procPid = typeof proc.pid === 'number' ? proc.pid : 0
+  const stopInstallTree = (): void => {
+    if (procPid > 0) {
+      void stopTree({ rootPid: procPid, rootExited: proc.exited }).catch((error: unknown) => {
+        input.onLog?.(`运行时安装：安装进程树停止失败：${error instanceof Error ? error.message : String(error)}`)
+      })
+      return
+    }
+    // 拿不到 pid（自定义 spawnImpl / 平台不给）：退化为停单进程，好过放任它跑完。
+    try {
+      proc.kill?.()
+    } catch {}
+  }
+  let cancelled = false
+  const onAbort = (): void => {
+    cancelled = true
+    stopInstallTree()
+    input.onLog?.(`运行时安装：收到取消信号，正在停止安装进程树（dsh ${input.version}）`)
+  }
+  if (input.signal !== undefined) {
+    if (input.signal.aborted) onAbort()
+    else input.signal.addEventListener('abort', onAbort, { once: true })
   }
 
   let stdoutTail = ''
@@ -263,9 +320,9 @@ export async function installRuntime(input: InstallRuntimeInput): Promise<void> 
   let timedOut = false
   const timer = setTimeout(() => {
     timedOut = true
-    try {
-      proc.kill?.()
-    } catch {}
+    // #97：看门狗同样走树级停止——只杀 pnpm 直接子进程，它的构建/lifecycle 孙进程仍持管道写端，
+    // 状态永远落不下来（进度条永久转圈的同一个病根）。
+    stopInstallTree()
   }, timeoutMs)
   try {
     await Promise.all([
@@ -282,6 +339,12 @@ export async function installRuntime(input: InstallRuntimeInput): Promise<void> 
       }),
     ])
     const code = await proc.exited
+    // #97：取消优先于退出码判读。装完了才收到取消信号（竞态）时 installRuntime 早已 return 成功；
+    // 走到这里说明确实是被取消打断的：清半成品 + 落取消终态，绝不报「安装失败（exit -15）」。
+    if (cancelled) {
+      rmSync(dir, { recursive: true, force: true })
+      throw new RuntimeInstallCancelledError(input.version)
+    }
     if (timedOut) {
       rmSync(dir, { recursive: true, force: true })
       throw new Error(`dsh ${input.version} 安装超时（${Math.round(timeoutMs / 1000)}s）`)
@@ -293,6 +356,7 @@ export async function installRuntime(input: InstallRuntimeInput): Promise<void> 
     }
   } finally {
     clearTimeout(timer)
+    input.signal?.removeEventListener('abort', onAbort)
   }
   if (!isRuntimeTreeValid(dir)) {
     rmSync(dir, { recursive: true, force: true })
@@ -300,7 +364,7 @@ export async function installRuntime(input: InstallRuntimeInput): Promise<void> 
   }
 }
 
-/** 面板轮询读到的下载状态（旧壳 `runtime_download_status` 同形状）。 */
+/** 面板轮询读到的下载状态（旧壳 `runtime_download_status` 同形状 + #97 的 cancelled）。 */
 export interface RuntimeDownloadStatus {
   active: boolean
   version: string
@@ -308,47 +372,75 @@ export interface RuntimeDownloadStatus {
   downloaded: number
   added: number
   error: string
+  /** #97：最近一次任务是**用户取消**（独立终态，≠ 失败）。面板据此显示中性「已取消」+ 可重试，不弹失败红字。 */
+  cancelled: boolean
 }
 
 export interface RuntimeDownloader {
   /** 单飞：已有任务在跑就直接抛「已有运行时下载任务」（旧壳同文案，面板认这个串） */
   start: (version: string, source: string) => Promise<{ ok: true; version: string }>
   status: () => RuntimeDownloadStatus
+  /** #97：取消进行中的安装。幂等——没有任务时是 no-op（面板连点两次不炸也不报错）。 */
+  cancel: () => Promise<{ cancelled: boolean; version: string }>
 }
 
 export interface DownloaderDeps {
-  /** 真正的安装动作（service 里接 installRuntime） */
-  install: (version: string, onProgress: (progress: PnpmProgress) => void) => Promise<void>
+  /** 真正的安装动作（service 里接 installRuntime；第三个参数是取消信号，取消时 install 抛 RuntimeInstallCancelledError） */
+  install: (version: string, onProgress: (progress: PnpmProgress) => void, signal: AbortSignal) => Promise<void>
   /** 装成功后记进 installed.json */
   record: (version: string, source: string) => void
   log?: (line: string) => void
 }
 
 export function createRuntimeDownloader(deps: DownloaderDeps): RuntimeDownloader {
-  let status: RuntimeDownloadStatus = { active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '' }
+  let status: RuntimeDownloadStatus = { active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '', cancelled: false }
+  /** 进行中任务的取消句柄（#97）；null = 当前没有任务 */
+  let inflight: { version: string; controller: AbortController } | null = null
   return {
     status: () => ({ ...status }),
     start: async (version, source) => {
       if (status.active) throw new Error('已有运行时下载任务')
-      status = { active: true, version, resolved: 0, downloaded: 0, added: 0, error: '' }
+      const controller = new AbortController()
+      inflight = { version, controller }
+      status = { active: true, version, resolved: 0, downloaded: 0, added: 0, error: '', cancelled: false }
       try {
-        await deps.install(version, (progress) => {
-          status = { ...status, resolved: progress.resolved, downloaded: progress.downloaded, added: progress.added }
-        })
+        await deps.install(
+          version,
+          (progress) => {
+            status = { ...status, resolved: progress.resolved, downloaded: progress.downloaded, added: progress.added }
+          },
+          controller.signal,
+        )
         deps.record(version, source)
         // #79：成功终态把 downloaded 对齐 resolved——pnpm 的最后一条 Progress 行往往停在下载中段
         // （linking 阶段不再打进度），原样保留就成了「86% 定格」的假活；装成了就是全部拉完。
-        status = { active: false, version, resolved: status.resolved, downloaded: status.resolved, added: status.added, error: '' }
+        status = { active: false, version, resolved: status.resolved, downloaded: status.resolved, added: status.added, error: '', cancelled: false }
         deps.log?.(`运行时安装完成：dsh ${version}（来源 ${source}）`)
         return { ok: true as const, version }
       } catch (error) {
+        // #97：取消是独立终态——error 留空，面板读到 cancelled 才显示「已取消」；失败才带 error。
+        if (controller.signal.aborted || error instanceof RuntimeInstallCancelledError) {
+          status = { active: false, version, resolved: status.resolved, downloaded: status.downloaded, added: status.added, error: '', cancelled: true }
+          deps.log?.(`运行时安装已取消：dsh ${version}`)
+          throw error
+        }
         const message = error instanceof Error ? error.message : String(error)
         // #79：失败终态原样保留最后进度快照 + error——面板靠 error 判定失败、靠数字展示「拉到哪断的」。
-        status = { active: false, version, resolved: status.resolved, downloaded: status.downloaded, added: status.added, error: message }
+        status = { active: false, version, resolved: status.resolved, downloaded: status.downloaded, added: status.added, error: message, cancelled: false }
         deps.log?.(`运行时安装失败：dsh ${version} —— ${message}`)
         throw error
-
+      } finally {
+        inflight = null
       }
+    },
+    cancel: async () => {
+      const task = inflight
+      if (task === null || !status.active) return { cancelled: false, version: '' }
+      deps.log?.(`运行时安装取消中：dsh ${task.version}`)
+      task.controller.abort()
+      // 终态（cancelled 标记 + 半成品清理）由安装收尾路径落状态，面板从轮询快照读到；这里只
+      // 回报「取消已受理」——官方通道 120s 上限会把长回包丢掉，面板不能等这个 Promise 收尾。
+      return { cancelled: true, version: task.version }
     },
   }
 }
