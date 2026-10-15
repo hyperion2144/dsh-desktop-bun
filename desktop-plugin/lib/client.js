@@ -1255,6 +1255,38 @@ function ThemeSelect({ value, options, onChange, placeholder, style, disabled })
   ] });
 }
 
+// src/client/devtools-toggle.ts
+function planDevToolsUi(current, next) {
+  if (current === next) return { action: "idle" };
+  return { action: next ? "confirm-on" : "confirm-off" };
+}
+function devToolsConfirmCopy() {
+  return {
+    title: "\u5F00\u542F\u5F00\u53D1\u8005\u5DE5\u5177\uFF1F",
+    lines: [
+      "\u5F00\u542F\u540E\uFF0C\u684C\u9762\u58F3\u4F1A\u5728\u672C\u673A\u56DE\u73AF\u5730\u5740\u76D1\u542C\u4E00\u4E2A\u8FDC\u7A0B\u8C03\u8BD5\u53E3\uFF0C\u53F3\u952E\u83DC\u5355\u51FA\u73B0\u300C\u6253\u5F00 DevTools\u300D\u3002",
+      "\u672C\u673A\u4E0A\u7684\u4EFB\u4F55\u7A0B\u5E8F\u90FD\u80FD\u501F\u8FD9\u4E2A\u53E3\u5728\u9875\u9762\u91CC\u6267\u884C\u4EFB\u610F\u4EE3\u7801\u3001\u8BFB\u53D6\u4F1A\u8BDD\u5185\u5BB9\uFF08\u542B\u767B\u5F55\u51ED\u636E\uFF09\u3002",
+      "\u53EA\u5728\u81EA\u5DF1\u9700\u8981\u6392\u67E5\u95EE\u9898\u65F6\u5F00\u542F\uFF1B\u7528\u5B8C\u5728\u8BBE\u7F6E\u91CC\u5173\u6389\u5E76\u91CD\u542F\u684C\u9762\u58F3\u3002"
+    ],
+    confirm: "\u786E\u8BA4\u5F00\u542F\u5E76\u91CD\u542F",
+    cancel: "\u53D6\u6D88"
+  };
+}
+function devToolsDisableCopy() {
+  return {
+    title: "\u5173\u95ED\u5F00\u53D1\u8005\u5DE5\u5177\uFF1F",
+    lines: [
+      "\u786E\u8BA4\u540E\u684C\u9762\u58F3\u5C06\u91CD\u542F\uFF1A\u8FDC\u7A0B\u8C03\u8BD5\u53E3\u5173\u95ED\u3001\u53F3\u952E\u83DC\u5355\u300C\u6253\u5F00 DevTools\u300D\u6D88\u5931\u3002",
+      "\u91CD\u542F\u671F\u95F4\u9875\u9762\u4F1A\u77ED\u6682\u4E2D\u65AD\u3002"
+    ],
+    confirm: "\u786E\u8BA4\u5173\u95ED\u5E76\u91CD\u542F",
+    cancel: "\u53D6\u6D88"
+  };
+}
+function devToolsSavedNote(on) {
+  return on ? "\u5DF2\u5F00\u542F\uFF1A\u6B63\u5728\u91CD\u542F\u684C\u9762\u58F3\uFF0C\u91CD\u542F\u540E\u8C03\u8BD5\u53E3\u4E0E\u53F3\u952E\u83DC\u5355\u300C\u6253\u5F00 DevTools\u300D\u751F\u6548\u3002" : "\u5DF2\u5173\u95ED\uFF1A\u6B63\u5728\u91CD\u542F\u684C\u9762\u58F3\uFF0C\u91CD\u542F\u540E\u8C03\u8BD5\u53E3\u5173\u95ED\u3001\u83DC\u5355\u6D88\u5931\u3002";
+}
+
 // src/client/desktop-settings.tsx
 var import_jsx_runtime3 = require("react/jsx-runtime");
 var nsRpc = null;
@@ -1344,6 +1376,30 @@ var INPUT_BASE_STYLE = {
 var INPUT_FULL_STYLE = { ...INPUT_BASE_STYLE, width: "100%", boxSizing: "border-box" };
 var ROW_STYLE = { display: "flex", gap: 8, alignItems: "center" };
 var FLEX_1_STYLE = { flex: 1 };
+var DEV_TOOLS_OVERLAY_STYLE = {
+  position: "fixed",
+  inset: 0,
+  zIndex: 2147483e3,
+  background: "rgba(0,0,0,0.45)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center"
+};
+var DEV_TOOLS_MODAL_STYLE = {
+  background: "var(--dsw-alias-bg-layer-1,#1e1e1e)",
+  border: "1px solid var(--dsw-alias-border-l2,#444)",
+  borderRadius: 12,
+  padding: "18px 20px",
+  minWidth: 320,
+  maxWidth: "80vw",
+  boxShadow: "0 12px 40px rgba(0,0,0,0.4)",
+  color: "var(--dsw-alias-label-primary,#eee)"
+};
+var DEV_TOOLS_TITLE_STYLE = { fontSize: 14, fontWeight: 600, marginBottom: 10 };
+var DEV_TOOLS_BODY_STYLE = { fontSize: 12.5, lineHeight: 1.6, color: "var(--dsw-alias-label-secondary,#bbb)" };
+var DEV_TOOLS_ACTIONS_STYLE = { display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 };
+var DEV_TOOLS_CONFIRM = devToolsConfirmCopy();
+var DEV_TOOLS_DISABLE = devToolsDisableCopy();
 var BTN_PRIMARY_STYLE = {
   background: "var(--dsw-alias-brand-primary-new-color,#4176e6)",
   border: "none",
@@ -1476,14 +1532,40 @@ function DesktopSettingsPanel() {
   const concurrencyTouchedRef = (0, import_react3.useRef)(false);
   const [muxHeartbeatInput, setMuxHeartbeatInput] = (0, import_react3.useState)("30000");
   const [desktopLayoutOnPhones, setDesktopLayoutOnPhones] = (0, import_react3.useState)(false);
+  const [devToolsConfirmKind, setDevToolsConfirmKind] = (0, import_react3.useState)(null);
+  const [devTools, setDevTools] = (0, import_react3.useState)(false);
+  const [devToolsNote, setDevToolsNote] = (0, import_react3.useState)(null);
   const [preventSleep, setPreventSleep] = (0, import_react3.useState)(true);
   const [preventSleepNote, setPreventSleepNote] = (0, import_react3.useState)(null);
   (0, import_react3.useEffect)(() => {
     setDesktopLayoutOnPhones(desktop.desktop_layout_on_phones === true);
     setPreventSleep(desktop.prevent_sleep !== false);
+    setDevTools(desktop.dev_tools === true);
     const hb = desktop.mux_heartbeat_ms;
     setMuxHeartbeatInput(typeof hb === "number" ? String(hb) : "30000");
   }, [desktop]);
+  const handleToggleDevTools = (next) => {
+    const plan = planDevToolsUi(devTools, next);
+    if (plan.action === "idle") return;
+    setDevToolsConfirmKind(plan.action === "confirm-on" ? "on" : "off");
+  };
+  const saveDevToolsSetting = (on) => {
+    setDevToolsConfirmKind(null);
+    setDevTools(on);
+    void nsSave({ dev_tools: on }).then(() => invoke4("restart_dsh_service").catch(() => void 0)).then(() => setDevToolsNote(devToolsSavedNote(on))).catch((e) => {
+      setDevTools(!on);
+      setDevToolsNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`);
+    });
+  };
+  (0, import_react3.useEffect)(() => {
+    if (devToolsConfirmKind === null) return;
+    const onKey = (e) => {
+      if (e.key === "Escape") setDevToolsConfirmKind(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [devToolsConfirmKind]);
+  const devToolsActiveConfirm = devToolsConfirmKind === "off" ? DEV_TOOLS_DISABLE : DEV_TOOLS_CONFIRM;
   const [testResult, setTestResult] = (0, import_react3.useState)(null);
   const [testBusy, setTestBusy] = (0, import_react3.useState)(false);
   const [profilePorts, setProfilePorts] = (0, import_react3.useState)([]);
@@ -2582,6 +2664,30 @@ function DesktopSettingsPanel() {
       ] }) }),
       preventSleepNote && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: preventSleepNote }),
       /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u7184\u5C4F\u540E\u82E5\u8FD8\u6709\u4F1A\u8BDD\u5728\u8DD1\uFF0C\u58F3\u4F1A\u6301\u6709\u7CFB\u7EDF\u9632\u4F11\u7720\u65AD\u8A00\uFF08macOS \u8D70 IOKit\u3001Windows \u8D70\u7EBF\u7A0B\u6267\u884C\u72B6\u6001\uFF09\uFF0C \u76F4\u5230\u4F1A\u8BDD\u8DD1\u5B8C\u3001dsh \u5B9E\u4F8B\u505C\u6B62\u6216\u9000\u51FA\u58F3\u3002\u5C4F\u5E55\u8BE5\u5173\u8FD8\u662F\u7167\u5173\uFF0C\u53EA\u662F\u4E0D\u8BA9\u6574\u673A\u7761\u8FC7\u53BB\uFF1B\u5408\u76D6\u4ECD\u7136\u4F1A\u7761\u3002\u6539\u52A8\u7ACB\u5373\u751F\u6548\u3002" })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u5F00\u53D1\u8005\u5DE5\u5177", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: ROW_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+          "input",
+          {
+            type: "checkbox",
+            "data-desktop-settings": "dev-tools",
+            checked: devTools,
+            onChange: (e) => handleToggleDevTools(e.target.checked)
+          }
+        ),
+        "\u5141\u8BB8\u6253\u5F00 DevTools\uFF08\u6253\u5305\u6001\u9ED8\u8BA4\u5173\uFF1B\u6539\u52A8\u91CD\u542F\u684C\u9762\u58F3\u751F\u6548\uFF09"
+      ] }) }),
+      devToolsNote && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: devToolsNote }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u5F00\u542F\u540E\u684C\u9762\u58F3\u5728\u672C\u673A\u56DE\u73AF\u5730\u5740\u76D1\u542C\u4E00\u4E2A\u8FDC\u7A0B\u8C03\u8BD5\u53E3\uFF0C\u672C\u673A\u4EFB\u610F\u7A0B\u5E8F\u53EF\u501F\u5B83\u5728\u9875\u9762\u91CC\u6267\u884C\u4EE3\u7801\u3002\u53EA\u5728\u81EA\u5DF1\u6392\u67E5\u95EE\u9898\u65F6\u5F00\u542F\uFF0C\u7528\u5B8C\u8BB0\u5F97\u5173\u6389\u5E76\u91CD\u542F\u3002" }),
+      devToolsConfirmKind !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DEV_TOOLS_OVERLAY_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: DEV_TOOLS_MODAL_STYLE, "data-desktop-settings": "dev-tools-confirm", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DEV_TOOLS_TITLE_STYLE, children: devToolsActiveConfirm.title }),
+        devToolsActiveConfirm.lines.map((line) => /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DEV_TOOLS_BODY_STYLE, children: line }, line)),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: DEV_TOOLS_ACTIONS_STYLE, children: [
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: () => setDevToolsConfirmKind(null), children: devToolsActiveConfirm.cancel }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "primary", onClick: () => saveDevToolsSetting(devToolsConfirmKind === "on"), children: devToolsActiveConfirm.confirm })
+        ] })
+      ] }) })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u4EE3\u7406\u8BBE\u7F6E", children: [
       /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: LABEL_STYLE, children: "\u4EE3\u7406\u6A21\u5F0F" }),

@@ -164,6 +164,9 @@ describe('命令表', () => {
       // serializeSettings 写下划线键（旧壳 serde 只认这个，回退到 v0.12.0 时设置不清零）
       expect(settings.prevent_sleep).toBe(true)
       expect(settings.download_concurrency).toBe(3)
+      // #69：显式字段与 settings 段都带 dev_tools（缺省 false）
+      expect(data.dev_tools).toBe(false)
+      expect(settings.dev_tools).toBe(false)
     } finally {
       h.cleanup()
     }
@@ -173,12 +176,14 @@ describe('命令表', () => {
     const h = harness()
     try {
       const result = (await h.table.save_desktop_settings?.({
-        patch: { prevent_sleep: false, download_concurrency: 8 },
+        patch: { prevent_sleep: false, download_concurrency: 8, dev_tools: true },
       })) as Record<string, unknown>
       expect((result.settings as Record<string, unknown>).prevent_sleep).toBe(false)
       const onDisk = loadSettings({ home: h.home }).settings
       expect(onDisk.preventSleep).toBe(false)
       expect(onDisk.downloadConcurrency).toBe(8)
+      expect(onDisk.devTools).toBe(true)
+      expect((result.settings as Record<string, unknown>).dev_tools).toBe(true)
     } finally {
       h.cleanup()
     }
