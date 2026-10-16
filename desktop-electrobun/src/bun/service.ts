@@ -532,7 +532,19 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // remote 视图 token（#47）：铸给 mobile-access 远程命令桥；守护器重启宿主时沿用同一枚
   let remoteViewToken: string | undefined
   let hostInjections: readonly unknown[] = []
+  // #101：boot 载荷是否已可写（applyInjections 声明在前，载荷声明在后；声明前的早期更新只落 hostInjections）
+  let bootPayloadLive = false
   let cookie = ''
+
+  // #101：宿主运行期图重算（插件更新/装卸）会经 HOST-INJECTIONS 通道推送新清单，boot 载荷必须
+  // 跟着刷新——页面每次刷新都从 /__shell__/boot 现取，冻在 ready 快照就是 #101 的死态。
+  // HOST-INJECTIONS 到达即换载荷；远程模式不会收到（无宿主）。bootPayloadLive 守护声明前的
+  // 极窄早期窗口（宿主 ready → 载荷首次填充之间）：更新先落 hostInjections，不会被丢。
+  const applyInjections = (rows: readonly unknown[]): void => {
+    hostInjections = rows
+    if (bootPayloadLive) bootPayload.injections = [...rows]
+    log(`[shell] 注入清单更新：injections = ${String(rows.length)}（宿主图重算，boot 载荷已刷新）`)
+  }
   // 起宿主 + 取 cookie。守护器重启时重复调这个（同一个 cookie 变量与服务面 options）。
   // 设置面板会写盘：内存里也同步一份，免得面板读回来还是旧值（必须先于 connect：connect 里会读）
   let liveSettings = settings
@@ -579,6 +591,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         mode: hostMode,
         env: childEnv,
         onLog: log,
+        onInjections: applyInjections,
         patchFiles,
         upstreamPort,
         shellPagePort: pagePort,
@@ -604,6 +617,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         mode: 'existing',
         env: childEnv,
         onLog: log,
+        onInjections: applyInjections,
         patchFiles,
         upstreamPort,
         shellPagePort: pagePort,
@@ -741,6 +755,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   const server = startShellServer(serverOptions)
   options.onStage?.('server')
   bootPayload.injections = [...hostInjections]
+  // #101：从这里起 boot 载荷可写；applyInjections 在此之前的极窄窗口只更新 hostInjections（不丢）
+  bootPayloadLive = true
   // 手机稳定接入点（旧壳 forwarder.rs #94）：监听遗留 lane 端口（laneForwarderPort > lanePort > 3091），
   // 新连接落本实例的 lane；外部 dsh 占了端口时退场（手机直连它即可）。多实例下只有先起的那份
   // 服务面拿得到转发器（同端口第二绑定必失败），index.ts 的焦点切换会找到它更新目标。

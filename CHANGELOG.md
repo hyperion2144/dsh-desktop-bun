@@ -34,6 +34,7 @@
 - CI 产物断言平台条件化（#84）：`scripts/assert-artifact.mjs` 的渲染器载荷口径改按平台双向核验——mac/linux 仍正断言 CEF 运行时必须存在（缺了即失败），win 改为反向断言（应用树/归档出现 `libcef.dll`、`chrome_elf.dll` 即策略回归/包体回胖）；build.yml 的产物断言行名与注释同步平台化。
 
 ### Fixed
+- 插件更新后不重启刷新页面不再卡「Loading plugins」：boot 载荷随宿主插件图变化即时刷新，boot 失败给出可重试的失败界面（#101）。
 - macOS 交付物 DMG 打开报「已损坏」（#95）：CI 里 `hutch electrobun build` 先打出 .app 与 `artifacts/*.dmg`，之后 `sign:app` 只重签 build/ 下那份 .app——上传的 DMG 里始终是签名前副本（bundle 无 `_CodeSignature`，arm64 直接判「已损坏」，与本机 Gatekeeper 允许任何来源无关）。sign-app.mjs 签名后改用 `ditto` + `hdiutil` 以签名后的 .app 重打 `artifacts/*.dmg`（保留 /Applications 拖放入口），覆盖前只读挂载复核 DMG 内 app 的 `codesign --verify`，复核失败非零退出（宁可 CI 红也不发坏包）；本地无 `artifacts/*.dmg` 时跳过。
 
 - 最大化后最小化再从任务栏恢复，窗口高度超出屏幕顶部（#80）：壳窗 titleBarStyle=hiddenInset 在 Windows 上带 WS_THICKFRAME（上游 PR#363 实装），无标题栏 + THICKFRAME 窗在「最大化→最小化→恢复」往返被系统按隐形缩放边框做落位外扩补偿（同 Chromium/Electron 须接 WM_NCCALCSIZE 的一族问题；首次 SW_MAXIMIZE 与恢复重摆走不同 placement 路径，故只在恢复后现形）；WM_NCCALCSIZE 在预编译原生层，仓内不可改（上游 #417 关闭未合、#558 仍开）。按维护者拍板「拒绝一切自绘窗口尺寸，走原生 API，不做自绘兜底」：只读自检——IsZoomed 为真但帧相对所在显示器工作区外扩超容差（GetWindowRect 与 GetMonitorInfo 均只读）即判定落位损坏，纯原生 unmaximize()+maximize() 让 Windows 重算落位（与首次最大化同一条已验证路径，零自算坐标）；Win+方向键半屏贴靠 IsZoomed=false 天然不触发。同指令删除 #50 时代的手动最大化兜底链（toggleMaximize 的 restoreFrame 记忆与 setFrame 摆位、ShellRpcWindow.setFrame 面），三键在任何情况下只走「样式位补丁 + 原生 maximize/unmaximize」，补丁失败的机器直接原生最大化（不再自绘兜底）。实机复验发现落位外扩在恢复动画定格后才成形，focus 当拍检查常扑空：heal 触发面扩为 focus + resize（去抖 250ms 共用计时器）+ focus 后 350ms 延迟复查；每次判定都落日志（帧/工作区/结论，workArea 取不到也留痕），实机排查有据可查。
