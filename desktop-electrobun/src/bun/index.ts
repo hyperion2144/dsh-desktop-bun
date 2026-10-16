@@ -1281,6 +1281,15 @@ const instance = acquireInstance(instanceFile, instanceProfile, {
   // 接班窗口的兜底：即便上面的等待超时了，也不把刚退未退净的旧实例当成「已有实例」。
   ...(relaunchParent === null ? {} : { succeedsPid: relaunchParent }),
 })
+// #123：抢到实例位 ≠ 锁写下来了。写不下来时按维护者拍板的 A 口径——fail-open + 明说：
+// 照常启动（一次 IO 抖动不该让用户打不开应用），但把「单实例保护不可用」写进日志。
+// 以前这里是彻底无声：应用看起来一切正常，第二个实例却能再起一份壳。
+if (instance.lockError !== null) {
+  console.warn(
+    `[shell] 单实例保护不可用：实例位没记下来（${instance.lockError}）。本次照常启动，但再开一个可能起两份。` +
+      `锁文件：${instanceFile}`,
+  )
+}
 const skipSingleton = (process.env.DSH_DESKTOP_NO_SINGLETON ?? '') !== ''
 if (!instance.acquired && !skipSingleton) {
   const previous = instance.previous

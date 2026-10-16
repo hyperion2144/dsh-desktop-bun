@@ -7,7 +7,8 @@
 // 流程：启动时 acquire；失败 ⇒ POST 已有实例的 /__shell__/activate（走它自己的 loopback 服务面，
 // 不占端口、不起宿主），然后本进程退出。origin 要等服务面起来才知道，所以先登记 pid，就绪后再回填。
 
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 
 /** 壳自答端点：请已有实例把窗口带到前台（POST，无 token） */
 export const ACTIVATE_PATH = '/__shell__/activate'
@@ -111,6 +112,15 @@ export interface AcquireResult {
   acquired: boolean
   previous: InstanceRecord | null
   record: InstanceRecord
+  /**
+   * #123：锁**写不下来**时的原因（null = 写成了）。
+   *
+   * 与 `acquired` 正交，别混：`acquired` 回答的是「有没有另一个活着的实例要我把位子让给它」，
+   * 这里回答的是「我自己这份记不记得下来」。写失败时 `acquired` 仍是 true（本进程确实是唯一实例，
+   * 没有谁要抢），但单实例保护实际上**没生效**——把这两件事混成一个字段，
+   * 调用方就会在没有实例可激活的情况下去走「激活已有实例」那条路。
+   */
+  lockError: string | null
 }
 
 export function readInstance(file: string): InstanceRecord | null {
@@ -122,10 +132,26 @@ export function readInstance(file: string): InstanceRecord | null {
   }
 }
 
-export function writeInstance(file: string, record: InstanceRecord): void {
+/** 写锁文件的成败。#123：以前失败是 `catch {}` 吞掉的，现在如实回报。 */
+export interface WriteInstanceOutcome {
+  ok: boolean
+  /** ok=false 时的原因（人话，直接进日志） */
+  error: string | null
+}
+
+/**
+ * 写锁文件。建目录是这一层自己的责任：应用支持目录不归壳里任何别的模块管，
+ * 全仓唯一给它 mkdir 的地方是插件物化（晚于抢锁），干净机器上的首次启动就会扑空。
+ * 照仓内既有约定（diagnostics / log-sink / notifications / keybindings / profile-manager）一律 mkdir。
+ */
+export function writeInstance(file: string, record: InstanceRecord): WriteInstanceOutcome {
   try {
+    mkdirSync(dirname(file), { recursive: true })
     writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`)
-  } catch {}
+    return { ok: true, error: null }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 /**
@@ -160,11 +186,13 @@ export function acquireInstance(
   if (existing !== null && existing.pid !== pid && existing.pid !== succeedsPid && isAlive(existing.pid)) {
     const sameBoot = bootId === '' || existing.bootId === '' || existing.bootId === bootId
     if (sameBoot && isOurProcess(existing.pid)) {
-      return { acquired: false, previous: existing, record: existing }
+      return { acquired: false, previous: existing, record: existing, lockError: null }
     }
   }
-  writeInstance(file, mine)
-  return { acquired: true, previous: existing, record: mine }
+  const written = writeInstance(file, mine)
+  // #123：写失败也要把事实带走。以前这里是 `writeInstance(...)` 然后无条件 acquired=true，
+  // 等于把「没写成」说成「拿到了」——单实例保护静默失效，日志里一个字都没有。
+  return { acquired: true, previous: existing, record: mine, lockError: written.error }
 }
 
 /** 服务面就绪后回填 origin/页面 URL（第二个实例据此激活本实例）。 */
@@ -175,7 +203,10 @@ export function updateInstance(
 ): void {
   const current = readInstance(file)
   if (current === null || current.pid !== pid) return
-  writeInstance(file, { ...current, ...patch })
+  // #123：这里刻意不把 writeInstance 的成败升级成错误。抢锁时已经把目录建出来了，本函数只是往
+  // 已存在的锁上补 origin/pageUrl；补不上的话单实例仍在本进程手里（锁是自己写的），只是第二个
+  // 实例拿不到 activate 地址。为此加回读重试属于过度设计，不做。
+  void writeInstance(file, { ...current, ...patch })
 }
 
 /**
