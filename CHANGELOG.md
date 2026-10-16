@@ -38,6 +38,7 @@
 - Windows/Linux 右侧边栏经会话链接触发打开时间隔未生效（#112）：标题栏带改走官方声明式适配并上收壳 preload——壳给 <html> 打 data-windows-titlebar + --dsh-windows-titlebar-height（40px，对齐官方常量），host AppFrame CSS 结构性压下整帧并给右栏 panel 留出间隔（不再依赖插件 JS 观察器补 inline top，链接触发的首次挂载不再落盲区）；标题栏拖拽带与窗口三键随之上收壳 preload 注入（POST /__shell__/window 动作、GET 查最大化态，不依赖 dsh 页面与插件状态），插件退役 win32/linux 顶部 chrome（inline top 补丁、自绘三键及其样式与 RPC 面全部移除），darwin 系统红绿灯路径零变化。
 - Windows 系统通知改以应用名与应用图标显示（#107）：启动时 shell32 声明进程 AUMID 并注册 HKCU 通知身份（显示名 + 图标），失败降级不阻断启动。
 - 插件更新后不重启刷新页面不再卡「Loading plugins」：boot 载荷随宿主插件图变化即时刷新，boot 失败给出可重试的失败界面（#101）。
+- 设置里的开发者工具开关「保存即重启」实际不生效，调试口要手动重启桌面壳才开（#119）：开关的决策（探测 9333、C environ 双写）锁在壳进程加载那一刻，而保存后调的是 `restart_dsh_service`——只重起 DSH 树、壳不动，于是决策永不重跑，文案与实现长期背离。改为新命令 `restart_desktop_app`（整应用退出 + 自动拉起自身可执行文件；Electrobun 2.0.2 无 relaunch API，走 detached spawn 兜底），新实例经 `DSH_SHELL_RELAUNCH_PID` 认领接班身份、抢单实例锁前等旧壳退干净（`AcquireOptions.succeedsPid` 兜底），避免「激活旧实例后一起退、净结果什么都没起来」。保存前重探一次调试口并把结果带进通知。右键菜单的「开发者工具」勾选态改实时读设置，不必等重启（#119 C）。拉不起来时**不静默失败也不假装成功**：dev 构建与探测不到 launcher 各有可读原因，直接透到设置面板提示。
 - 自定义通知音在 Windows/Linux 真的出声；试听不再假报成功，本机没有后端的格式在面板里禁用并写明原因（#74）。
 - Windows 的「系统默认提示音」试听改为显式播系统自带 wav，不再「日志说成功、耳朵里没声」（#74）。
 - Windows/Linux 的通知本身不再无声：档位是「系统默认音」时由壳自己播系统提示音（壳确实放得出这一声时才让通知自身静音），macOS 仍交给系统通知（#74）。

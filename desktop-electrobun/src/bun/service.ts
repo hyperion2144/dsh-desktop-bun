@@ -99,6 +99,8 @@ export interface ServiceOptions {
   onHostGiveUp?: (state: ShellState, reason: string) => void
   /** #60：手动「重启 dsh 服务」= DSH 树级完整重启（宿主+伴生树灭后全新拉起，壳/窗口不动）；缺省回落宿主级 restartHost（无窗口/测试） */
   onFullRestart?: () => Promise<void>
+  /** #119：整应用退出 + 自动重启（B）。拉不起时带原因回传（dev 态显式降级），不抛给页面。 */
+  onRestartApp?: () => Promise<{ ok: boolean; reason?: string; message?: string }>
   /** F9：托盘弹框的 profile 新建/迁移落地后（create → 开窗，migrate → 刷新托盘） */
   onProfileOpApplied?: (op: 'create' | 'migrate', profile: string) => void
   /** F12：页面内确认弹窗的回填（壳主进程的 pending-input 单槽） */
@@ -1278,6 +1280,15 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
           return
         }
         await service.restartHost()
+      },
+      // #119：整应用重启与「重启 dsh 服务」是两条路。壳没这个能力（无窗口模式/测试）时如实报不可用，
+      // 不静默回落成 restartHost——那正是本票要修的那个「以为重启了其实没重跑」的假象。
+      restartApp: async () => {
+        if (options.onRestartApp === undefined) {
+          log('[shell] 重启桌面应用：当前无壳层入口（无窗口模式），未执行')
+          return { ok: false, reason: 'unavailable', message: '当前运行模式不支持自动重启桌面应用，请手动重启。' }
+        }
+        return options.onRestartApp()
       },
       status: () => ({ ...state }),
       ports: () => ({ port: pagePort, upstreamPort, lanePort }),
