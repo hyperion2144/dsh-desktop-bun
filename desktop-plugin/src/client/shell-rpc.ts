@@ -20,8 +20,6 @@
 
 /** 壳 RPC 端点（与壳侧 tauri-ipc 时代的常量同名同值；现仅作 fetch 兜底用）。 */
 const RPC_ENDPOINT = '/__shell__/rpc'
-/** 自绘窗口三键端点（A5）：不在命令表里，官方通道用 window_* 方法，兜底走它。 */
-const WINDOW_ENDPOINT = '/__shell__/window'
 /** 每视图 token 请求头（壳侧 shared/view-grant.ts 的同名常量；跨包复制，注释互指）。 */
 const VIEW_TOKEN_HEADER = 'x-dsh-shell-view'
 /** 官方默认单请求超时：官方 createRPC 的默认值是 1000ms，对文件选择器太紧。 */
@@ -222,26 +220,3 @@ export function createShellRpc(deps?: Partial<ShellRpcDeps>): ShellRpcClient {
 /** 页面级单例（浏览器 globalThis 即 window；测试可 createShellRpc 注入假环境）。 */
 export const shellRpc = createShellRpc()
 
-export type WindowAction = 'minimize' | 'toggle-maximize' | 'close'
-
-/** 窗口三键（A5）：官方 RPC 的 window_* 方法优先，桥不在时回 /__shell__/window 兜底。 */
-export async function sendWindowAction(
-  action: WindowAction,
-  deps?: { rpc?: ShellRpcClient; fetchImpl?: typeof fetch; readGlobals?: () => ShellRpcGlobals },
-): Promise<void> {
-  const method = { minimize: 'window_minimize', 'toggle-maximize': 'window_toggle_maximize', close: 'window_close' }[action]
-  const rpc = deps?.rpc ?? shellRpc
-  const readGlobals = deps?.readGlobals ?? (() => globalThis as unknown as ShellRpcGlobals)
-  if (typeof readGlobals().__electrobunHostBridge?.postMessage === 'function') {
-    await rpc.invoke(method, {}, { timeoutMs: 30_000 })
-    return
-  }
-  const fetchImpl = deps?.fetchImpl ?? ((...a: Parameters<typeof fetch>) => fetch(...a))
-  const token = readGlobals().__DSH_SHELL_VIEW_TOKEN__
-  const response = await fetchImpl(WINDOW_ENDPOINT, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...(typeof token === 'string' && token !== '' ? { [VIEW_TOKEN_HEADER]: token } : {}) },
-    body: JSON.stringify({ action }),
-  })
-  if (!response.ok) throw new Error(`window action failed: ${String(response.status)}`)
-}

@@ -34,6 +34,7 @@
 - CI 产物断言平台条件化（#84）：`scripts/assert-artifact.mjs` 的渲染器载荷口径改按平台双向核验——mac/linux 仍正断言 CEF 运行时必须存在（缺了即失败），win 改为反向断言（应用树/归档出现 `libcef.dll`、`chrome_elf.dll` 即策略回归/包体回胖）；build.yml 的产物断言行名与注释同步平台化。
 
 ### Fixed
+- Windows/Linux 右侧边栏经会话链接触发打开时间隔未生效（#112）：标题栏带改走官方声明式适配并上收壳 preload——壳给 <html> 打 data-windows-titlebar + --dsh-windows-titlebar-height（40px，对齐官方常量），host AppFrame CSS 结构性压下整帧并给右栏 panel 留出间隔（不再依赖插件 JS 观察器补 inline top，链接触发的首次挂载不再落盲区）；标题栏拖拽带与窗口三键随之上收壳 preload 注入（POST /__shell__/window 动作、GET 查最大化态，不依赖 dsh 页面与插件状态），插件退役 win32/linux 顶部 chrome（inline top 补丁、自绘三键及其样式与 RPC 面全部移除），darwin 系统红绿灯路径零变化。
 - Windows 系统通知改以应用名与应用图标显示（#107）：启动时 shell32 声明进程 AUMID 并注册 HKCU 通知身份（显示名 + 图标），失败降级不阻断启动。
 - 插件更新后不重启刷新页面不再卡「Loading plugins」：boot 载荷随宿主插件图变化即时刷新，boot 失败给出可重试的失败界面（#101）。
 - macOS 交付物 DMG 打开报「已损坏」（#95）：CI 里 `hutch electrobun build` 先打出 .app 与 `artifacts/*.dmg`，之后 `sign:app` 只重签 build/ 下那份 .app——上传的 DMG 里始终是签名前副本（bundle 无 `_CodeSignature`，arm64 直接判「已损坏」，与本机 Gatekeeper 允许任何来源无关）。sign-app.mjs 签名后改用 `ditto` + `hdiutil` 以签名后的 .app 重打 `artifacts/*.dmg`（保留 /Applications 拖放入口），覆盖前只读挂载复核 DMG 内 app 的 `codesign --verify`，复核失败非零退出（宁可 CI 红也不发坏包）；本地无 `artifacts/*.dmg` 时跳过。
