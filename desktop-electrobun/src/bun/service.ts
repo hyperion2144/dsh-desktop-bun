@@ -34,7 +34,7 @@ import { createArbiter } from '../shared/power-arbiter.ts'
 import { proxyEnvRecord, resolveProxyEnv } from '../shared/proxy-env.ts'
 import { detectSystemProxy } from './system-proxy.ts'
 import type { ProxyEnv } from '../shared/proxy-env.ts'
-import { createKeepAwake } from './keep-awake.ts'
+import { createKeepAwake, syncPreventSleep } from './keep-awake.ts'
 import { startNotifyServer } from './notify-server.ts'
 import { createNotifier, importSound as importSoundFile, type Notifier } from './notifications.ts'
 import { systemDefaultSoundCommand } from './sound-playback.ts'
@@ -490,7 +490,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onLog: log,
   })
   const keepAwake = createKeepAwake({ arbiter, log })
-  if (settings.preventSleep) keepAwake.start()
+  if (settings.preventSleep ?? true) keepAwake.start()
   else log('防休眠：设置里已关闭（prevent_sleep = false）')
 
   // ---- 通知：决策在 notify-policy，这里只做「场景 → 投递」与宿主事件映射 ----
@@ -725,6 +725,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     chooseDirectory: options.chooseDownloadDir,
     concurrency: liveSettings.downloadConcurrency,
     saveConcurrency: (value) => {
+      // 注意：这条写路径绕过 saveSettings——新增「需即时生效」的开关键必须改走 saveSettings，否则壳侧裁决器/循环不同步。
       liveSettings = updateSettings(home, { download_concurrency: value }, log)
     },
     cookieFor: (url) => {
@@ -1030,6 +1031,10 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     state.settings = liveSettings
     state.settingsProvenance = { created: false, migrated: false, recovered: false }
     void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
+    // 面板承诺「改动立即生效」，这里兑现（#186 遗留）：prevent_sleep 不能只在启动时读一次。
+    // 放在状态文件写入之后：平台断言这条路径万一抛错（darwin 分支没有 try/catch）也不拖累落盘。
+    // `?? true` 与 createArbiter 的缺省一致（settings 已归一化，这里只是给类型收口）。
+    syncPreventSleep(liveSettings.preventSleep ?? true, { arbiter, keepAwake })
     return liveSettings
   }
 
@@ -1260,6 +1265,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       home,
       profile: () => paths.profile,
       platform: options.platform ?? process.platform,
+      // #75：Linux 防休眠通道的能力快照（面板可见；拿不到通道时不静默）
+      keepAwake: () => keepAwake.capability(),
       log,
       settings: () => liveSettings,
       save: saveSettings,
