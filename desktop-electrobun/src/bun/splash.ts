@@ -56,7 +56,7 @@ export function splashHtml(): string {
   <div class="stage" id="stage">正在启动…</div>
   <div class="track"><div class="bar" id="bar"></div></div>
   <div class="error" id="error"></div>
-  <div class="hint" id="hint">可退出后重试；日志在 ~/.dsh/shell.log</div>
+  <div class="hint" id="hint">托盘已就绪：可在托盘里换运行时版本或退出；日志在 ~/.dsh/shell.log</div>
   <script>
     window.__dshSplash = {
       stage: function (text, percent) {
