@@ -95,6 +95,16 @@ void dsh_un_start(void) {
 	});
 }
 
+/**
+ * 只刷状态（不申请）：系统设置里的授权开关变化要能被运行中的面板看到，
+ * 否则 g_status 从启动起就是陈旧值（#115 实测：面板永远显示旧状态，重启才可见）。
+ * 异步派发，不阻塞 JS 线程；结果由后续的 dsh_un_status() 读到。
+ */
+void dsh_un_refresh(void) {
+	if (missing_bundle_identity()) { atomic_store(&g_lastError, -1); return; }
+	ensure_queue();
+	dispatch_async(g_queue, ^{ refresh_status(); });
+}
 /** 只读状态：0 未知，1 未决定，2 已拒绝，3 已授权。 */
 int dsh_un_status(void) { return atomic_load(&g_status); }
 

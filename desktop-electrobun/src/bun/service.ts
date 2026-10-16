@@ -44,7 +44,8 @@ import type { GuestCommands } from './guest-manager.ts'
 import { createUpdater, type ShellUpdater } from './updater.ts'
 import { permissionHint, permissionLabel } from '../shared/notify-permission.ts'
 import { NOTIFY_TYPE_SCENARIOS, SCENARIO } from '../shared/notify-policy.ts'
-import { activeProfile, profileLanePort, profilePort, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
+import { resolveBundleIdentifier } from '../shared/app-identity.ts'
+import { activeProfile, changedPortKeys, profileLanePort, profilePort, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
 import { createCommandTable, type RuntimeSnapshot } from './commands.ts'
 import { createRpcRouter, dispatchRpc, type RpcRouter } from './rpc.ts'
 import { updateSettings } from './settings-store.ts'
@@ -69,7 +70,7 @@ import {
   recordInstalledRuntime,
   trashInstalledRuntime,
 } from './runtime-store.ts'
-import { createRuntimeDownloader, ensureNodeShim, ensureShimDir, installRuntime, resolvePnpmCjs } from './runtime-install.ts'
+import { createRuntimeDownloader, ensureNodeShim, ensureShimDir, installRuntime, resolvePnpmCjs, withRuntimeDownloadNotify } from './runtime-install.ts'
 
 
 /** #117：服务面自己管 DSH 的判别位（ShellState.status 取这个联合）。 */
@@ -111,6 +112,8 @@ export interface ServiceOptions {
   onActivate?: () => void
   /** 自绘窗口控制（A5）：页面三键 → 主进程操作 BrowserWindow */
   onWindowControl?: (action: 'minimize' | 'toggle-maximize' | 'close') => void
+  /** 该 profile 的窗口是否在前台聚焦（#115：聚焦 → 通知整条不投递；无窗口/测试可不给） */
+  isWindowFocused?: (profile: string) => boolean
   /** 最大化态读取（#112 壳层标题栏带）：GET /__shell__/window 回 { maximized }；缺省时 GET 仍 405 */
   onWindowState?: () => WindowMaxState
   onLog?: (line: string) => void
@@ -318,6 +321,13 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     log,
   })
 
+  // 运行时下载的唯一通知出口（#115 收全通知面）：托盘（service.download）与面板（download_runtime）
+  // 两条路都汇到这里的包装——成功/失败发 SCENARIO.RUNTIME_DOWNLOAD（取消不发），调用方不重复发。
+  const downloadRuntimeNotified = withRuntimeDownloadNotify((version, source) => downloader.start(version, source), {
+    notify: (scenarioId, body) => notifier.notify(scenarioId, body),
+    cancelled: () => downloader.status().cancelled,
+  })
+
   // ---- 宿主 PATH 垫片（#70）：connect 时现算——切运行时/新下载后重连即拿到新 pnpm.cjs；
   // pnpm.cjs 找不到时回 undefined，宿主 PATH 不动（启动不因此失败，插件安装维持旧行为报错）。----
   // hasNode 口径沿用旧通道（探壳进程 PATH；startService 已把 login shell env 并入 process.env）。
@@ -506,6 +516,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       notifications: settings.notifications,
       home,
       onLog: log,
+      isFocused: () => options.isWindowFocused?.(paths.profile) ?? false,
       show: notifyBridge.available
         ? (payload) => {
             const ok = notifyBridge.post({ title: payload.title, body: payload.body, sound: payload.silent !== true })
@@ -1029,7 +1040,13 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
 
   // 写设置的唯一路径：命令表（设置面板）与壳侧（托盘切运行时）都走它
   const saveSettings = (patch: Record<string, unknown>): DesktopSettings => {
+    const before = liveSettings
     liveSettings = updateSettings(home, patch, log)
+    // config.info（端口保存等低危信息）：只有真动了端口键才提示一句，普通保存不打扰。
+    const changedPorts = changedPortKeys(before, liveSettings)
+    if (changedPorts.length > 0) {
+      notifier.notify(SCENARIO.CONFIG_INFO, `端口设置已保存（${changedPorts.join('、')}）；重连服务面后生效。`)
+    }
     state.settings = liveSettings
     state.settingsProvenance = { created: false, migrated: false, recovered: false }
     void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
@@ -1154,7 +1171,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     fetchCatalog: (source) =>
       fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log }),
     downloadStatus: () => downloader.status(),
-    download: (version, source) => downloader.start(version, source),
+    download: downloadRuntimeNotified,
     // #97：托盘与面板共用同一个取消口，取消后两边都从轮询快照看到 cancelled 终态
     cancelRuntimeDownload: () => downloader.cancel(),
     profileOp: async (request) => {
@@ -1168,6 +1185,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
           ? `profile ${name} 已创建；开窗时会自动装依赖树并拉起 dsh。`
           : `profile ${name} 已存在，直接打开即可。`
         options.onProfileOpApplied?.('create', name)
+        if (result.created) notifier.notify(SCENARIO.PROFILE_OP, `profile ${name} 已创建`)
         return { ok: true, message, profile: name }
       }
       // migrate：校验后交给命令表同一条迁移路径（复制依赖树 + pnpm install，长任务）
@@ -1200,9 +1218,12 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
           track: taskTracker,
         })
         options.onProfileOpApplied?.('migrate', target)
+        notifier.notify(SCENARIO.PROFILE_OP, `profile ${target} 迁移完成`)
         return { ok: true, message: summary, profile: target }
       } catch (error) {
-        return { ok: false, message: String(error) }
+        const reason = error instanceof Error ? error.message : String(error)
+        notifier.notify(SCENARIO.PROFILE_ERROR, `profile ${target} 迁移失败：${reason}`)
+        return { ok: false, message: reason }
       }
     },
     onProfileOpApplied: (op, profile) => {
@@ -1267,6 +1288,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       home,
       profile: () => paths.profile,
       platform: options.platform ?? process.platform,
+      bundleId: resolveBundleIdentifier(),
       // #75：Linux 防休眠通道的能力快照（面板可见；拿不到通道时不静默）
       keepAwake: () => keepAwake.capability(),
       log,
@@ -1330,7 +1352,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       removeRuntime: async (version) => {
         trashInstalledRuntime(paths.appSupport, version, log)
       },
-      downloadRuntime: (version, source) => downloader.start(version, source),
+      downloadRuntime: downloadRuntimeNotified,
       downloadStatus: () => downloader.status(),
       cancelRuntimeDownload: () => downloader.cancel(),
       downloads,

@@ -805,6 +805,18 @@ await build({
 })
 const nsui = await import(pathToFileURL(join(tmp, 'notification-sound-ui.mjs')).href)
 
+// #142：被拒绝横幅的 tccutil 提示——id 用当前应用 id，非 darwin 不出 mac 专属提示
+{
+  const denied = nsui.deniedPermissionCopy
+  assert.ok(
+    denied('darwin', 'com.hyperion.dsh-desktop-bun').includes('tccutil reset Notifications com.hyperion.dsh-desktop-bun'),
+    'macOS 被拒绝提示拼当前应用 id'
+  )
+  assert.equal(denied('win32', 'com.x.y'), '通知横幅不会显示。可在系统设置中手动开启。', 'Windows 没有 tccutil')
+  assert.equal(denied('darwin', null).includes('tccutil'), false, 'id 缺失只给系统设置指引')
+  assert.equal(denied(undefined, 'com.x.y').includes('tccutil'), false, '平台未知不出 mac 专属提示')
+}
+
 // 一份「mp3/ogg 没后端」的能力报告（Linux 上没装 paplay/ffmpeg 的真实形状）
 const MP3_REASON = 'PATH 上找不到能播 .mp3 的播放器（paplay / pw-play / ffplay / mpg123）'
 const OGG_REASON = '系统自带播放器不认 Ogg Vorbis：装上 ffmpeg（提供 ffplay）后才能播'
@@ -990,5 +1002,37 @@ for (const token of ['macOS', 'Windows', 'Linux']) {
   assert.ok(kaUnknown.text.includes(token), `未知 backend 回退通用说明（含 ${token}）`)
 }
 
+
+
+// ── notification-focus-hint（#115）：窗口在前台聚焦时不投递通知的说明文案 ──
+await build({
+  entryPoints: [join(root, 'src/client/notification-focus-hint.ts')],
+  outfile: join(tmp, 'notification-focus-hint.mjs'),
+  format: 'esm',
+  platform: 'node',
+  bundle: true,
+  target: 'node20',
+  logLevel: 'silent',
+})
+const focusHint = await import(pathToFileURL(join(tmp, 'notification-focus-hint.mjs')).href)
+
+const focusText = focusHint.focusSuppressHint()
+assert.ok(focusText.length > 0, '说明文案非空')
+assert.ok(focusText.includes('前台聚焦') && focusText.includes('不弹通知'), '说清「前台聚焦时不弹通知」')
+assert.ok(focusText.includes('失焦') && focusText.includes('最小化'), '说清失焦/最小化后照常')
+assert.ok(focusText.includes('不可配置'), '点明是固定策略（别让用户去找开关）')
+for (const word of ['可以关闭', '可关闭', '可以关掉', '开关']) {
+  assert.ok(!focusText.includes(word), `不写成可配置项（不含「${word}」）`)
+}
+for (const word of ['平台', 'win32', 'Windows', 'linux', 'Linux', 'macOS', 'darwin']) {
+  assert.ok(!focusText.includes(word), `平台无关（不含「${word}」）`)
+}
+assert.ok(!focusText.includes('\n'), '一句话粒度（不含换行）')
+assert.ok(focusText.length <= 60, '一句话粒度（≤60 字）')
+assert.equal(focusHint.focusSuppressHint(), focusText, '纯函数：同输入同输出')
+
+// 源码级接线门禁：文案必须真的画进通知页（#115）
+const focusTabSource = readFileSync(join(root, 'src/client/notifications-tab.tsx'), 'utf8')
+assert.ok(focusTabSource.includes('{focusSuppressHint()}'), '说明文案画进通知页（#115 接线）')
 rmSync(tmp, { recursive: true, force: true })
 console.log('client 纯函数测试：全部通过 ✓')

@@ -197,3 +197,16 @@ export function permissionUnavailableCopy(platform: unknown): PermissionUnavaila
   }
   return { chip: UNAVAILABLE_CHIP, neutral: false, text: UNAVAILABLE_MACOS_TEXT }
 }
+
+/**
+ * `permission === 'denied'` 横幅的文案（平台感知，#142）：
+ * · darwin：给 `tccutil reset Notifications <id>` 的重置提示——id 必须用**当前**应用 id
+ *   （app-identity 构建期口径，经 get_notifications_state 下发），不能写死旧壳 id；
+ *   id 拿不到（老壳 / 字段残缺）就只给系统设置指引；
+ * · 其余平台（win32 / linux / 未知）：没有 tccutil 这个工具，绝不出 mac 专属提示。
+ */
+export function deniedPermissionCopy(platform: unknown, bundleId: unknown): string {
+  const base = '通知横幅不会显示。可在系统设置中手动开启。'
+  if (platform !== 'darwin' || typeof bundleId !== 'string' || bundleId.trim() === '') return base
+  return `${base}开发期可执行 tccutil reset Notifications ${bundleId} 后重试。`
+}

@@ -21,6 +21,7 @@ import {
   resolvePnpmCjs,
   shimCmdScript,
   tailLines,
+  withRuntimeDownloadNotify,
 } from '../src/bun/runtime-install.ts'
 import { runtimeDirOf } from '../src/bun/runtime-store.ts'
 
@@ -615,5 +616,47 @@ describe('createRuntimeDownloader', () => {
     expect(attempt).toBe(2)
     expect(downloader.status().active).toBe(false)
     expect(downloader.status().cancelled).toBe(false)
+  })
+})
+
+describe('withRuntimeDownloadNotify：下载入口的通知包装（#115）', () => {
+  const recorder = () => {
+    const notes: Array<[string, string]> = []
+    return { notes, notify: (scenarioId: string, body: string) => void notes.push([scenarioId, body]) }
+  }
+
+  test('成功：发 runtime.download 完成通知并透传结果', async () => {
+    const { notes, notify } = recorder()
+    const wrapped = withRuntimeDownloadNotify(
+      async (version: string) => ({ ok: true as const, version }),
+      { notify, cancelled: () => false },
+    )
+    await expect(wrapped('0.2.1-alpha.4', 'github')).resolves.toEqual({ ok: true, version: '0.2.1-alpha.4' })
+    expect(notes).toEqual([['runtime.download', '运行时安装完成：dsh 0.2.1-alpha.4']])
+  })
+
+  test('失败：发 runtime.download 失败通知（带原因）并原样上抛', async () => {
+    const { notes, notify } = recorder()
+    const boom = new Error('网络断了')
+    const wrapped = withRuntimeDownloadNotify(
+      async () => {
+        throw boom
+      },
+      { notify, cancelled: () => false },
+    )
+    await expect(wrapped('0.2.1-alpha.4', 'github')).rejects.toBe(boom)
+    expect(notes).toEqual([['runtime.download', '运行时安装失败：dsh 0.2.1-alpha.4 —— 网络断了']])
+  })
+
+  test('取消：cancelled() 为真时失败通知不出，仍上抛', async () => {
+    const { notes, notify } = recorder()
+    const wrapped = withRuntimeDownloadNotify(
+      async () => {
+        throw new Error('aborted')
+      },
+      { notify, cancelled: () => true },
+    )
+    await expect(wrapped('0.2.1-alpha.4', 'github')).rejects.toThrow('aborted')
+    expect(notes).toEqual([])
   })
 })

@@ -3078,6 +3078,11 @@ function registerDesktopSettings(ctx) {
 // src/client/notifications-tab.tsx
 var import_react4 = require("react");
 
+// src/client/notification-focus-hint.ts
+function focusSuppressHint() {
+  return "\u5E94\u7528\u7A97\u53E3\u5728\u524D\u53F0\u805A\u7126\u65F6\u4E0D\u5F39\u901A\u77E5\uFF08\u5931\u7126\u3001\u6700\u5C0F\u5316\u540E\u7167\u5E38\uFF09\uFF0C\u8BE5\u7B56\u7565\u56FA\u5B9A\u4E0D\u53EF\u914D\u7F6E\u3002";
+}
+
 // src/client/notification-sound-ui.ts
 var SOUND_EXTENSIONS = ["wav", "mp3", "ogg"];
 var CUSTOM_PREFIX = "custom:";
@@ -3151,6 +3156,11 @@ function permissionUnavailableCopy(platform) {
   }
   return { chip: UNAVAILABLE_CHIP, neutral: false, text: UNAVAILABLE_MACOS_TEXT };
 }
+function deniedPermissionCopy(platform, bundleId) {
+  const base = "\u901A\u77E5\u6A2A\u5E45\u4E0D\u4F1A\u663E\u793A\u3002\u53EF\u5728\u7CFB\u7EDF\u8BBE\u7F6E\u4E2D\u624B\u52A8\u5F00\u542F\u3002";
+  if (platform !== "darwin" || typeof bundleId !== "string" || bundleId.trim() === "") return base;
+  return `${base}\u5F00\u53D1\u671F\u53EF\u6267\u884C tccutil reset Notifications ${bundleId} \u540E\u91CD\u8BD5\u3002`;
+}
 
 // src/client/notifications-tab.tsx
 var import_jsx_runtime4 = require("react/jsx-runtime");
@@ -3217,6 +3227,15 @@ function NotificationSettingsPanel() {
   (0, import_react4.useEffect)(() => {
     refresh();
   }, [refresh]);
+  const refetched = (0, import_react4.useRef)(false);
+  (0, import_react4.useEffect)(() => {
+    if (data === null || refetched.current) return;
+    refetched.current = true;
+    const timer = setTimeout(() => {
+      refresh();
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [data, refresh]);
   const save = (0, import_react4.useCallback)((next) => {
     setBusy(true);
     invoke3("set_notifications_config", { config: next }).catch((e) => {
@@ -3289,7 +3308,7 @@ function NotificationSettingsPanel() {
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "n-btn ghost mini", onClick: openSysPrefs, children: "\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E" })
     ] }) : data.permission === "denied" ? /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-banner denied", children: [
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "n-chip danger", children: "\u88AB\u62D2\u7EDD" }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "grow", children: "\u901A\u77E5\u6A2A\u5E45\u4E0D\u4F1A\u663E\u793A\u3002\u53EF\u5728\u7CFB\u7EDF\u8BBE\u7F6E\u4E2D\u624B\u52A8\u5F00\u542F\uFF1B\u5F00\u53D1\u671F\u53EF\u6267\u884C tccutil reset Notifications com.arcreel.dsh-desktop-tauriapp \u540E\u91CD\u8BD5\u3002" }),
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "grow", children: deniedPermissionCopy(capability?.platform, data.bundleId) }),
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "n-btn ghost mini", onClick: openSysPrefs, children: "\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E" }),
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "n-btn mini", onClick: requestPerm, disabled: busy, children: "\u7533\u8BF7\u6743\u9650" })
     ] }) : data.permission === "unavailable" ? /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: `n-banner${permissionUnavailable.neutral ? " neutral" : ""}`, children: [
@@ -3374,7 +3393,8 @@ function NotificationSettingsPanel() {
             })
           }
         )
-      ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "n-note", children: focusSuppressHint() })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-card", children: [
       /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline" }, children: [

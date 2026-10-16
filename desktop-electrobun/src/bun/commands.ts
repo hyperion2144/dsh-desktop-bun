@@ -62,6 +62,8 @@ export interface CommandDeps {
   notifyPermission?: () => NotifyPermission
   /** 主动申请通知授权（返回申请后的状态） */
   notifyRequestPermission?: () => NotifyPermission
+  /** 应用的 bundle identifier（构建期口径，app-identity）：被拒绝横幅的 tccutil 提示要用当前 id，不写死 */
+  bundleId?: string
   /** 运行时快照：来源 / 内置版本 / 已装列表（命令表不自己碰文件系统） */
   runtime?: () => RuntimeSnapshot
   /** 拉取版本目录（github / npm；失败不抛，回 {entries, error}） */
@@ -535,6 +537,8 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
         sounds: listSounds(deps.home),
         // 本机播放能力（三平台后端探测的结论）：面板据此禁用没后端的格式、并说明原因
         capability: deps.notifier?.soundCapability() ?? null,
+        // 当前应用的 bundle id（构建期口径）：被拒绝提示的 tccutil 命令要拼真实 id（#142）
+        bundleId: deps.bundleId ?? null,
       }
     },
     set_notifications_config: (args) => {

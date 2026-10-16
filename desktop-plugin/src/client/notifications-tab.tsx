@@ -3,6 +3,7 @@
  *
  * 注入 dsh 设置弹窗的 settings.section 槽位（同 desktop-settings.tsx 模式）。
  * 结构：权限卡（三态 + 申请/打开系统设置）→ 总开关 → 免打扰（时段+全屏静默）→
+ * 免打扰三行（时段 / 全屏静默 / 前台聚焦不投递的说明，#115）；
  * 场景区（6 组 12 行：名称+id·说明 | 开关 | 音效下拉 | 试听▶）。
  * 数据面：get_notifications_state 一次拉全；改动即时 set_notifications_config 落盘
  * （宿主单写者）；音效选择经 choose_notification_sound + import_notification_sound。
@@ -11,8 +12,9 @@
  * 播不了」都要在面板里看得见，不许静默、不许假成功。
  * 权限被拒（macOS 27 对 ad-hoc 签名的静默拒绝，#130/#142）：引导打开系统设置手动开启。
  */
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type { ClientContext } from './ctx-types.ts'
+import { focusSuppressHint } from './notification-focus-hint.ts'
 import { shellRpc } from './shell-rpc.ts'
 import {
   capabilityHint,
@@ -20,6 +22,7 @@ import {
   previewFailure,
   customSoundOptions,
   permissionUnavailableCopy,
+  deniedPermissionCopy,
   type SoundCapability,
 } from './notification-sound-ui.ts'
 
@@ -45,6 +48,8 @@ interface NotificationState {
   sounds: string[]
   /** #74：本机播放能力；老壳 / 未接播放层时缺省（面板按「不判定」处理，不许因此炸掉）。 */
   capability?: SoundCapability | null
+  /** 当前应用的 bundle id（构建期口径，#142）：被拒绝横幅拼 tccutil 命令用；老壳缺省。 */
+  bundleId?: string | null
 }
 
 /** 壳 RPC 统一通道（#50）：签名保持旧本地 invoke 不变，调用点零改动。 */
@@ -123,6 +128,15 @@ function NotificationSettingsPanel(): React.ReactElement {
   useEffect(() => {
     refresh()
   }, [refresh])
+
+  // 权限状态是异步刷的缓存：status() 读前踢的那次刷新还没落地，打开面板后补拉一次
+  const refetched = useRef(false)
+  useEffect(() => {
+    if (data === null || refetched.current) return
+    refetched.current = true
+    const timer = setTimeout(() => { refresh() }, 700)
+    return () => clearTimeout(timer)
+  }, [data, refresh])
 
   const save = useCallback((next: NotificationState['config']): void => {
     setBusy(true)
@@ -225,7 +239,7 @@ function NotificationSettingsPanel(): React.ReactElement {
       ) : data.permission === 'denied' ? (
         <div className="n-banner denied">
           <span className="n-chip danger">被拒绝</span>
-          <span className="grow">通知横幅不会显示。可在系统设置中手动开启；开发期可执行 tccutil reset Notifications com.arcreel.dsh-desktop-tauriapp 后重试。</span>
+          <span className="grow">{deniedPermissionCopy(capability?.platform, data.bundleId)}</span>
           <button className="n-btn ghost mini" onClick={openSysPrefs}>打开系统设置</button>
           <button className="n-btn mini" onClick={requestPerm} disabled={busy}>申请权限</button>
         </div>
@@ -297,6 +311,7 @@ function NotificationSettingsPanel(): React.ReactElement {
             onClick={() => patch((c) => { c.dnd.suppress_fullscreen = !c.dnd.suppress_fullscreen })}
           />
         </div>
+        <div className="n-note">{focusSuppressHint()}</div>
       </div>
 
       {/* 场景 */}
