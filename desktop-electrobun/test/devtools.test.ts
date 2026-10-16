@@ -16,6 +16,8 @@ import {
   isPortBindable,
   planDevToolsBoot,
   resolveDevToolsPort,
+  sendDevToolsKeystroke,
+  WEBVIEW2_DEVTOOLS_ARGS_ENV,
 } from '../src/bun/devtools.ts'
 import { loadSettings, saveSettings, settingsPath } from '../src/bun/settings-store.ts'
 import { normalizeSettings, serializeSettings } from '../src/shared/settings.ts'
@@ -24,27 +26,61 @@ import { normalizeSettings, serializeSettings } from '../src/shared/settings.ts'
 const alwaysFree = async (): Promise<boolean> => true
 const neverFree = async (): Promise<boolean> => false
 
-describe('applyCdpDebugPort（C environ 双写，#69 打包态根因修复）', () => {
-  test('双写：Bun env 落值 + C setenv 同值写入；返回 true', () => {
+describe('applyCdpDebugPort（C environ 双写：mac libc setenv / win kernel32，#69+#106）', () => {
+  test('CEF：DEVTOOLS_PORT_ENV 双写（Bun env + C environ 同值）；返回 true', () => {
     const env: Record<string, string | undefined> = {}
-    const calls: Array<[string, string, number]> = []
+    const calls: Array<[string, string]> = []
     const ok = applyCdpDebugPort(9333, {
       env,
-      setEnvC: (name, value, overwrite) => {
-        calls.push([name, value, overwrite])
-        return 0
+      setEnvC: (name, value) => {
+        calls.push([name, value])
+        return true
       },
     })
     expect(ok).toBe(true)
     expect(env[DEVTOOLS_PORT_ENV]).toBe('9333')
-    expect(calls).toEqual([[DEVTOOLS_PORT_ENV, '9333', 1]])
+    expect(calls).toEqual([[DEVTOOLS_PORT_ENV, '9333']])
   })
 
-  test('C setenv 失败/不可用 → 返回 false（fail-closed），Bun env 仍落值供日志', () => {
+  test('CEF：C environ 写失败/不可用 → false（fail-closed），Bun env 仍落值供日志', () => {
     const env: Record<string, string | undefined> = {}
-    expect(applyCdpDebugPort(9333, { env, setEnvC: () => -1 })).toBe(false)
+    expect(applyCdpDebugPort(9333, { env, setEnvC: () => false })).toBe(false)
     expect(applyCdpDebugPort(9333, { env, setEnvC: null })).toBe(false)
     expect(env[DEVTOOLS_PORT_ENV]).toBe('9333')
+  })
+
+  test('win WebView2（cefAvailable:false）：写 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=N（#106；不自动弹窗，返工二拍板）', () => {
+    const env: Record<string, string | undefined> = {}
+    const calls: Array<[string, string]> = []
+    const ok = applyCdpDebugPort(9333, {
+      env,
+      cefAvailable: false,
+      setEnvC: (name, value) => {
+        calls.push([name, value])
+        return true
+      },
+    })
+    expect(ok).toBe(true)
+    expect(env[WEBVIEW2_DEVTOOLS_ARGS_ENV]).toBe('--remote-debugging-port=9333')
+    expect(calls).toEqual([[WEBVIEW2_DEVTOOLS_ARGS_ENV, '--remote-debugging-port=9333']])
+  })
+
+  test('win WebView2：已有自定义参数时合并追加（Bun map 与 C environ 同值）；C environ 失败仍 fail-closed', () => {
+    const env: Record<string, string | undefined> = { [WEBVIEW2_DEVTOOLS_ARGS_ENV]: '--disable-gpu' }
+    const calls: Array<[string, string]> = []
+    expect(
+      applyCdpDebugPort(9333, {
+        env,
+        cefAvailable: false,
+        setEnvC: (name, value) => {
+          calls.push([name, value])
+          return false
+        },
+      }),
+    ).toBe(false)
+    expect(env[WEBVIEW2_DEVTOOLS_ARGS_ENV]).toBe('--disable-gpu --remote-debugging-port=9333')
+    // C environ 是 WebView2 loader 实际读取的载体：必须收到合并值，而非裸 --remote-debugging-port
+    expect(calls).toEqual([[WEBVIEW2_DEVTOOLS_ARGS_ENV, '--disable-gpu --remote-debugging-port=9333']])
   })
 
   // libSystem.dylib 是 macOS 专属路径：Linux/Windows 上 dlopen 直接抛错——这条冒烟只能在 darwin 跑
@@ -151,17 +187,10 @@ describe('planDevToolsBoot（启动决策）', () => {
     }
   })
 
-  test('构建不含 CEF（#84 win）：打包态不出菜单、不开口（fail-closed）', async () => {
-    const plan = await planDevToolsBoot({ isPackaged: true, settingOn: true, isFree: alwaysFree, cefAvailable: false })
-    expect(plan.reason).toBe('cef-only')
-    expect(plan.enableCdp).toBe(false)
-    expect(plan.port).toBeNull()
-    expect(plan.menuEnabled).toBe(false)
-  })
-
-  test('构建不含 CEF：dev 态菜单恒可见（openDevTools 与后端无关）', async () => {
-    const plan = await planDevToolsBoot({ isPackaged: false, settingOn: false, isFree: neverFree, cefAvailable: false })
-    expect(plan.reason).toBe('dev-build')
+  test('win 无 CEF 打包态（#106）：plan 平台无关——同一门控放行 WebView2 CDP', async () => {
+    const plan = await planDevToolsBoot({ isPackaged: true, settingOn: true, isFree: alwaysFree })
+    expect(plan.reason).toBe('enabled-by-setting')
+    expect(plan.enableCdp).toBe(true)
     expect(plan.menuEnabled).toBe(true)
   })
 })
@@ -218,5 +247,27 @@ describe('env 契约常量', () => {
   test('Electrobun 原生层读的口 env 与壳覆盖 env 名字不被手滑改掉', () => {
     expect(DEVTOOLS_PORT_ENV).toBe('ELECTROBUN_CEF_REMOTE_DEBUGGING_PORT')
     expect(DEVTOOLS_PORT_OVERRIDE_ENV).toBe('DSH_SHELL_DEVTOOLS_PORT')
+    expect(WEBVIEW2_DEVTOOLS_ARGS_ENV).toBe('WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS')
+  })
+})
+describe('sendDevToolsKeystroke（win：合成 F12，与物理按键同路径开/关 DevTools）', () => {
+  test('注入桩可用：VK_F12 按下+抬起各一次，返回 true', () => {
+    const calls: Array<[number, number, number]> = []
+    const ok = sendDevToolsKeystroke({
+      keybdEvent: (vKey, scan, flags) => {
+        calls.push([vKey, scan, flags])
+      },
+    })
+    expect(ok).toBe(true)
+    expect(calls).toEqual([
+      [0x7b, 0, 0],
+      [0x7b, 0, 0x0002],
+    ])
+  })
+
+  test('桩不可用（非 win / user32 加载失败）：返回 false，不发键', () => {
+    const calls: Array<[number, number, number]> = []
+    expect(sendDevToolsKeystroke({ keybdEvent: null })).toBe(false)
+    expect(calls).toEqual([])
   })
 })
