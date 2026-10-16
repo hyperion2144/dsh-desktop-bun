@@ -41,6 +41,10 @@ export const NOTIFY_TYPE_SCENARIOS: Readonly<Record<string, string>> = {
 
 /** 音效文件白名单（旧壳 T5 决议：wav / mp3 / ogg，aac/m4a 不进）。 */
 export const SOUND_EXTENSIONS = ['wav', 'mp3', 'ogg'] as const
+
+/** 白名单里的音效扩展名（小写）。 */
+export type SoundExtension = (typeof SOUND_EXTENSIONS)[number]
+
 /** 单文件大小上限（T5：5MB）。 */
 export const MAX_SOUND_BYTES = 5 * 1024 * 1024
 /** 单次播放时长上限（T5：10s 截断，防长音频当通知音）。 */
@@ -154,11 +158,17 @@ export function isValidSoundName(name: string): boolean {
 }
 
 /** 扩展名是否在白名单里（大小写不敏感）。 */
-export function hasAllowedSoundExtension(name: string): boolean {
+/** 名称里的白名单扩展名（小写）；不在白名单返回 null。 */
+export function soundExtension(name: string): SoundExtension | null {
   const dot = name.lastIndexOf('.')
-  if (dot <= 0) return false
+  if (dot <= 0) return null
   const ext = name.slice(dot + 1).toLowerCase()
-  return (SOUND_EXTENSIONS as readonly string[]).includes(ext)
+  return (SOUND_EXTENSIONS as readonly string[]).includes(ext) ? (ext as SoundExtension) : null
+}
+
+/** 扩展名是否在白名单里（大小写不敏感）。 */
+export function hasAllowedSoundExtension(name: string): boolean {
+  return soundExtension(name) !== null
 }
 
 /** 白名单扩展名 → 允许的文件头魔数（旧壳 `sounds::ALLOWED`，逐条对齐）。 */
