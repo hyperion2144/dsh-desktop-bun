@@ -868,10 +868,12 @@ async function openProfileWindow(profile: string): Promise<void> {
 let restartingShell = false
 
 /**
- * #60 + #79：全壳统一的「重启 dsh 服务」入口——面板按钮、托盘重启、托盘切运行时都走这一条。
- * 语义（维护者拍板）：DSH 侧等效「退出应用再启动」——宿主+伴生进程树整树灭确认后全新拉起；
+ * #60 + #79：DSH 侧的「重启 dsh 服务」入口——面板按钮、托盘切运行时都走这一条。
+ * 语义（维护者 2026-10-14 拍板）：DSH 侧等效「退出应用再启动」——宿主+伴生进程树整树灭确认后全新拉起；
  * 桌面壳本体（托盘/进程）不退出。有窗口时：关窗 → 重启界面（复用冷启动 splash 通道，
  * onStage 阶段照推）→ 服务面就绪后原样重开重启前开着的窗口；无窗口模式保持纯服务面重启。
+ *
+ * #126：托盘那项「重启应用」**不再**走这里——它现在是整个应用退出 + 自动拉起（restartAppFromTray）。
  */
 async function restartDsh(): Promise<void> {
   if (restartingShell || quitting) return
@@ -1015,14 +1017,19 @@ async function restartDesktopApp(): Promise<{ ok: boolean; reason?: string; mess
   return { ok: true }
 }
 
-/** 托盘「重启 dsh 服务」：完整重启语义（#60）——等效退出应用再启动，伴生进程不跨重启残留。 */
-async function restartServiceFromTray(): Promise<void> {
-  console.log('[shell] 托盘：重启 dsh 服务')
-  try {
-    await restartDsh()
-  } catch (error) {
-    console.error(`[shell] 重启 dsh 服务失败：${String(error)}`)
-  }
+/**
+ * 托盘「重启应用」（#126）：整个应用退出 + 自动拉起，直接复用 #119 的 relaunch 路径。
+ *
+ * 口径 2026-10-16 改过：#60 当初定的是「托盘重启 = DSH 侧树级重启，壳不退出」——那样托盘图标和
+ * 窗口从头到尾都在，用户看不出到底重启了没有。现在这一项改成整个应用重来。
+ * 面板的「重启 dsh 服务」仍是 DSH 侧重启（onFullRestart），那是另一件事：切远程 dsh / 切 Profile /
+ * 切运行时只需要 DSH 换，壳没必要跟着退。
+ */
+async function restartAppFromTray(): Promise<void> {
+  console.log('[shell] 托盘：重启应用')
+  // 拉不起来（dev 构建 / 探测不到 launcher）时 restartDesktopApp 自己 notify 并返回 { ok: false }
+  // 且不退出，这儿不用再兜一层；成功时它 await shutdown() 退出本进程，下一行只在失败时才跑到。
+  await restartDesktopApp()
   refreshTray()
 }
 
@@ -1124,8 +1131,8 @@ function onTrayAction(action: TrayAction): void {
       console.log('[shell] 托盘：退出')
       void shutdown()
       return
-    case 'restart-service':
-      void restartServiceFromTray()
+    case 'restart-app':
+      void restartAppFromTray()
       return
     case 'open-window':
       if (action.profile !== undefined) void openProfileWindow(action.profile)

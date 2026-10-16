@@ -126,7 +126,7 @@ describe('statusLabel（#117 服务面先于 DSH）', () => {
 describe('trayMenu', () => {
 
   test('「注册 dsh 命令」条件项：未注册/冲突时出现，已注册或未探出就不摆', () => {
-    expect(labels(trayMenu(baseState()).slice(-4))).toContain('重启 dsh 服务')
+    expect(labels(trayMenu(baseState()).slice(-4))).toContain('重启应用')
     expect(findItem(trayMenu(baseState()), '注册 dsh 为系统命令')).toBeUndefined()
 
     const missing = trayMenu(baseState({ registerLabel: '注册 dsh 为系统命令' }))
@@ -207,7 +207,34 @@ describe('trayMenu', () => {
     expect(items.filter((item) => item.type === 'divider').length).toBe(2)
     const actionable = items.filter((item): item is NormalItem => isNormal(item) && item.action !== undefined)
     // 子菜单父项只挂 submenu、不带 action；真正可点的顶层动作只有三个
-    expect(actionable.map((item) => item.label).sort()).toEqual(['退出', '隐藏窗口', '重启 dsh 服务'].sort())
+    expect(actionable.map((item) => item.label).sort()).toEqual(['退出', '隐藏窗口', '重启应用'].sort())
+  })
+})
+
+describe('#126 托盘「重启应用」（口径从 DSH 侧重启改为整应用重来）', () => {
+  test('菜单项文案是「重启应用」，动作是 tray:restart-app', () => {
+    const item = trayMenu(baseState()).find(
+      (menu): menu is NormalItem => isNormal(menu) && menu.label === '重启应用',
+    )
+    expect(item?.action).toBe(TRAY_MENU_ACTIONS.restartApp)
+  })
+
+  test('动作 id 不再是 tray:restart-service——语义已变，名字留着会骗人', () => {
+    expect(TRAY_MENU_ACTIONS.restartApp).toBe('tray:restart-app')
+    expect(parseTrayAction('tray:restart-service')).toBeNull()
+  })
+
+  test('DSH 没起来时这一项照样在——整个应用重来正是那时候最需要的出口', () => {
+    const down = baseState({ hostRunning: false, serviceStatus: 'failed', serviceError: '找不到可用的 dsh 运行时' })
+    const labels = trayMenu(down)
+      .filter((item): item is NormalItem => isNormal(item) && item.action !== undefined)
+      .map((item) => item.label)
+    expect(labels).toContain('重启应用')
+    expect(labels).toContain('退出')
+  })
+
+  test('菜单里不再出现「重启 dsh 服务」这个说法（那是面板那一项）', () => {
+    expect(labels(trayMenu(baseState()))).not.toContain('重启 dsh 服务')
   })
 })
 
@@ -215,7 +242,7 @@ describe('parseTrayAction', () => {
   test('解析动作表', () => {
     expect(parseTrayAction(TRAY_MENU_ACTIONS.toggleWindow)).toEqual({ kind: 'toggle-window' })
     expect(parseTrayAction(TRAY_MENU_ACTIONS.quit)).toEqual({ kind: 'quit' })
-    expect(parseTrayAction(TRAY_MENU_ACTIONS.restartService)).toEqual({ kind: 'restart-service' })
+    expect(parseTrayAction(TRAY_MENU_ACTIONS.restartApp)).toEqual({ kind: 'restart-app' })
     expect(parseTrayAction(TRAY_MENU_ACTIONS.runtimeBuiltin)).toEqual({ kind: 'switch-runtime' })
     expect(parseTrayAction(`${TRAY_MENU_ACTIONS.runtimeVersionPrefix}0.2.1-alpha.1`)).toEqual({
       kind: 'switch-runtime',

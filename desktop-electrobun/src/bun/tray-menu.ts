@@ -6,7 +6,7 @@ import { remoteDisplay } from '../shared/remote.ts'
 // 而 `Tray` 类只是把它交给原生层。分开之后无显示器/无 CEF 也能测。
 //
 // 旧 Tauri 壳的托盘能力（`docs/research/shell-capability-inventory.md` 第 6 节）在这里逐项对齐：
-// 显示/隐藏窗口、profile 切换、重启 dsh 服务、运行时来源切换（内置 / 已装版本 /
+// 显示/隐藏窗口、profile 切换、重启应用、运行时来源切换（内置 / 已装版本 /
 // 目录里点一下就下载并切换）、退出。
 // 还没做的项不摆假入口——宁可菜单短，也不要点了没反应的项。
 
@@ -27,7 +27,7 @@ export interface ProfileRow {
 export const TRAY_MENU_ACTIONS = {
   toggleWindow: 'tray:toggle-window',
   quit: 'tray:quit',
-  restartService: 'tray:restart-service',
+  restartApp: 'tray:restart-app',
   remoteLocal: 'tray:remote:local',
   remoteAddrPrefix: 'tray:remote:addr:',
   windowPrefix: 'tray:window:',
@@ -42,7 +42,7 @@ export const TRAY_MENU_ACTIONS = {
 export type TrayActionKind =
   | 'toggle-window'
   | 'quit'
-  | 'restart-service'
+  | 'restart-app'
   | 'open-window'
   | 'switch-runtime'
   | 'download-runtime'
@@ -138,7 +138,7 @@ export function parseTrayAction(action: string | undefined | null): TrayAction |
     return { kind: 'open-window', profile }
   }
   if (action === TRAY_MENU_ACTIONS.registerCli) return { kind: 'register-cli' }
-  if (action === TRAY_MENU_ACTIONS.restartService) return { kind: 'restart-service' }
+  if (action === TRAY_MENU_ACTIONS.restartApp) return { kind: 'restart-app' }
   if (action === TRAY_MENU_ACTIONS.runtimeBuiltin) return { kind: 'switch-runtime' }
   if (action.startsWith(TRAY_MENU_ACTIONS.runtimeVersionPrefix)) {
     const version = action.slice(TRAY_MENU_ACTIONS.runtimeVersionPrefix.length)
@@ -385,7 +385,7 @@ export function trayMenu(state: TrayState): TrayMenuItem[] {
       label: statusLabel(state),
       enabled: false,
     },
-    { type: 'normal', label: '重启 dsh 服务', action: TRAY_MENU_ACTIONS.restartService },
+    { type: 'normal', label: '重启应用', action: TRAY_MENU_ACTIONS.restartApp },
     // 「注册 dsh 命令」（旧壳 #175 条件项）：只在未注册/冲突时出现，已注册或还没探出就不摆
     ...(state.registerLabel === null
       ? []
