@@ -152,23 +152,35 @@ describe('右键菜单：注入脚本', () => {
   })
 })
 
-describe('标题栏带（#112）：win32/linux 上收壳 preload 的声明式适配', () => {
-  test('win32：官方标记 + 高度变量 + 拖拽热区 + 三键 + 窗口端点', () => {
+describe('标题栏带（#112/#121）：win32/linux 上收壳 preload 的声明式适配', () => {
+  test('win32（#121）：拖拽交给官方 caption 行，壳只留三键 + no-drag 护栏', () => {
     const script = titlebarScript('win32', 'tok-t')
     expect(script).toContain('dataset.windowsTitlebar')
     expect(script).toContain('--dsh-windows-titlebar-height')
     expect(script).toContain(JSON.stringify(WINDOWS_TITLEBAR_HEIGHT))
-    expect(script).toContain('electrobun-webkit-app-region-drag')
-    // 拖拽几何绕开官方 leadingSeat（left:88px）：主 drag 区自 168px 起，座位可点
-    expect(script).toContain('dsh-shell-titlebar-drag-main')
+    // 原生 caption 开启：运行时不再建任何拖拽面（官方 `.frame::before` 即拖窗行）
+    expect(script).toContain(`const NATIVE_CAPTION = ${JSON.stringify(true)}`)
+    // 三键必须在官方 drag 区内显式 no-drag：Electrobun 没有 windowControlsOverlay
+    expect(script).toContain(
+      '#dsh-shell-titlebar-controls{position:absolute;top:0;right:0;bottom:0;display:flex;align-items:stretch;-webkit-app-region:no-drag}',
+    )
+    expect(script).toContain('cursor:default;pointer-events:auto;-webkit-app-region:no-drag}')
     expect(script).toContain(TITLEBAR_WINDOW_ENDPOINT)
     expect(script).toContain(VIEW_TOKEN_HEADER)
     expect(script).toContain('最小化')
     expect(script).toContain('最大化')
     expect(script).toContain('关闭')
-    // 双击拖拽带 = 最大化切换；三键不依赖 dsh 页面与插件状态（验收增补）
-    expect(script).toContain('dblclick')
+    // 三键不依赖 dsh 页面与插件状态（验收增补）
     expect(script).toContain('keepalive')
+  })
+
+  test('linux（CEF）：CEF 无 app-region，仍注入两段拖拽热区 + 双击最大化', () => {
+    const script = titlebarScript('linux', 'tok-t')
+    expect(script).toContain(`const NATIVE_CAPTION = ${JSON.stringify(false)}`)
+    expect(script).toContain('electrobun-webkit-app-region-drag')
+    // 拖拽几何绕开官方 leadingSeat（left:88px）：主 drag 段自 168px 起，座位可点
+    expect(script).toContain('dsh-shell-titlebar-drag-main')
+    expect(script).toContain('dblclick')
   })
 
   test('darwin：系统红绿灯，不注入（空串跳过）', () => {
