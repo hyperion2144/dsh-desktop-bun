@@ -14,6 +14,7 @@ import {
   windowAction,
   runtimeMenuItems,
   trayMenu,
+  statusLabel,
   trayTitle,
 } from '../src/bun/tray-menu.ts'
 import { TRAY_LABEL_MAX, truncateTrayLabel } from '../src/bun/tray-menu.ts'
@@ -60,6 +61,66 @@ const baseState = (overrides: Partial<TrayState> = {}): TrayState => ({
   remoteList: [],
   registerLabel: null,
   ...overrides,
+})
+
+// #117：托盘状态行讲的是「服务面在 / DSH 在不在 / 为什么不在」。
+// 服务面先于 DSH 存在，所以 stopped 与 failed 都有对应的菜单文案（以前只有「宿主未运行」一种）。
+describe('statusLabel（#117 服务面先于 DSH）', () => {
+  test('运行中', () => {
+    expect(statusLabel(baseState({ serviceStatus: 'running' }))).toBe('状态：运行中')
+  })
+
+  test('正在启动', () => {
+    expect(statusLabel(baseState({ serviceStatus: 'starting' }))).toBe('状态：dsh 启动中…')
+  })
+
+  test('服务面已就绪但还没拉 DSH', () => {
+    expect(statusLabel(baseState({ serviceStatus: 'stopped' }))).toBe('状态：dsh 未运行（托盘已就绪）')
+  })
+
+  test('起不来：带原因（这是「能换一个运行时再试」的提示位）', () => {
+    const label = statusLabel(
+      baseState({ serviceStatus: 'failed', serviceError: '找不到可用的 dsh 运行时（dsh_runtime=9.9.9）' }),
+    )
+    expect(label).toContain('dsh 未起来')
+    expect(label).toContain('找不到可用的 dsh 运行时')
+  })
+
+  test('起不来：没给原因也不编一个', () => {
+    expect(statusLabel(baseState({ serviceStatus: 'failed', serviceError: null }))).toBe('状态：dsh 未起来')
+    expect(statusLabel(baseState({ serviceStatus: 'failed' }))).toBe('状态：dsh 未起来')
+  })
+
+  test('阻塞（端口被陌生程序占）与起不来分开说', () => {
+    expect(statusLabel(baseState({ serviceStatus: 'blocked', serviceError: '端口 6391 被其他实例或程序占用' }))).toContain(
+      '状态：已阻塞',
+    )
+  })
+
+  test('长原因按菜单宽度截断', () => {
+    const label = statusLabel(baseState({ serviceStatus: 'failed', serviceError: '错'.repeat(TRAY_LABEL_MAX + 30) }))
+    expect(label.length).toBeLessThanOrEqual(TRAY_LABEL_MAX + '状态：dsh 未起来'.length + 2)
+  })
+
+  test('旧调用方（没给 serviceStatus）按 hostRunning 兼容', () => {
+    expect(statusLabel(baseState({ hostRunning: true }))).toBe('状态：运行中')
+    expect(statusLabel(baseState({ hostRunning: false }))).toBe('状态：宿主未运行')
+  })
+
+  test('trayMenu 里用的就是它（菜单里的状态行不是别的文案）', () => {
+    const label = statusLabel(baseState({ serviceStatus: 'failed', serviceError: '找不到可用的 dsh 运行时' }))
+    expect(labels(trayMenu(baseState({ serviceStatus: 'failed', serviceError: '找不到可用的 dsh 运行时' })))).toContain(label)
+  })
+
+  test('DSH 没起来时，运行时版本与退出这两条自救入口仍然在菜单里（#117 的要害）', () => {
+    const items = trayMenu(
+      baseState({ serviceStatus: 'failed', serviceError: '找不到可用的 dsh 运行时', installed: ['0.2.1-alpha.2'] }),
+    )
+    expect(labels(items)).toContain('退出')
+    const runtime = items.find((item): item is NormalItem & { submenu?: TrayMenuItem[] } => isNormal(item) && item.label.startsWith('运行时版本'))
+    expect(runtime?.submenu).toBeDefined()
+    expect(labels(runtime?.submenu ?? []).some((line) => line.includes('0.2.1-alpha.2'))).toBe(true)
+  })
 })
 
 describe('trayMenu', () => {

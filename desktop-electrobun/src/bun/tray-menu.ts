@@ -77,6 +77,13 @@ export interface TrayState {
   profileRows?: readonly ProfileRow[]
   /** dsh 宿主是否在跑（守护器重启期间会短暂为 false） */
   hostRunning: boolean
+  /**
+   * #117：服务面自己管 DSH 的判别位。服务面先于 DSH 存在（#117 的核心），所以托盘在
+   * DSH 还没起来 / 起不来的时候照样拿得到，也能把原因摆给用户。缺省按 hostRunning 推。
+   */
+  serviceStatus?: 'stopped' | 'starting' | 'running' | 'failed' | 'blocked'
+  /** serviceStatus 为 failed / blocked 时的原因（直接进状态行，告诉用户还能干什么） */
+  serviceError?: string | null
   /** 运行时来源的人类可读标签，例如 `内置 0.2.1-alpha.2` */
   runtimeLabel: string
   /** 随包内置树的版本（拿不到时 null，菜单文案会退成「版本未知」） */
@@ -290,6 +297,20 @@ function truncateMenu(items: TrayMenuItem[]): TrayMenuItem[] {
     return next
   })
 }
+/**
+ * #117：托盘状态行。把「服务面在 / DSH 在不在 / 为什么不在」讲清楚，
+ * 而不是一个「宿主未运行」就让人猜。没有 serviceStatus 的旧调用方按 hostRunning 兼容。
+ */
+export function statusLabel(state: TrayState): string {
+  const status = state.serviceStatus
+  if (status === undefined) return state.hostRunning ? '状态：运行中' : '状态：宿主未运行'
+  if (status === 'running') return '状态：运行中'
+  if (status === 'starting') return '状态：dsh 启动中…'
+  if (status === 'stopped') return '状态：dsh 未运行（托盘已就绪）'
+  const why = state.serviceError === undefined || state.serviceError === null || state.serviceError === '' ? '' : `（${truncateTrayLabel(state.serviceError)}）`
+  if (status === 'blocked') return `状态：已阻塞${why}`
+  return `状态：dsh 未起来${why}`
+}
 export function trayMenu(state: TrayState): TrayMenuItem[] {
   const profiles = orderedProfiles(state)
   const items: TrayMenuItem[] = [
@@ -361,7 +382,7 @@ export function trayMenu(state: TrayState): TrayMenuItem[] {
     },
     {
       type: 'normal',
-      label: state.hostRunning ? '状态：运行中' : '状态：宿主未运行',
+      label: statusLabel(state),
       enabled: false,
     },
     { type: 'normal', label: '重启 dsh 服务', action: TRAY_MENU_ACTIONS.restartService },

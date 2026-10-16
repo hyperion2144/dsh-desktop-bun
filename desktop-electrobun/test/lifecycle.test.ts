@@ -213,6 +213,8 @@ describe('宿主停止：等到真退出，超时就升级 SIGKILL', () => {
       runtimeKind: 'override' as const,
       runtimeVersion: null,
       runtimeNote: null,
+      // #117：布局完整（layout() 解析不出东西时会把原因写进这里，测试字面量一律完整）
+      unresolved: null,
     }
   }
 
@@ -319,6 +321,7 @@ describe('宿主 PATH 垫片透传（#70）', () => {
       runtimeKind: 'override' as const,
       runtimeVersion: null,
       runtimeNote: null,
+      unresolved: null,
       // 布局里的 launcher 锚定（#62）：测试字面量不走探测，显式 null 跳过
       launcherPath: null,
     }

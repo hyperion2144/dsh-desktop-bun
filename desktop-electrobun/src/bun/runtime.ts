@@ -51,6 +51,12 @@ export interface ShellLayout {
   resourcesDir: string | null
   /** launcher 可执行文件路径（ELECTROBUN_LAUNCHER_PID/ppid 解析；拿不到为 null） */
   launcherPath: string | null
+  /**
+   * #117：布局/运行时解析没成功时的原因（原本在这里抛）。`null` = 布局完整；
+   * 非 null 时壳自己的部分（设置 / profile / 托盘 / 退出）照常可用，只是 DSH 起不来——
+   * 服务面拿它落 failed 态，托盘据此把菜单摆全、把失败原因显示出来。
+   */
+  unresolved: string | null
 }
 
 export interface LayoutInput {
@@ -417,13 +423,27 @@ export function layout(input: LayoutInput = {}): ShellLayout {
   const resourcesDir =
     env.DSH_SHELL_RESOURCES ?? packagedResourcesFromLauncher(launcherExe) ?? packagedResourcesFromProcess(execPath) ?? packagedResources(import.meta.dir)
   // 运行时选中：显式覆盖 > 设置点名的版本（内置优先，其次已下载目录）> 随包内置兜底（#97）
-  const selection = resolveRuntimeSelection({
-    env,
-    overrideDir: input.runtimeDir,
-    appSupport: appSupportDir(env),
-    preferred: input.preferred,
-    builtinDir: resolveBuiltinRuntimeDir(env, { repoRoot, resourcesDir }),
-  })
+  //
+  // #117：**解析失败不再抛**。服务面是用来「管 DSH」的，不是「DSH 起来了才算存在」——
+  // 运行时一个都找不到时，壳自己的部分照样必须能用（否则托盘、设置、退出一起没了，
+  // 用户连「换一个运行时」都点不到，正是 #117 报告的那个死局）。所以这里只把原因记进
+  // `unresolved`；真要连 DSH 时由服务面读它落 failed 态。
+  let unresolved: string | null = null
+  let selection: RuntimeSelection
+  try {
+    selection = resolveRuntimeSelection({
+      env,
+      overrideDir: input.runtimeDir,
+      appSupport: appSupportDir(env),
+      preferred: input.preferred,
+      builtinDir: resolveBuiltinRuntimeDir(env, { repoRoot, resourcesDir }),
+    })
+  } catch (error) {
+    unresolved = error instanceof Error ? error.message : String(error)
+    // 占位：root 空的树在下面的「壳布局不完整」检查里必然报缺失，但 `unresolved` 已经有真原因了，
+    // 下面的检查不会再覆盖它（只在 unresolved 还是 null 时才写）。
+    selection = { kind: 'builtin', root: '', layout: 'root', version: null, note: null }
+  }
   const runtimeDir = selection.root
   const runtimePaths = runtimePathsOf(runtimeDir, selection.layout)
   const dshLibDir = runtimePaths.dshLibDir
@@ -450,6 +470,7 @@ export function layout(input: LayoutInput = {}): ShellLayout {
     repoRoot,
     resourcesDir,
     launcherPath: launcherExe,
+    unresolved: null,
   }
   const missing = [
     ['dsh lib', dshLibDir],
@@ -457,8 +478,9 @@ export function layout(input: LayoutInput = {}): ShellLayout {
     ['Bun 兼容层', preloadFile],
     ['宿主脚本', hostScript],
   ].filter(([, path]) => !existsSync(path as string))
-  if (missing.length > 0) {
-    throw new Error(`壳布局不完整：${missing.map(([label, path]) => `${label}=${String(path)}`).join(' | ')}`)
+  if (missing.length > 0 && unresolved === null) {
+    unresolved = `壳布局不完整：${missing.map(([label, path]) => `${label}=${String(path)}`).join(' | ')}`
+    result.unresolved = unresolved
   }
   return result
 }

@@ -61,8 +61,8 @@ import { registerTrayLabel } from '../shared/register-cli.ts'
 const CLIENT_VERSION = '0.1.0'
 /** 退出时等宿主与 CEF 子进程收尾的上限（超过就交给框架的优雅退出） */
 const SHELL_STOP_DEADLINE_MS = 8_000
-/** 启动失败时启动界面留在屏幕上的时长（让用户看清原因，然后自己退出） */
-const SPLASH_FAILURE_HOLD_MS = 30_000
+// #117：启动失败时不再有「留 30 秒再自己退掉」的时限——托盘先在，用户有自救入口，
+// 什么时候走由他决定（托盘 → 退出）。这个常量与它的注释一并撤掉。
 
 function fail(message: string, code: number): never {
   console.error(`[shell] ${message}`)
@@ -358,6 +358,10 @@ function trayState(): TrayState {
       }
     }),
     hostRunning: uiService().state.hostPid > 0,
+    // #117：服务面先于 DSH 存在，所以托盘在 DSH 没起来/起不来时照样拿得到真相，
+    // 并能把原因摆进状态行告诉用户「还能换一版再试」。
+    serviceStatus: uiService().state.status,
+    serviceError: uiService().state.error ?? uiService().state.blocked ?? null,
     runtimeLabel: runtimeLabelOf(snapshot),
     builtinVersion: snapshot.builtinVersion,
     runningVersion: snapshot.activeVersion,
@@ -921,6 +925,15 @@ async function restartDsh(): Promise<void> {
         console.error(`[shell] 完整重启：重启服务面失败（${profile}）`)
         continue
       }
+      // #117：startService 只把壳的面立起来了，DSH 得显式拉（冷启动那条路上是 ensureService 之后
+      // 紧跟一句 ensureRunning()）。拉不起来就跳过这份 profile 的窗口，但**服务面仍然留着**
+      // ——托盘还在，用户能接着换运行时再试（这正是 #117 的那个死局出口）。
+      try {
+        await fresh.ensureRunning()
+      } catch (error) {
+        console.error(`[shell] 完整重启：dsh 未起来（${profile}）：${String(error)}（服务面保留，可从托盘换运行时再试）`)
+        continue
+      }
       if (profile === instanceProfile) {
         // 启动 profile 的服务面引用要换新（uiService/托盘/实例锁都以它为事实源）
         service = fresh
@@ -965,21 +978,46 @@ async function restartServiceFromTray(): Promise<void> {
 }
 
 
-/** 托盘「运行时版本」：内置 / 某个已下载版本（写设置 + 杀宿主让守护器重起）。 */
+/**
+ * 托盘「运行时版本」：内置 / 某个已下载版本。
+ *
+ * #117：这条路径**不再要求 DSH 已经就绪**。运行时选中只是 `<DSH_HOME>/desktop-settings.json`
+ * 里的 `dsh_runtime`，而设置文件是壳独占的纯文件 IO（settings-store.ts：tmp+rename 原子写），
+ * 跟 DSH 进程活不活没关系。以前它之所以依赖 ready，是被「要重启」绑成了
+ * 「先把服务面拆了重建」——那是实现顺序，不是这份能力的内在要求。
+ */
 async function switchRuntimeFromTray(action: TrayAction): Promise<void> {
-  const patch: Record<string, unknown> =
-    action.version === undefined
-      ? { dsh_mode: 'builtin', dsh_runtime: null }
-      : { dsh_mode: 'builtin', dsh_runtime: action.version }
+  const svc = uiService()
+  // 维护者在本单明确同意：切任何一行都写版本号，含「内置」——`dsh_runtime: null` 与「没设置过」
+  // 同形，壳按未指定处理，跟设置面板的写法不一致（#97 裁决）。票面那条「#97 的口径不动」指的是
+  // resolveRuntimeSelection / selectRuntimeVersion 本体不动；这里是托盘侧写法，向后对齐。
+  const version = action.version ?? svc.runtime().builtinVersion
+  if (version === null || version === undefined) {
+    console.error('[shell] 切换运行时失败：拿不到内置版本号，先查内置运行时树是否完整')
+    refreshTray()
+    return
+  }
+  const patch: Record<string, unknown> = { dsh_mode: 'builtin', dsh_runtime: version }
   console.log(`[shell] 托盘：切换运行时 ${JSON.stringify(patch)}`)
-  uiService().save(patch)
+  try {
+    svc.save(patch)
+  } catch (error) {
+    console.error(`[shell] 切换运行时失败（写设置）：${String(error)}`)
+    refreshTray()
+    return
+  }
   refreshTray()
   try {
-    // #79（拍板 Q2）：切运行时与面板/托盘重启同一条 restartDsh——树级全重启 + splash UX，
-    // 不再是宿主级 restartHost（那条路留给守护器自愈）
-    await restartDsh()
+    // #117：分流的关键。DSH 已经在跑 → 树级全重启 + splash UX（#79 Q2 的原语义原样保留）；
+    // 还没起来 / 起不来 → 直接把这份服务面按新设置拉起来，**不拆服务面、不杀宿主**。
+    if (svc.state.status === 'running' || svc.state.status === 'starting') {
+      await restartDsh()
+    } else {
+      await svc.ensureRunning()
+    }
   } catch (error) {
-    console.error(`[shell] 切换运行时失败：${String(error)}`)
+    // 拉不起来不是死局：托盘还在，状态行会显示原因，用户可以再换一版再试。
+    console.error(`[shell] 切换运行时后仍未起来：${String(error)}`)
   }
   refreshTray()
 }
@@ -1218,8 +1256,68 @@ const pushStage = (): void => {
   } catch {}
 }
 
-if (!noWindow) {
-  splash = new BrowserWindow({
+/**
+ * 冷启动第 ④ 步：托盘。#117 —— 托盘排在 DSH **之前**，这是这票的全部要害。
+ *
+ * 以前托盘排在最后（DSH 就绪之后），有个硬后果：DSH 一旦起不来（运行时版本问题是最常见
+ * 的那类），整条流断在托盘之前，用户连「换一个运行时」都点不到，只能退出去手改
+ * desktop-settings.json。托盘先在就不同了：它不需要 DSH 也能建出来（状态行走 serviceStatus
+ * 的 stopped / failed 分支，说得清「DSH 为什么没起来」），于是 DSH 起不来时用户仍然能
+ * 换一版再试、能退出。
+ */
+const startupTray = (): void => {
+  // 无窗口模式（CI/黑盒）不建托盘——那里没有窗口可隐藏，托盘只会碍事
+  if (noWindow) return
+  const image = trayImagePath()
+  if (image === null) {
+    console.warn('[shell] 找不到托盘图标（resources/tray.png / runtime/tray.png），本次不建托盘')
+  } else {
+    tray = createTray({
+      image,
+      state: trayState(),
+      onAction: onTrayAction,
+      onEmptyClick: () => {
+        // P8（旧壳 tray.rs:265-285，#181）：左键单击托盘 = 聚焦最后活跃窗口；没有就开主 profile 的窗
+        const win = focusedWindow()
+        if (win !== null && win !== undefined) {
+          win.unminimize?.()
+          win.show()
+          win.activate()
+        } else {
+          void openProfileWindow(instanceProfile)
+        }
+      },
+      log: (line) => console.log(line),
+    })
+    // 菜单保鲜（#62）：状态每 5s 走一次 fs 级快探测（不 spawn）。Electrobun 的 Tray 只有
+    // tray-clicked 一个事件、拿不到「菜单即将打开」的钩子，所以保鲜靠轮询而不是打开时现查；
+    // 只有状态真变了才 refreshTray()（它内部对菜单 JSON 去重，没变就完全不碰原生菜单）。
+    setInterval(() => {
+      if (tray === null) return
+      const before = registerCli.cached()
+      const after = registerCli.poll()
+      if (after.kind === before.kind && after.resolved === before.resolved) return
+      refreshTray()
+    }, 5_000)
+    refreshTray()
+  }
+  // macOS Dock 图标被点（无可见窗口时）：把主窗带回来
+  app.on('reopen', () => {
+    console.log('[shell] Dock 再激活：显示主窗')
+    showMainWindow()
+  })
+}
+
+/**
+ * 冷启动第 ⑤ 步：启动界面（起 DSH 那几十秒里给用户看的东西）。
+ * 排在托盘之后：托盘是「出事了还能自救」的常驻入口，优先级高于一次性的进度界面。
+ * 启动期间 serviceOptionsFor.onStage 推的阶段都记在 lastStage 上，这里 dom-ready 后补推一次。
+ */
+// 返回窗口而不直接写模块变量：赋值留在调用点，TypeScript 的控制流分析才看得见
+// 「splash 现在可能为 null」这件事（后续两处失败提示都在模块顶层读它）。
+const startupSplash = (): BrowserWindow | null => {
+  if (noWindow) return null
+  const win = new BrowserWindow({
     title: APP_NAME,
     html: splashHtml(),
     renderer,
@@ -1227,10 +1325,11 @@ if (!noWindow) {
     frame: { width: SPLASH_WIDTH, height: SPLASH_HEIGHT },
   })
   // 页面还没加载完时推阶段会被丢掉：dom-ready 之后再补推一次（也是浏览器对象可用的信号）
-  splash.on('dom-ready', () => {
+  win.on('dom-ready', () => {
     splashReady = true
     pushStage()
   })
+  return win
 }
 
 // dsh 系统命令注册（旧壳 `register/`）：shim 指向当前运行时，探测走用户真实登录 shell，
@@ -1291,34 +1390,55 @@ try {
   const message = error instanceof Error ? error.message : String(error)
   console.error(`[shell] 启动失败：${message}`)
   notifier.notify(SCENARIO.STARTUP_ERROR, `桌面壳启动失败：${message}`)
-  // 无窗口模式（CI/黑盒）把失败原样抛出去；有启动界面就留在屏幕上让人看见原因
-  // 启动界面还没到 dom-ready 时不能推 JS（原生层会 FATAL）：那就只留日志
-  if (splash === null || !splashReady) throw error
-  try {
-    splash.webview?.executeJavascript(splashFailScript(message))
-  } catch {}
-  await Bun.sleep(SPLASH_FAILURE_HOLD_MS)
-  Utils.quit()
+  // #117：能走到这里的是**壳自己**立不起服务面（设置文件写不进、端口听不了、HTTP 面起不来），
+  // 而不是 DSH 起不来——而托盘的状态来自服务面，托盘/启动界面都还没有自救入口可言。
+  // 这种就如实抛出去（dev 直接崩、CI 判红），不再「在屏幕上留 30 秒然后自己退掉」。
   throw error
 }
-console.log(`SHELL-READY ${JSON.stringify({ ...service.state, locale })}`)
-// 服务面就绪：把 origin/页面 URL 回填给实例锁，第二个壳才能激活这个窗口
-updateInstance(instanceFile, process.pid, { origin: service.state.origin, pageUrl: service.state.pageUrl })
-// P2 测试钩子（旧壳 lib.rs:744 _AUTO_QUIT）：服务面就绪后延迟自动退出，给 CI/探针一个干净的结束信号
-if ((process.env.DSH_DESKTOP_AUTO_QUIT ?? '') !== '') {
-  const delayMs = Number(process.env.DSH_DESKTOP_AUTO_QUIT) > 0 ? Number(process.env.DSH_DESKTOP_AUTO_QUIT) : 3_000
-  setTimeout(() => {
-    console.log('[shell] DSH_DESKTOP_AUTO_QUIT 触发自动退出')
-    void shutdown()
-  }, delayMs).unref?.()
+// ---- #117 冷启动编排：服务面 → 托盘 → 启动界面 → DSH → 桌面窗口 ----
+startupTray()
+splash = startupSplash()
+
+// DSH。就这一步失败也**不退出**：托盘已经在了，状态行摆着原因，
+// 用户能换一个运行时版本再试，也能从托盘退出（旧行为是报错→30 秒→自己退掉，等于把自救入口没收走）。
+let dshStarted = true
+try {
+  await service.ensureRunning()
+} catch (error) {
+  dshStarted = false
+  const message = error instanceof Error ? error.message : String(error)
+  console.error(`[shell] dsh 启动失败：${message}`)
+  notifier.notify(SCENARIO.STARTUP_ERROR, `dsh 启动失败：${message}`)
+  // 无窗口模式（CI/黑盒）没有托盘可救，把失败原样抛出去：缝 ① 靠这一条判红
+  if (noWindow) throw error
+  // 启动界面留着红字，告诉他还有别的路（启动界面还没到 dom-ready 时不能推 JS：原生层会 FATAL）
+  if (splash !== null && splashReady) {
+    try {
+      splash.webview?.executeJavascript(splashFailScript(`${message}\n\n托盘已就绪：在托盘里换运行时版本或退出。`))
+    } catch {}
+  }
+}
+if (dshStarted) {
+  console.log(`SHELL-READY ${JSON.stringify({ ...service.state, locale })}`)
+  // 服务面就绪：把 origin/页面 URL 回填给实例锁，第二个壳才能激活这个窗口
+  updateInstance(instanceFile, process.pid, { origin: service.state.origin, pageUrl: service.state.pageUrl })
+  // P2 测试钩子（旧壳 lib.rs:744 _AUTO_QUIT）：服务面就绪后延迟自动退出，给 CI/探针一个干净的结束信号
+  if ((process.env.DSH_DESKTOP_AUTO_QUIT ?? '') !== '') {
+    const delayMs = Number(process.env.DSH_DESKTOP_AUTO_QUIT) > 0 ? Number(process.env.DSH_DESKTOP_AUTO_QUIT) : 3_000
+    setTimeout(() => {
+      console.log('[shell] DSH_DESKTOP_AUTO_QUIT 触发自动退出')
+      void shutdown()
+    }, delayMs).unref?.()
+  }
 }
 
+// #117：DSH 没起来就不建桌面窗口（页面要的是 DSH），但**启动界面留着、托盘留着**——
+// 这正是这张单要的死局出口。
 let startupBlocked = false
 if (!noWindow) {
-  // 启动被阻塞时在启动界面报错（端口被陌生程序占用；本壳/外部 dsh 占用已在壳内自动清场后自拉，不再询问）。
-  if (service.state.blocked !== undefined) {
-    splash?.webview?.executeJavascript(splashFailScript(service.state.blocked))
-    setTimeout(() => { void shutdown() }, SPLASH_FAILURE_HOLD_MS)
+  // 端口被陌生程序占着（service.state.blocked）或 DSH 根本没起来，都不进桌面窗口。
+  if (service.state.status !== 'running') {
+    // #117：失败原因已经在 ensureRunning 的 catch 里推过启动界面了，这里不重复推。
     startupBlocked = true
   }
   // 标题栏形态与旧壳对齐：macOS 保留原生红绿灯并叠在内容上（旧壳 TitleBarStyle::Overlay），
@@ -1373,48 +1493,7 @@ if (!noWindow) {
   for (const profile of extraProfiles) void openProfileWindow(profile)
 }
 
-// ---- 托盘：显示/隐藏、profile、运行时来源、退出 ----
-// 无窗口模式（CI/黑盒）不建托盘——那里没有窗口可隐藏，托盘只会碍事。
-if (!noWindow) {
-  const image = trayImagePath()
-  if (image === null) {
-    console.warn('[shell] 找不到托盘图标（resources/tray.png / runtime/tray.png），本次不建托盘')
-  } else {
-    tray = createTray({
-      image,
-      state: trayState(),
-      onAction: onTrayAction,
-      onEmptyClick: () => {
-        // P8（旧壳 tray.rs:265-285，#181）：左键单击托盘 = 聚焦最后活跃窗口；没有就开主 profile 的窗
-        const win = focusedWindow()
-        if (win !== null && win !== undefined) {
-          win.unminimize?.()
-          win.show()
-          win.activate()
-        } else {
-          void openProfileWindow(instanceProfile)
-        }
-      },
-      log: (line) => console.log(line)
-    })
-    // 菜单保鲜（#62）：状态每 5s 走一次 fs 级快探测（不 spawn）。Electrobun 的 Tray 只有
-    // tray-clicked 一个事件、拿不到「菜单即将打开」的钩子，所以保鲜靠轮询而不是打开时现查；
-    // 只有状态真变了才 refreshTray()（它内部对菜单 JSON 去重，没变就完全不碰原生菜单）。
-    setInterval(() => {
-      if (tray === null) return
-      const before = registerCli.cached()
-      const after = registerCli.poll()
-      if (after.kind === before.kind && after.resolved === before.resolved) return
-      refreshTray()
-    }, 5_000)
-    refreshTray()
-  }
-  // macOS Dock 图标被点（无可见窗口时）：把主窗带回来
-  app.on('reopen', () => {
-    console.log('[shell] Dock 再激活：显示主窗')
-    showMainWindow()
-  })
-}
+// 托盘的建法已经上移到冷启动编排里（startupTray，排在 DSH 之前——见 #117）。
 
 let stopping = false
 const shutdown = async (): Promise<void> => {
