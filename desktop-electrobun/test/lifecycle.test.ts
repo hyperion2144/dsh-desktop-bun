@@ -232,6 +232,34 @@ describe('宿主停止：等到真退出，超时就升级 SIGKILL', () => {
     expect(parentWatch.isProcessAlive(started.pid)).toBe(false)
   }, 30_000)
 
+  // #101：宿主运行期注入清单通道。图重算后宿主经 stdout 补发 HOST-INJECTIONS 行，
+  // 壳侧解析后回调 onInjections 刷新 boot 载荷；坏 JSON 只记日志不许炸解析泵。
+  test('#101：HOST-INJECTIONS 行触发 onInjections 回调（坏 JSON 只记日志）', async () => {
+    const dir = tempDir()
+    const injections = [{ kind: 'client', src: 'plugins/??demo/client.js&rev=aa' }]
+    const layout = fakeLayout(
+      dir,
+      [
+        readyLine(),
+        `setTimeout(() => { console.log('HOST-INJECTIONS ' + JSON.stringify({ type: 'injections', injections: ${JSON.stringify(injections)} })) }, 200)`,
+        "setTimeout(() => { console.log('HOST-INJECTIONS not-json') }, 300)",
+        'setTimeout(() => {}, 60000)',
+      ].join('\n') + '\n',
+    )
+    const seen: unknown[][] = []
+    const started = await startHost({
+      layout,
+      clientVersion: '0.0.0-test',
+      env: process.env,
+      timeoutMs: 15_000,
+      onInjections: (rows) => seen.push(rows),
+    })
+    await Bun.sleep(700)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toEqual(injections)
+    await started.stop()
+  }, 30_000)
+
   // Windows 没有 POSIX 信号语义（`kill('SIGTERM')` 即 TerminateProcess），这套「先礼后兵」的升级路径只在 POSIX 上有意义。
   test.skipIf(process.platform === 'win32')('升级路径：忽略 SIGTERM 的宿主也要被 SIGKILL 收掉（不留孤儿）', async () => {
     const dir = tempDir()

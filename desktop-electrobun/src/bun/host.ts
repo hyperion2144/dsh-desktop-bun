@@ -25,6 +25,8 @@ export interface StartHostInput {
   /** dsh 子进程的环境；缺省用壳继承的 process.env（GUI 启动时是 launchd 的最小集） */
   env?: Record<string, string | undefined>
   onLog?: (line: string) => void
+  /** #101 运行期通道：宿主 client-module 图重算后，经 stdout `HOST-INJECTIONS {json}` 行上报新注入清单 */
+  onInjections?: (injections: unknown[]) => void
   timeoutMs?: number
   /** `--patch` 注入清单（插件 staging 的产物；缺省不注入） */
   patchFiles?: string[]
@@ -58,6 +60,7 @@ export interface HostHandle {
 }
 
 const READY_PREFIX = 'HOST-READY '
+const INJECTIONS_PREFIX = 'HOST-INJECTIONS '
 const DEFAULT_TIMEOUT_MS = 120_000
 /** 优雅退出等待：SIGTERM 后多久升级到 SIGKILL（壳退出不能拖住进程） */
 const STOP_GRACE_MS = 5_000
@@ -73,6 +76,7 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
   const profile = input.profile ?? layout.profile
   const bunBin = input.bunBin ?? process.execPath
   const onLog = input.onLog ?? (() => {})
+  const onInjections = input.onInjections ?? (() => {})
   const env = buildChildEnv({
     base: input.env ?? process.env,
     clientVersion: input.clientVersion,
@@ -154,6 +158,17 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
               // 不能 return：终止 for-await 会取消子进程 stdout 的读取端，
               // 此后宿主任何 stdout 写（如 mobile-access accessLog）都 EPIPE → 宿主 fatal（#41）。
               // 继续 drain 到流尾（宿主退出）；ready 二次 resolve 本就是 no-op。
+              continue
+            }
+            if (line.startsWith(INJECTIONS_PREFIX)) {
+              // #101：运行期注入清单更新。消费这行（载荷大，不透传 onLog；宿主自己会打摘要行），
+              // 通知壳刷新 boot 载荷——旧壳把载荷冻在 HOST-READY 那一刻，插件更新后刷新页面必死（#101）。
+              try {
+                const update = JSON.parse(line.slice(INJECTIONS_PREFIX.length)) as { injections?: unknown[] }
+                if (Array.isArray(update.injections)) onInjections(update.injections)
+              } catch (error) {
+                onLog(`[host] HOST-INJECTIONS 解析失败：${error instanceof Error ? error.message : String(error)}`)
+              }
               continue
             }
             if (line.trim() !== '') onLog(`[host] ${line}`)
