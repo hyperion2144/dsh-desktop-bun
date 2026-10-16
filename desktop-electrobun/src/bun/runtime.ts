@@ -89,8 +89,7 @@ export function appSupportDir(env: Record<string, string | undefined> = process.
 export function trayImagePath(env: Record<string, string | undefined> = process.env): string | null {
   const explicit = env.DSH_SHELL_TRAY_IMAGE
   if (explicit !== undefined && explicit !== '') return explicit
-  const projectRoot =
-    env.DSH_SHELL_PROJECT ?? findProjectRoot(import.meta.dir) ?? packagedRoot(import.meta.dir) ?? resolve(import.meta.dir, '..', '..')
+  const projectRoot = shellProjectRoot({ env })
   const candidates = process.platform === 'win32'
     ? [
         join(projectRoot, 'resources', 'tray.ico'),
@@ -371,6 +370,34 @@ export function packagedResourcesFromLauncher(
   return null
 }
 
+/** 壳项目根：开发态 desktop-electrobun/，打包态包内 <app>/Contents/Resources/app
+ *  （trayImagePath()/layout() 与通知身份图标解析共用的同一条链，#107 抽取；探测逐级兜底与
+ *  layout() 同口径：env 覆盖 → launcher 锚 → 进程锚 → import.meta 链）。launcher 未显式传入时
+ *  进程内缓存一次（launcher 进程期不变，省重复 spawn——win32 解析要走一次 PowerShell CIM）。 */
+let launcherExeCache: { value: string | null } | undefined
+
+export function shellProjectRoot(input: {
+  env: Record<string, string | undefined>
+  launcherExe?: string | null
+  execPath?: string
+  exists?: (path: string) => boolean
+}): string {
+  const exists = input.exists ?? existsSync
+  const launcherExe =
+    input.launcherExe !== undefined
+      ? input.launcherExe
+      : (launcherExeCache ??= { value: resolveLauncherExecutablePath(input.env) }).value
+  const execPath = input.execPath ?? process.execPath
+  return (
+    input.env.DSH_SHELL_PROJECT ??
+    packagedRootFromLauncher(launcherExe, exists) ??
+    packagedRootFromProcess(execPath, exists) ??
+    findProjectRoot(import.meta.dir) ??
+    packagedRoot(import.meta.dir) ??
+    resolve(import.meta.dir, '..', '..')
+  )
+}
+
 export function layout(input: LayoutInput = {}): ShellLayout {
   const env = input.env ?? process.env
   const home = dshHome(env)
@@ -382,11 +409,10 @@ export function layout(input: LayoutInput = {}): ShellLayout {
         : 'desktop'
   // 项目根与资源根按「launcher.exe 所在目录」向上锚定（Electrobun 约定 <app 树>/bin/launcher.exe）——
   // 自定义安装/解压目录说了算；core 把进程从规范根拉起也不改口径。探测逐级兜底：
-  // launcher 锚 → 进程锚 → import.meta 链（dev 态最终落这里）。
+  // launcher 锚 → 进程锚 → import.meta 链（dev 态最终落这里）。链收敛在 shellProjectRoot（#107 抽取共用）。
   const launcherExe = input.launcherPath !== undefined ? input.launcherPath : resolveLauncherExecutablePath(env)
   const execPath = input.execPath ?? process.execPath
-  const projectRoot =
-    env.DSH_SHELL_PROJECT ?? packagedRootFromLauncher(launcherExe) ?? packagedRootFromProcess(execPath) ?? findProjectRoot(import.meta.dir) ?? packagedRoot(import.meta.dir) ?? resolve(import.meta.dir, '..', '..')
+  const projectRoot = shellProjectRoot({ env, launcherExe, execPath })
   const repoRoot = resolve(projectRoot, '..')
   const resourcesDir =
     env.DSH_SHELL_RESOURCES ?? packagedResourcesFromLauncher(launcherExe) ?? packagedResourcesFromProcess(execPath) ?? packagedResources(import.meta.dir)
