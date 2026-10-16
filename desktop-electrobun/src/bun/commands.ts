@@ -18,6 +18,7 @@ import type { PortClaim } from '../shared/ports.ts'
 import { EMPTY_TASK, startupAction, validProfileName, type MigrationStatus, type ProfileDependencyRow, type StartupHealth, type TaskSnapshot } from '../shared/profile-ops.ts'
 import type { ShellUpdater } from './updater.ts'
 import type { ProxyEnv } from '../shared/proxy-env.ts'
+import type { KeepAwakeCapability } from './keep-awake.ts'
 
 export interface CommandDeps {
   home: string
@@ -121,6 +122,8 @@ export interface CommandDeps {
   zoomToggle?: () => void
   /** F12：确认弹窗回填的同槽转发（旧壳 ui_input_confirm） */
   inputConfirm?: (flow: string, value: string) => void
+  /** #75：防休眠能力快照（Linux 拿不到 inhibit 通道时要能说出来；无窗口单测可不接） */
+  keepAwake?: () => KeepAwakeCapability
 }
 
 /** 上游端口：状态条与「dsh 来源」卡都要它（壳状态快照里的 upstreamPort） */
@@ -208,6 +211,8 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
         ],
         // 面板的 nsGet() 读这一段（旧壳只回吐扁平键，那段其实是死的）
         settings: serializeSettings(settings),
+        // #75：防休眠通道的能力快照（旧壳/无窗口单测缺省 null，面板据此显示「拿不到通道」）
+        keep_awake: deps.keepAwake?.() ?? null,
       }
     },
 

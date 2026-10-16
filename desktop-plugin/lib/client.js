@@ -1477,6 +1477,35 @@ function devToolsSavedNote(on) {
   return on ? "\u5DF2\u5F00\u542F\uFF1A\u6B63\u5728\u91CD\u542F\u684C\u9762\u58F3\uFF0C\u91CD\u542F\u540E\u8C03\u8BD5\u53E3\u4E0E\u53F3\u952E\u83DC\u5355\u300C\u6253\u5F00 DevTools\u300D\u751F\u6548\u3002" : "\u5DF2\u5173\u95ED\uFF1A\u6B63\u5728\u91CD\u542F\u684C\u9762\u58F3\uFF0C\u91CD\u542F\u540E\u8C03\u8BD5\u53E3\u5173\u95ED\u3001\u83DC\u5355\u6D88\u5931\u3002";
 }
 
+// src/client/keep-awake-note.ts
+var NOTE_TAIL = "\u76F4\u5230\u4F1A\u8BDD\u8DD1\u5B8C\u3001dsh \u5B9E\u4F8B\u505C\u6B62\u6216\u9000\u51FA\u58F3\u3002\u5C4F\u5E55\u8BE5\u5173\u8FD8\u662F\u7167\u5173\uFF0C\u53EA\u662F\u4E0D\u8BA9\u6574\u673A\u7761\u8FC7\u53BB\uFF1B\u5408\u76D6\u4ECD\u7136\u4F1A\u7761\u3002\u6539\u52A8\u7ACB\u5373\u751F\u6548\u3002";
+var GENERIC_HEAD = "\u7184\u5C4F\u540E\u82E5\u8FD8\u6709\u4F1A\u8BDD\u5728\u8DD1\uFF0C\u58F3\u4F1A\u6301\u6709\u7CFB\u7EDF\u9632\u4F11\u7720\u65AD\u8A00\uFF08macOS \u8D70 IOKit\u3001Windows \u8D70\u7EBF\u7A0B\u6267\u884C\u72B6\u6001\u3001Linux \u8D70 logind/GNOME \u4F1A\u8BDD\u6291\u5236\uFF09";
+var BACKEND_HEAD = /* @__PURE__ */ new Map([
+  ["caffeinate", "\u7184\u5C4F\u540E\u82E5\u8FD8\u6709\u4F1A\u8BDD\u5728\u8DD1\uFF0C\u58F3\u4F1A\u6301\u6709\u7CFB\u7EDF\u9632\u4F11\u7720\u65AD\u8A00\uFF08macOS \u8D70 IOKit / caffeinate\uFF09"],
+  ["execution-state", "\u7184\u5C4F\u540E\u82E5\u8FD8\u6709\u4F1A\u8BDD\u5728\u8DD1\uFF0C\u58F3\u4F1A\u6301\u6709\u7CFB\u7EDF\u9632\u4F11\u7720\u65AD\u8A00\uFF08Windows \u8D70\u7EBF\u7A0B\u6267\u884C\u72B6\u6001\uFF09"],
+  ["systemd-inhibit", "\u7184\u5C4F\u540E\u82E5\u8FD8\u6709\u4F1A\u8BDD\u5728\u8DD1\uFF0C\u58F3\u4F1A\u6301\u6709\u7CFB\u7EDF\u9632\u4F11\u7720\u65AD\u8A00\uFF08Linux \u8D70 logind \u6291\u5236\u9501\uFF0Csystemd-inhibit\uFF09"],
+  [
+    "gnome-session-inhibit",
+    "\u7184\u5C4F\u540E\u82E5\u8FD8\u6709\u4F1A\u8BDD\u5728\u8DD1\uFF0C\u58F3\u4F1A\u6301\u6709\u7CFB\u7EDF\u9632\u4F11\u7720\u65AD\u8A00\uFF08Linux \u8D70 GNOME \u4F1A\u8BDD\u6291\u5236\uFF0Cgnome-session-inhibit\uFF09"
+  ]
+]);
+function reasonText(reason) {
+  return typeof reason === "string" && reason.trim() !== "" ? reason.trim() : "\u539F\u56E0\u672A\u77E5";
+}
+function keepAwakeNote(capability) {
+  const cap = capability ?? {};
+  if (cap.available === false) {
+    return {
+      tone: "warn",
+      text: `\u672C\u73AF\u5883\u62FF\u4E0D\u5230\u9632\u4F11\u7720\u901A\u9053\uFF1A${reasonText(cap.reason)}\u3002\u5F00\u5173\u5C31\u7B97\u5F00\u7740\uFF0C\u8DD1\u4F1A\u8BDD\u671F\u95F4\u7CFB\u7EDF\u4ECD\u53EF\u80FD\u7A7A\u95F2\u4F11\u7720\uFF1B${NOTE_TAIL}`
+    };
+  }
+  if (cap.available === true) {
+    return { tone: "info", text: `${BACKEND_HEAD.get(cap.backend ?? "") ?? GENERIC_HEAD}\uFF0C${NOTE_TAIL}` };
+  }
+  return { tone: "info", text: `${GENERIC_HEAD}\uFF0C${NOTE_TAIL}` };
+}
+
 // src/client/desktop-settings.tsx
 var import_jsx_runtime3 = require("react/jsx-runtime");
 var nsRpc = null;
@@ -1607,6 +1636,10 @@ var BTN_DANGER_STYLE = {
 var DANGER_NOTE_STYLE = {
   ...NOTE_STYLE,
   color: "var(--dsw-alias-state-danger-primary,#e5534b)"
+};
+var WARN_NOTE_STYLE = {
+  ...NOTE_STYLE,
+  color: "var(--dsw-alias-state-warn,#e8a33d)"
 };
 async function nsSave(patch) {
   await invoke2("save_desktop_settings", { patch });
@@ -1880,7 +1913,8 @@ function DesktopSettingsPanel() {
           port: ns.port || d.port || 3080,
           mux_heartbeat_ms: d.mux_heartbeat_ms ?? null,
           desktop_layout_on_phones: d.desktop_layout_on_phones ?? null,
-          prevent_sleep: d.prevent_sleep ?? null
+          prevent_sleep: d.prevent_sleep ?? null,
+          keep_awake: d.keep_awake ?? null
         });
         const forwarderSaved = ns.lane_forwarder_port;
         setForwarderInput(typeof forwarderSaved === "number" && forwarderSaved > 0 ? String(forwarderSaved) : "");
@@ -2879,7 +2913,10 @@ function DesktopSettingsPanel() {
         "\u6709\u4F1A\u8BDD\u5728\u8DD1\u65F6\u963B\u6B62\u7CFB\u7EDF\u4F11\u7720\uFF08\u7F3A\u7701\u5F00\uFF09"
       ] }) }),
       preventSleepNote && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: preventSleepNote }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u7184\u5C4F\u540E\u82E5\u8FD8\u6709\u4F1A\u8BDD\u5728\u8DD1\uFF0C\u58F3\u4F1A\u6301\u6709\u7CFB\u7EDF\u9632\u4F11\u7720\u65AD\u8A00\uFF08macOS \u8D70 IOKit\u3001Windows \u8D70\u7EBF\u7A0B\u6267\u884C\u72B6\u6001\uFF09\uFF0C \u76F4\u5230\u4F1A\u8BDD\u8DD1\u5B8C\u3001dsh \u5B9E\u4F8B\u505C\u6B62\u6216\u9000\u51FA\u58F3\u3002\u5C4F\u5E55\u8BE5\u5173\u8FD8\u662F\u7167\u5173\uFF0C\u53EA\u662F\u4E0D\u8BA9\u6574\u673A\u7761\u8FC7\u53BB\uFF1B\u5408\u76D6\u4ECD\u7136\u4F1A\u7761\u3002\u6539\u52A8\u7ACB\u5373\u751F\u6548\u3002" })
+      (() => {
+        const note = keepAwakeNote(desktop.keep_awake);
+        return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: note.tone === "warn" ? WARN_NOTE_STYLE : NOTE_STYLE, children: note.text });
+      })()
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u5F00\u53D1\u8005\u5DE5\u5177", children: [
       /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: ROW_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [

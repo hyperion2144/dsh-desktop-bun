@@ -795,5 +795,81 @@ const rdu = await import(pathToFileURL(join(tmp, 'runtime-download-ui.mjs')).hre
 }
 
 
+
+// ── keep-awake-note（#75）：防休眠能力提示——缺位 / 拿不到通道 / 按 backend 分平台口径 ──
+await build({
+  entryPoints: [join(root, 'src/client/keep-awake-note.ts')],
+  outfile: join(tmp, 'keep-awake-note.mjs'),
+  format: 'esm',
+  platform: 'node',
+  target: 'node20',
+  logLevel: 'silent',
+})
+const ka = await import(pathToFileURL(join(tmp, 'keep-awake-note.mjs')).href)
+
+// 与面板其余说明共用的尾句（逐字；改口径必须先改这里）
+const KA_TAIL =
+  '直到会话跑完、dsh 实例停止或退出壳。屏幕该关还是照关，只是不让整机睡过去；合盖仍然会睡。改动立即生效。'
+
+// 缺位（老壳没有 keep_awake 字段）/ available 缺失：info + 三平台口径，不把「不知道」说成「不支持」
+for (const [label, cap] of [
+  ['字段缺省', undefined],
+  ['字段为 null', null],
+  ['字段在但 available 缺失', { platform: 'linux', backend: 'systemd-inhibit' }],
+]) {
+  const note = ka.keepAwakeNote(cap)
+  assert.equal(note.tone, 'info', `${label}：未知按 info 说明，不误报降级`)
+  for (const token of ['macOS', 'Windows', 'Linux']) {
+    assert.ok(note.text.includes(token), `${label}：通用说明含 ${token}`)
+  }
+  assert.ok(note.text.includes(KA_TAIL), `${label}：含共同尾句`)
+}
+
+// available:false（拿不到 inhibit 通道）：warn + 明说降级 + 壳给的 reason 原文，绝不静默
+const kaOff = ka.keepAwakeNote({
+  platform: 'linux',
+  backend: null,
+  available: false,
+  reason: 'systemd-inhibit 不在 PATH，且没有可用的 logind 会话抑制',
+})
+assert.equal(kaOff.tone, 'warn', '拿不到通道必须 warn（面板走醒目色）')
+assert.ok(kaOff.text.includes('本环境拿不到防休眠通道'), 'warn 明说本环境拿不到防休眠通道')
+assert.ok(kaOff.text.includes('systemd-inhibit 不在 PATH'), 'warn 原文带上壳给的原因')
+assert.ok(kaOff.text.includes('空闲休眠'), 'warn 说清开关开着也可能空闲休眠')
+
+// reason 缺失 / 非字符串：固定兜底句，且任何分支都不许把 undefined 漏进文案
+for (const [label, cap] of [
+  ['reason 缺省', { available: false }],
+  ['reason 为 null', { available: false, reason: null }],
+  ['reason 为空白串', { available: false, reason: '  ' }],
+  ['reason 非字符串', { available: false, reason: 42 }],
+]) {
+  const note = ka.keepAwakeNote(cap)
+  assert.equal(note.tone, 'warn', `${label}：仍然 warn`)
+  assert.ok(note.text.includes('本环境拿不到防休眠通道'), `${label}：仍然明说降级`)
+  assert.ok(note.text.includes('原因未知'), `${label}：缺原因时给固定兜底句`)
+  assert.ok(!note.text.includes('undefined'), `${label}：文案里不许出现 undefined`)
+}
+
+// available:true：按 backend 给平台口径（四个通道各一条）
+for (const [backend, token] of [
+  ['caffeinate', 'IOKit'],
+  ['execution-state', '线程执行状态'],
+  ['systemd-inhibit', 'systemd-inhibit'],
+  ['gnome-session-inhibit', 'gnome-session-inhibit'],
+]) {
+  const note = ka.keepAwakeNote({ platform: 'linux', backend, available: true })
+  assert.equal(note.tone, 'info', `${backend}：通道可用按 info 说明`)
+  assert.ok(note.text.includes(token), `${backend}：文案含 ${token}`)
+  assert.ok(note.text.includes(KA_TAIL), `${backend}：含共同尾句`)
+}
+
+// 未知 backend（壳将来加通道）：回退三平台通用说明，不空口断言某个平台
+const kaUnknown = ka.keepAwakeNote({ platform: 'linux', backend: 'portable-signal', available: true })
+assert.equal(kaUnknown.tone, 'info', '未知 backend 按 info')
+for (const token of ['macOS', 'Windows', 'Linux']) {
+  assert.ok(kaUnknown.text.includes(token), `未知 backend 回退通用说明（含 ${token}）`)
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log('client 纯函数测试：全部通过 ✓')

@@ -19,6 +19,7 @@ import {
 
 import { ThemeSelect } from './theme-select.tsx'
 import { devToolsConfirmCopy, devToolsDisableCopy, devToolsSavedNote, planDevToolsUi } from './devtools-toggle.ts'
+import { keepAwakeNote, type KeepAwakeCapabilityLike } from './keep-awake-note.ts'
 export const inject = ['slots']
 
 // 设置项持久化走壳 RPC（nsSave → invoke('save_desktop_settings')，宿主单写者
@@ -69,6 +70,8 @@ interface DesktopData {
   prevent_sleep?: boolean | null
   /** #69 开发者工具：打包态重启后开 CEF 远程调试口并放出菜单（缺省 false；安全面） */
   dev_tools?: boolean | null
+  /** #75 防休眠能力（壳探测到的系统抑制通道）：缺位 = 老壳，available:false = 本环境拿不到，面板必须明说降级 */
+  keep_awake?: KeepAwakeCapabilityLike | null
 }
 
 interface DshSourceState {
@@ -263,6 +266,10 @@ const BTN_DANGER_STYLE: React.CSSProperties = {
 const DANGER_NOTE_STYLE: React.CSSProperties = {
   ...NOTE_STYLE,
   color: 'var(--dsw-alias-state-danger-primary,#e5534b)',
+}
+const WARN_NOTE_STYLE: React.CSSProperties = {
+  ...NOTE_STYLE,
+  color: 'var(--dsw-alias-state-warn,#e8a33d)',
 }
 const SUCCESS_NOTE_STYLE: React.CSSProperties = {
   fontSize: 12,
@@ -690,6 +697,7 @@ function DesktopSettingsPanel(): React.ReactElement {
           mux_heartbeat_ms: d.mux_heartbeat_ms ?? null,
           desktop_layout_on_phones: d.desktop_layout_on_phones ?? null,
           prevent_sleep: d.prevent_sleep ?? null,
+          keep_awake: d.keep_awake ?? null,
         })
         const forwarderSaved = ns.lane_forwarder_port
         setForwarderInput(typeof forwarderSaved === 'number' && forwarderSaved > 0 ? String(forwarderSaved) : '')
@@ -1910,7 +1918,7 @@ function DesktopSettingsPanel(): React.ReactElement {
           相同的桌面布局：明显更流畅，代价是排版更挤（可横屏缓解）。不勾选 = 移动布局。改动重启 dsh 生效。
         </div>
 
-      {/* ── 电源（#186）── */}
+      {/* ── 电源（#186 / #75 防休眠能力）── */}
       <SectionBox title="电源">
         <div style={ROW_STYLE}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1924,10 +1932,11 @@ function DesktopSettingsPanel(): React.ReactElement {
           </label>
         </div>
         {preventSleepNote && <div style={NOTE_STYLE}>{preventSleepNote}</div>}
-        <div style={NOTE_STYLE}>
-          熄屏后若还有会话在跑，壳会持有系统防休眠断言（macOS 走 IOKit、Windows 走线程执行状态），
-          直到会话跑完、dsh 实例停止或退出壳。屏幕该关还是照关，只是不让整机睡过去；合盖仍然会睡。改动立即生效。
-        </div>
+        {(() => {
+          // #75：壳报的防休眠能力决定这段口径——拿不到抑制通道时降级为醒目提示（不许静默）。
+          const note = keepAwakeNote(desktop.keep_awake)
+          return <div style={note.tone === 'warn' ? WARN_NOTE_STYLE : NOTE_STYLE}>{note.text}</div>
+        })()}
       </SectionBox>
       {/* ── 开发者工具（#69）── */}
       <SectionBox title="开发者工具">

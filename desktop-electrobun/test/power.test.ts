@@ -6,7 +6,20 @@
 // 平台断言用注入的假 spawn 断言调用形状；macOS 上另有一例真 `caffeinate` 落地验证。
 
 import { describe, expect, test } from 'bun:test'
-import { createKeepAwake, ES_CONTINUOUS, ES_SYSTEM_REQUIRED, TICK_MS } from '../src/bun/keep-awake.ts'
+import {
+  ASSERTION_NAME,
+  createKeepAwake,
+  ES_CONTINUOUS,
+  ES_SYSTEM_REQUIRED,
+  LINUX_NO_BACKEND_REASON,
+  linuxInhibitBackends,
+  linuxInhibitCommand,
+  syncPreventSleep,
+  TICK_MS,
+  watchdogScript,
+  type AwakeChild,
+  type KeepAwake,
+} from '../src/bun/keep-awake.ts'
 import {
   bearerToken,
   classifyNotify,
@@ -15,6 +28,7 @@ import {
 } from '../src/bun/notify-server.ts'
 import { buildChildEnv } from '../src/shared/child-env.ts'
 import {
+  type Arbiter,
   BUSY_HEARTBEAT_MS,
   createArbiter,
   LEASE_STALE_MS,
@@ -211,22 +225,122 @@ describe('keep-awake（平台断言，注入假 spawn）', () => {
   interface FakeChild {
     pid: number
     killed: boolean
+    /** 带 exited 的假子进程（withExited）：用例 resolve 它来演「起来就秒退」。 */
+    exited?: Promise<number>
   }
 
-  function fakeAwake(): { spawns: string[][]; children: FakeChild[]; spawnCommand: (command: string[]) => { pid: number; kill: () => void } } {
+  /**
+   * 假 spawn：默认子进程一直活着；`withExited` 时每个子进程带一个用例可控的 exited promise
+   * （`exit(code)` 按启动顺序 resolve 最早那个），用来验秒退认账。
+   */
+  function fakeAwake(withExited = false): {
+    spawns: string[][]
+    children: FakeChild[]
+    spawnCommand: (command: string[]) => AwakeChild
+    exit: (code: number) => void
+  } {
     const spawns: string[][] = []
     const children: FakeChild[] = []
+    const pending: Array<(code: number) => void> = []
     return {
       spawns,
       children,
+      exit: (code: number) => {
+        pending.shift()?.(code)
+      },
       spawnCommand: (command: string[]) => {
         spawns.push(command)
         const child: FakeChild = { pid: 4_000 + spawns.length, killed: false }
         children.push(child)
-        return { pid: child.pid, kill: (): void => void (child.killed = true) }
+        const kill = (): void => void (child.killed = true)
+        if (!withExited) return { pid: child.pid, kill }
+        const exited = new Promise<number>((resolve) => {
+          pending.push(resolve)
+        })
+        child.exited = exited
+        return { pid: child.pid, kill, exited }
       },
     }
   }
+
+  /** 假 KeepAwake：syncPreventSleep 只碰 start/stop，这里就把这一面记下来。 */
+  function fakeKeep(arbiter: Arbiter): { calls: string[]; keepAwake: KeepAwake } {
+    const calls: string[] = []
+    return {
+      calls,
+      keepAwake: {
+        arbiter,
+        start: (): void => void calls.push('start'),
+        stop: (): void => void calls.push('stop'),
+        tick: (): boolean => false,
+        isHolding: (): boolean => false,
+        capability: () => ({ platform: 'linux', backend: null, available: false, reason: null }),
+      },
+    }
+  }
+
+  describe('syncPreventSleep（#186/#75：prevent_sleep 运行期可改，saveSettings 是唯一写路径）', () => {
+    test('同值不动：已开再传开，start/stop 都不被调（无关保存不 churn）', () => {
+      const arbiter = createArbiter()
+      const { calls, keepAwake } = fakeKeep(arbiter)
+      syncPreventSleep(true, { arbiter, keepAwake })
+      expect(arbiter.isEnabled()).toBe(true)
+      expect(calls).toEqual([])
+    })
+
+    test('关→开：裁决器跟着开，tick 循环被拉起（start 一次、stop 不调）', () => {
+      const arbiter = createArbiter({ enabled: false })
+      const { calls, keepAwake } = fakeKeep(arbiter)
+      syncPreventSleep(true, { arbiter, keepAwake })
+      expect(arbiter.isEnabled()).toBe(true)
+      expect(calls).toEqual(['start'])
+    })
+
+    test('开→关：裁决器关掉，持有中的断言被释放（stop 被调，持有进程被杀）', () => {
+      const arbiter = createArbiter()
+      const fake = fakeAwake()
+      const awake = createKeepAwake({
+        arbiter,
+        platform: 'darwin',
+        pid: 7,
+        spawnCommand: fake.spawnCommand,
+        setIntervalFn: () => 0,
+        clearIntervalFn: () => {},
+      })
+      arbiter.setBusy('desktop', true, Date.now())
+      expect(awake.tick()).toBe(true)
+      expect(fake.children[0]?.killed).toBe(false)
+
+      syncPreventSleep(false, { arbiter, keepAwake: awake })
+
+      expect(arbiter.isEnabled()).toBe(false)
+      expect(fake.children[0]?.killed).toBe(true)
+      expect(awake.isHolding()).toBe(false)
+    })
+
+    test('真实链路（B8 验收路径）：启动时关 → 运行期开 → 忙起来真起断言', () => {
+      const arbiter = createArbiter({ enabled: false })
+      const fake = fakeAwake()
+      const awake = createKeepAwake({
+        arbiter,
+        platform: 'darwin',
+        pid: 7,
+        spawnCommand: fake.spawnCommand,
+        setIntervalFn: () => 0,
+        clearIntervalFn: () => {},
+      })
+      // 启动时开关是关的：忙起来也不持有、不起进程
+      arbiter.setBusy('desktop', true, Date.now())
+      expect(awake.tick()).toBe(false)
+      expect(fake.spawns).toHaveLength(0)
+
+      // 面板保存（运行期开）→ 下一次裁决就该真起断言
+      syncPreventSleep(true, { arbiter, keepAwake: awake })
+      expect(awake.tick()).toBe(true)
+      expect(fake.spawns).toHaveLength(1)
+      awake.stop()
+    })
+  })
 
   test('macOS：忙了才起 caffeinate（-i -w 壳 pid），闲了杀掉，重复 tick 不重复起', () => {
     const logs: string[] = []
@@ -318,13 +432,122 @@ describe('keep-awake（平台断言，注入假 spawn）', () => {
     expect(flags).toEqual([ES_CONTINUOUS | ES_SYSTEM_REQUIRED, ES_CONTINUOUS])
   })
 
-  test('Linux：不动平台、只留一条说明日志（旧壳同样没实现）', () => {
+  test('Linux：systemd-inhibit 主通道——命令逐字、capability 上报、闲了释放', () => {
     const logs: string[] = []
     const arbiter = createArbiter()
     const fake = fakeAwake()
     const awake = createKeepAwake({
       arbiter,
       platform: 'linux',
+      pid: 9_999,
+      which: (command) => (command === 'systemd-inhibit' ? '/usr/bin/systemd-inhibit' : null),
+      env: {},
+      log: (line) => logs.push(line),
+      spawnCommand: fake.spawnCommand,
+    })
+
+    expect(awake.tick()).toBe(false)
+    expect(fake.spawns).toEqual([])
+
+    arbiter.setBusy('desktop', true, Date.now())
+    expect(awake.tick()).toBe(true)
+    expect(awake.tick()).toBe(true)
+    expect(fake.spawns).toEqual([
+      ['systemd-inhibit', '--what=idle', '--mode=block', `--why=${ASSERTION_NAME}`, 'sh', '-c', watchdogScript(9_999)],
+    ])
+    expect(fake.children).toHaveLength(1)
+    expect(fake.children[0]?.killed).toBe(false)
+    expect(awake.capability()).toEqual({
+      platform: 'linux',
+      backend: 'systemd-inhibit',
+      available: true,
+      reason: null,
+    })
+    expect(logs.some((line) => line.includes('持有断言'))).toBe(true)
+
+    arbiter.setBusy('desktop', false, Date.now())
+    expect(awake.tick()).toBe(false)
+    expect(fake.children[0]?.killed).toBe(true)
+    expect(logs.some((line) => line.includes('释放断言'))).toBe(true)
+  })
+
+  // 这里只锁脚本逐字（两条孤儿腿都在）；SIGKILL / release 两腿的语义证据在
+  // docs/adr/0002-linux-keep-awake-inhibit.md 的容器矩阵（dash + busybox ash），用例名不再暗示已跑过 SIGKILL 语义。
+  test('Linux：持有命令带看门狗两腿（脚本逐字；语义证据见 ADR-0002 容器矩阵）', () => {
+    expect(watchdogScript(4_242)).toBe(
+      'while kill -0 4242 2>/dev/null; do [ "$PPID" -le 1 ] && exit 0; kill -0 "$PPID" 2>/dev/null || exit 0; sleep 2; done',
+    )
+    // 防回归：硬化腿（kill -0 "$PPID"）与收养腿都不许被删（dash/ash 下前者才是真判据）
+    expect(watchdogScript(4_242)).toContain('kill -0 4242')
+    expect(watchdogScript(4_242)).toContain('kill -0 "$PPID"')
+    expect(watchdogScript(4_242)).toContain('[ "$PPID" -le 1 ] && exit 0')
+    expect(linuxInhibitCommand('systemd-inhibit', 'why', 4_242).slice(-3)).toEqual([
+      'sh',
+      '-c',
+      watchdogScript(4_242),
+    ])
+    expect(linuxInhibitCommand('gnome-session-inhibit', 'why', 4_242)).toEqual([
+      'gnome-session-inhibit',
+      '--inhibit=suspend',
+      '--reason=why',
+      'sh',
+      '-c',
+      watchdogScript(4_242),
+    ])
+  })
+
+  test('Linux：GNOME 会话首选 gnome-session-inhibit（--inhibit=suspend，屏幕该熄照熄）', () => {
+    const logs: string[] = []
+    const arbiter = createArbiter()
+    const fake = fakeAwake()
+    const which = (command: string): string | null => `/usr/bin/${command}`
+    // GNOME：gnome-session 在前（gsd-power 自动挂起前读的是它的 InhibitedActions）
+    expect(linuxInhibitBackends(which, { XDG_CURRENT_DESKTOP: 'ubuntu:GNOME' })).toEqual([
+      'gnome-session-inhibit',
+      'systemd-inhibit',
+    ])
+    // 会话判定大小写不敏感（真实环境里有 `GNOME` / `gnome` / `ubuntu:GNOME` 各种写法）
+    expect(linuxInhibitBackends(which, { DESKTOP_SESSION: 'gnome' })).toEqual([
+      'gnome-session-inhibit',
+      'systemd-inhibit',
+    ])
+
+    const awake = createKeepAwake({
+      arbiter,
+      platform: 'linux',
+      pid: 8_888,
+      which,
+      env: { XDG_CURRENT_DESKTOP: 'ubuntu:GNOME' },
+      log: (line) => logs.push(line),
+      spawnCommand: fake.spawnCommand,
+    })
+    arbiter.setBusy('desktop', true, Date.now())
+    expect(awake.tick()).toBe(true)
+    expect(fake.spawns).toEqual([
+      ['gnome-session-inhibit', '--inhibit=suspend', `--reason=${ASSERTION_NAME}`, 'sh', '-c', watchdogScript(8_888)],
+    ])
+    expect(awake.capability()).toEqual({
+      platform: 'linux',
+      backend: 'gnome-session-inhibit',
+      available: true,
+      reason: null,
+    })
+
+    arbiter.setBusy('desktop', false, Date.now())
+    expect(awake.tick()).toBe(false)
+    expect(fake.children[0]?.killed).toBe(true)
+    expect(logs.some((line) => line.includes('释放断言'))).toBe(true)
+  })
+
+  test('Linux：两个通道都拿不到就认账（不假装持有、只落一条原因、capability 可见）', () => {
+    const logs: string[] = []
+    const arbiter = createArbiter()
+    const fake = fakeAwake()
+    const awake = createKeepAwake({
+      arbiter,
+      platform: 'linux',
+      env: {},
+      which: () => null,
       log: (line) => logs.push(line),
       spawnCommand: fake.spawnCommand,
     })
@@ -332,7 +555,156 @@ describe('keep-awake（平台断言，注入假 spawn）', () => {
     expect(awake.tick()).toBe(false)
     expect(awake.tick()).toBe(false)
     expect(fake.spawns).toEqual([])
-    expect(logs.filter((line) => line.includes('本平台'))).toHaveLength(1)
+    expect(awake.isHolding()).toBe(false)
+    expect(logs.filter((line) => line.includes('拿不到防休眠通道'))).toHaveLength(1)
+    expect(awake.capability()).toEqual({
+      platform: 'linux',
+      backend: null,
+      available: false,
+      reason: LINUX_NO_BACKEND_REASON,
+    })
+  })
+
+  test('Linux：持有进程秒退就认账（剔除候选、报 exit、不再无限重生）', async () => {
+    const logs: string[] = []
+    const arbiter = createArbiter()
+    const fake = fakeAwake(true)
+    const awake = createKeepAwake({
+      arbiter,
+      platform: 'linux',
+      pid: 1_234,
+      which: (command) => (command === 'systemd-inhibit' ? '/usr/bin/systemd-inhibit' : null),
+      env: {},
+      log: (line) => logs.push(line),
+      spawnCommand: fake.spawnCommand,
+    })
+    arbiter.setBusy('desktop', true, Date.now())
+    expect(awake.tick()).toBe(true)
+    expect(fake.spawns).toHaveLength(1)
+
+    fake.exit(1)
+    await Bun.sleep(1)
+
+    const capability = awake.capability()
+    expect(capability.available).toBe(false)
+    expect(capability.backend).toBeNull()
+    expect(capability.reason).toBe('systemd-inhibit 启动后立即退出（exit=1）')
+    expect(logs).toContain(
+      '[keepawake] Linux 拿不到防休眠通道：systemd-inhibit 启动后立即退出（exit=1）',
+    )
+
+    // 候选只减不增：不许每秒重生进程，原因也只落一条
+    expect(awake.tick()).toBe(false)
+    expect(awake.tick()).toBe(false)
+    expect(fake.spawns).toHaveLength(1)
+    expect(logs.filter((line) => line.includes('exit=1'))).toHaveLength(1)
+  })
+
+  test('Linux：非 GNOME 桌面不让 gnome-session-inhibit 进候选（白起进程还刷日志）', () => {
+    const arbiter = createArbiter()
+    const fake = fakeAwake()
+    const which = (command: string): string | null => `/usr/bin/${command}`
+    expect(linuxInhibitBackends(which, { XDG_CURRENT_DESKTOP: 'KDE' })).toEqual(['systemd-inhibit'])
+
+    const awake = createKeepAwake({
+      arbiter,
+      platform: 'linux',
+      pid: 1_234,
+      which,
+      env: { XDG_CURRENT_DESKTOP: 'KDE' },
+      spawnCommand: fake.spawnCommand,
+    })
+    arbiter.setBusy('desktop', true, Date.now())
+    expect(awake.tick()).toBe(true)
+    expect(fake.spawns).toHaveLength(1)
+    expect(fake.spawns[0]?.[0]).toBe('systemd-inhibit')
+    expect(awake.capability().backend).toBe('systemd-inhibit')
+    awake.stop()
+  })
+
+  test('Linux：GNOME 上 gnome-session 秒退 → 按序降级到 systemd-inhibit，全试完才认账', async () => {
+    const arbiter = createArbiter()
+    const fake = fakeAwake(true)
+    const awake = createKeepAwake({
+      arbiter,
+      platform: 'linux',
+      pid: 1_234,
+      which: (command) => `/usr/bin/${command}`,
+      env: { XDG_SESSION_DESKTOP: 'gnome' },
+      spawnCommand: fake.spawnCommand,
+    })
+    arbiter.setBusy('desktop', true, Date.now())
+    expect(awake.tick()).toBe(true)
+    expect(fake.spawns[0]?.[0]).toBe('gnome-session-inhibit')
+
+    fake.exit(1)
+    await Bun.sleep(1)
+
+    // 降级：候选里还有 systemd，capability 仍说「拿得到」
+    expect(awake.capability().available).toBe(true)
+    expect(awake.capability().backend).toBe('systemd-inhibit')
+    expect(awake.tick()).toBe(true)
+    expect(fake.spawns).toHaveLength(2)
+    expect(fake.spawns[1]?.[0]).toBe('systemd-inhibit')
+
+    // 兜底也秒退 → 候选耗尽，认账且不再重生
+    fake.exit(1)
+    await Bun.sleep(1)
+    expect(awake.capability().available).toBe(false)
+    expect(awake.capability().reason).toBe('systemd-inhibit 启动后立即退出（exit=1）')
+    expect(awake.tick()).toBe(false)
+    expect(fake.spawns).toHaveLength(2)
+    awake.stop()
+  })
+
+  test('Linux 真进程：systemd-inhibit 真的拿住了锁，释放后真的没了', async () => {
+    if (process.platform !== 'linux') return
+    const logs: string[] = []
+    const spawnedPids: number[] = []
+    const arbiter = createArbiter()
+    arbiter.setBusy('desktop', true, Date.now())
+    // 真 spawn（与 defaultSpawn 同形）：记下 pid，好对着 systemd-inhibit --list 断言
+    const awake = createKeepAwake({
+      arbiter,
+      log: (line) => logs.push(line),
+      spawnCommand: (command) => {
+        const child = Bun.spawn(command, { stdout: 'ignore', stderr: 'ignore' })
+        spawnedPids.push(child.pid)
+        return { pid: child.pid, kill: (): void => void child.kill(), exited: child.exited }
+      },
+    })
+    awake.tick()
+    // 给秒退判定一拍时间：拿不到通道时这条路径要跑完
+    await Bun.sleep(300)
+
+    const capability = awake.capability()
+    if (!capability.available) {
+      // 非 systemd/GNOME 会话（容器/CI）：必须留下可见原因，且不假装持有
+      expect(capability.reason).not.toBeNull()
+      expect(logs.some((line) => line.includes(capability.reason ?? ''))).toBe(true)
+      expect(awake.isHolding()).toBe(false)
+      awake.stop()
+      return
+    }
+
+    expect(spawnedPids).toHaveLength(1)
+    const holder = spawnedPids[0] ?? 0
+    if (capability.backend === 'systemd-inhibit') {
+      const listed = new TextDecoder().decode(Bun.spawnSync(['systemd-inhibit', '--list']).stdout)
+      expect(listed).toContain(String(holder))
+    } else {
+      // GNOME 兜底通道没有 --list 可查：只确认持有进程活着
+      expect(awake.isHolding()).toBe(true)
+    }
+
+    arbiter.setBusy('desktop', false, Date.now())
+    expect(awake.tick()).toBe(false)
+    await Bun.sleep(300)
+    if (capability.backend === 'systemd-inhibit') {
+      const after = new TextDecoder().decode(Bun.spawnSync(['systemd-inhibit', '--list']).stdout)
+      expect(after).not.toContain(String(holder))
+    }
+    awake.stop()
   })
 
   test('macOS 真进程：caffeinate 真的起来了，释放后真的没了', async () => {
