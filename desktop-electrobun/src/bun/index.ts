@@ -19,8 +19,9 @@ import type { RuntimeDownloadStatus } from './runtime-install.ts'
 import { SHELL_MENU_ACTIONS, contextMenuItems, isOpenablePath } from './context-menu.ts'
 import { isExternalUrl } from './external.ts'
 import { APP_NAME } from '../shared/app.ts'
-import { appSupportDir, dshHome, trayImagePath } from './runtime.ts'
-import { acquireInstance, activateUrl, releaseInstance, updateInstance } from './single-instance.ts'
+import { appSupportDir, dshHome, resolveLauncherExecutablePath, trayImagePath } from './runtime.ts'
+import { acquireInstance, activateUrl, defaultIsAlive, releaseInstance, updateInstance } from './single-instance.ts'
+import { awaitParentExit, relaunchDesktopApp, relaunchParentPid } from './app-restart.ts'
 import { createViewRegistry } from '../shared/view-grant.ts'
 import { createGuestManager, type GuestViewLike } from './guest-manager.ts'
 import { loadNativeWebviewCore } from './native-webview.ts'
@@ -546,11 +547,13 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     onContextMenu: (request) => {
       const linkIsExternal =
         request.linkUrl !== null && isExternalUrl(request.linkUrl, originOf(profile))
-      // 菜单可见性唯一事实源在 devtools.ts：dev 构建恒可见；打包态＝开关开且本次启动口已开（可见⇔口开）。
+      // #119：settingOn 改**实时读**（原为 bootSettings 启动快照）。菜单门控本不必等重启：
+      // 关掉开关菜单立刻消失（口还开着但没入口，方向安全）；`cdpReady` 仍是启动快照——
+      // 口开没开由那次启动真决定，env 早于第一个 CEF 窗 / WebView2 environment 写入，运行期改不了。
       const isPackagedBuild = BuildConfig.getSync().isPackaged
       const devToolsMenuOn = devToolsMenuEnabled({
         isPackaged: isPackagedBuild,
-        settingOn: bootSettings.devTools === true,
+        settingOn: uiService().settings().devTools === true,
         cdpReady: devToolsCdpReady,
       })
       // 菜单统一「打开 DevTools」（#106 返工）：CEF＝openDevTools 应用内 inspector；
@@ -626,6 +629,8 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     },
     // #79：面板「重启 dsh 服务」= 统一 restartDsh（树级全重启 + 关窗→splash→原样重开）；无窗口模式回落宿主级
     onFullRestart: noWindow ? undefined : () => restartDsh(),
+    // #119：dev_tools 保存后的生效路径。拉不起时带原因回传（dev 态显式降级），不假报成功。
+    onRestartApp: () => restartDesktopApp(),
     notifier,
     // 同一个 UN 桥实例（状态与投递都走它；面板的权限徽标也从这里读）
     notifyBridge,
@@ -966,6 +971,50 @@ async function restartDsh(): Promise<void> {
   }
 }
 
+/** #119 保存后重探调试口：把「保存了但口开不了」变成用户能看到的字，而不是重启完才发现没反应。 */
+async function recheckDevToolsPort(): Promise<string | null> {
+  const plan = await planDevToolsBoot({
+    isPackaged: build.isPackaged,
+    settingOn: uiService().settings().devTools === true,
+    envOverride: process.env[DEVTOOLS_PORT_OVERRIDE_ENV],
+    isFree: isPortBindable,
+  })
+  if (plan.reason === 'port-unavailable') {
+    return `端口 ${String(plan.port)} 当前被占用，重启后也不会开口（可用 ${DEVTOOLS_PORT_OVERRIDE_ENV} 换口）`
+  }
+  if (plan.reason === 'port-invalid') {
+    return `${DEVTOOLS_PORT_OVERRIDE_ENV} 非法（需要 1-65535 整数），按未开启处理`
+  }
+  return null
+}
+
+/**
+ * #119 整应用重启（B）：先拉起新实例，**再**退自己。
+ *
+ * 顺序不能反：先退就没人执行 spawn；先退到一半再拉也不行（壳正在释放端口，新实例会抢到一半的世界）。
+ * 新实例知道自己是被拉起来的（DSH_SHELL_RELAUNCH_PID），会等本进程真退干净再抢实例锁（app-restart.ts）。
+ * 拉不起来（dev 构建 / 探测不到 launcher）**不退出、不假报成功**，把原因原样回给页面。
+ */
+async function restartDesktopApp(): Promise<{ ok: boolean; reason?: string; message?: string }> {
+  const warning = await recheckDevToolsPort().catch(() => null)
+  const plan = await relaunchDesktopApp({
+    isPackaged: build.isPackaged,
+    launcherExe: resolveLauncherExecutablePath(),
+    pid: process.pid,
+    onLog: (line) => console.log(line),
+  })
+  if (!plan.ok) {
+    notifier.notify(SCENARIO.STARTUP_ERROR, '重启桌面应用未完成', plan.message)
+    return { ok: false, reason: plan.reason, message: plan.message }
+  }
+  if (warning !== null) {
+    console.error(`[shell] 重启桌面应用：${warning}`)
+    notifier.notify(SCENARIO.STARTUP_ERROR, '开发者工具：重启后口仍开不了', warning)
+  }
+  await shutdown()
+  return { ok: true }
+}
+
 /** 托盘「重启 dsh 服务」：完整重启语义（#60）——等效退出应用再启动，伴生进程不跨重启残留。 */
 async function restartServiceFromTray(): Promise<void> {
   console.log('[shell] 托盘：重启 dsh 服务')
@@ -976,7 +1025,6 @@ async function restartServiceFromTray(): Promise<void> {
   }
   refreshTray()
 }
-
 
 /**
  * 托盘「运行时版本」：内置 / 某个已下载版本。
@@ -1221,7 +1269,18 @@ async function registerDshCliFromTray(): Promise<void> {
 // CEF 层的 Chromium ProcessSingleton（按 <identifier>/<channel>/CEF 数据目录加锁）不归它管；
 // 并行带窗双实例还要在构建期用 DSH_SHELL_DEV_IDENTIFIER 换 id（见 electrobun.config / README #38）。
 const instanceFile = join(appSupportDir(), 'shell-instance.json')
-const instance = acquireInstance(instanceFile, instanceProfile)
+// #119 接班等待：本实例是被上一个实例拉起来的话，先等它真退干净再抢锁。
+// 不等的话会撞上「旧 pid 还活着」→ 判定已有实例 → 激活它后自己退出 → 净结果什么都没起来。
+const relaunchParent = relaunchParentPid(process.env)
+if (relaunchParent !== null) {
+  console.log(`[shell] 重启接班：等待上一个实例（pid ${String(relaunchParent)}）退出`)
+  const gone = await awaitParentExit({ pid: relaunchParent, isAlive: defaultIsAlive })
+  console.log(gone ? `[shell] 重启接班：上一个实例已退出` : `[shell] 重启接班：等待超时（${String(relaunchParent)} 仍在），照常启动`)
+}
+const instance = acquireInstance(instanceFile, instanceProfile, {
+  // 接班窗口的兜底：即便上面的等待超时了，也不把刚退未退净的旧实例当成「已有实例」。
+  ...(relaunchParent === null ? {} : { succeedsPid: relaunchParent }),
+})
 const skipSingleton = (process.env.DSH_DESKTOP_NO_SINGLETON ?? '') !== ''
 if (!instance.acquired && !skipSingleton) {
   const previous = instance.previous

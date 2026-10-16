@@ -18,7 +18,7 @@ import {
 } from './runtime-download-ui.ts'
 
 import { ThemeSelect } from './theme-select.tsx'
-import { devToolsConfirmCopy, devToolsDisableCopy, devToolsSavedNote, planDevToolsUi } from './devtools-toggle.ts'
+import { devToolsConfirmCopy, devToolsDisableCopy, devToolsSavedNote, planDevToolsUi, type DevToolsRestartOutcome } from './devtools-toggle.ts'
 import { keepAwakeNote, type KeepAwakeCapabilityLike } from './keep-awake-note.ts'
 export const inject = ['slots']
 
@@ -468,13 +468,20 @@ function DesktopSettingsPanel(): React.ReactElement {
     setDevToolsConfirmKind(null)
     setDevTools(on)
     void nsSave({ dev_tools: on })
-      // 重启会把本调用连同页面一起重载（Failed to fetch）——这是完整重启的预期形态，不是失败；
-      // 只有真正的保存失败才报错并回滚勾选态。
-      .then(() => invoke('restart_dsh_service').catch(() => undefined))
-      .then(() => setDevToolsNote(devToolsSavedNote(on)))
+      // #119：改走 `restart_desktop_app`（整应用退出 + 自动拉起），不再走 `restart_dsh_service`。
+      // 后者只重起 DSH 树、壳不动，而 dev_tools 的决策（planDevToolsBoot + C environ 双写）锁在壳进程加载那一刻——
+      // 不重启壳它永不重跑。这就是 #69「保存即重启桌面壳」的文案与实现的背离。
+      .then(() => invoke<DevToolsRestartOutcome>('restart_desktop_app'))
+      // 回包两路：拉起来了 { ok:true }；拉不起来 { ok:false, reason, message }（dev 态、探测不到 launcher）。
+      .then((outcome) => setDevToolsNote(devToolsSavedNote(on, outcome)))
       .catch((e) => {
-        setDevTools(!on)
-        setDevToolsNote(`保存失败：${String(e)}`)
+        // 壳已经开始退时 RPC 连接随之断开（Failed to fetch 一类）——那是重启**成功**的预期形态，不是失败
+        // （沿用 #79 重启语义的老判据）。真拉不起来时壳会回包，走上面那条降级文案。
+        if (/failed to fetch|network ?error|load failed|fetch failed|terminated/i.test(String(e))) {
+          setDevToolsNote(devToolsSavedNote(on))
+          return
+        }
+        setDevToolsNote(`设置已保存，但重启桌面应用失败：${String(e)}`)
       })
   }
 

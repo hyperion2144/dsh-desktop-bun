@@ -674,9 +674,24 @@ assert.ok(dtCopy.lines.some((l) => l.includes('凭据')), '文案点破会话内
 assert.ok(dtCopy.confirm.includes('重启'), '确认动作带重启语义')
 assert.equal(dtCopy.cancel, '取消', '取消不写入')
 
-// 保存后提示：两个方向都点明要重启
+// 保存后提示：#119 区分「真的重启了」与「没重启成」——后者不得预支「正在重启」
 assert.ok(dt.devToolsSavedNote(true).includes('重启'), '开启提示含重启')
 assert.ok(dt.devToolsSavedNote(false).includes('重启'), '关闭提示含重启')
+assert.ok(dt.devToolsSavedNote(true).includes('正在重启'), '未收到回包时沿用「正在重启」文案')
+assert.ok(dt.devToolsSavedNote(true, { ok: true }).includes('正在重启'), '重启成功同文案')
+const dtFailNote = dt.devToolsSavedNote(true, { ok: false, reason: 'dev-build', message: '开发构建不支持自动重启' })
+assert.ok(!dtFailNote.includes('正在重启'), '没重启成就不许说「正在重启」（#119：禁止假装重启成功）')
+assert.ok(dtFailNote.includes('设置已保存'), '失败文案先说设置存下来了')
+assert.ok(dtFailNote.includes('手动重启'), '失败文案给出补救路径')
+assert.ok(dtFailNote.includes('开发构建不支持自动重启'), '壳给的原因原样透出，不被吃掉')
+assert.ok(
+  dt.devToolsSavedNote(false, { ok: false, reason: 'spawn-failed' }).includes('spawn-failed'),
+  '只有 reason 没有 message 时也把 reason 说出来',
+)
+assert.ok(
+  dt.devToolsSavedNote(true, { ok: false }).includes('未知原因'),
+  '回包既没 message 也没 reason 时有兜底说法，不出「undefined」',
+)
 
 // ── runtime-download-ui（#97）：下载终态判定 / 取消 / 「当前使用」归一 ──
 await build({

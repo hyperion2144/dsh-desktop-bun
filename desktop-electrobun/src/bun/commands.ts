@@ -33,6 +33,8 @@ export interface CommandDeps {
   save: (patch: Record<string, unknown>) => DesktopSettings
   /** dsh 服务面：重启（设置面板调；#60 起为壳级完整重启，缺省回落宿主级） */
   restartService?: () => Promise<void>
+  /** #119：整应用退出 + 自动重启（B）。拉不起时必须带原因回传——dev 态要显式降级，禁止假装成功。 */
+  restartApp?: () => Promise<{ ok: boolean; reason?: string; message?: string }>
   /** dsh 服务面状态快照（`get_dsh_status`） */
   status?: () => Record<string, unknown>
   /** 壳当前占用的端口（`list_profile_ports` 用：页面口/上游口/lane 口） */
@@ -363,6 +365,18 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       deps.log('[rpc] 收到重启 dsh 服务请求')
       await deps.restartService()
       return {}
+    },
+
+    // #119 整应用重启（B）：dev_tools 保存后的生效路径。**与 restart_dsh_service 分开**：
+    // 后者只重起 DSH 树（#60 语义，壳不动），而 dev_tools 的决策锁在壳进程加载那一刻
+    // （模块顶层 planDevToolsBoot + C environ 双写），不重启壳就永不重跑。
+    // 失败（如 dev 构建不支持自拉起）**不抛**：把原因原样回传，让页面说人话，而不是假装成功。
+    restart_desktop_app: async () => {
+      if (deps.restartApp === undefined) throw new Error('restart_desktop_app: 桌面壳重启不可用')
+      deps.log('[rpc] 收到重启桌面应用请求')
+      const result = await deps.restartApp()
+      deps.log(`[rpc] 重启桌面应用：${result.ok ? '已拉起新实例，本进程即将退出' : `${result.reason ?? 'unknown'} —— ${result.message ?? ''}`}`)
+      return result
     },
 
     // 多窗口：设置面板每份窗口各问一次壳，但端口表要覆盖所有 profile。

@@ -98,6 +98,8 @@ export interface AcquireOptions {
   isAlive?: (pid: number) => boolean
   /** 当前开机标识（默认自己读）；测试可覆盖 */
   bootId?: string
+  /** #119：本进程接的是谁的班——该 pid 虽还活着（正退未退净）也**不算**已有实例，允许接管。 */
+  succeedsPid?: number
   /** 判断某个 pid 是否还是我们的壳进程（默认 `ps -o comm=`）；测试可覆盖 */
   isOurProcess?: (pid: number) => boolean
   /** 覆盖身份，便于单测 */
@@ -149,9 +151,13 @@ export function acquireInstance(
     bootId,
   }
   const existing = readInstance(file)
-  // 「已有实例还活着」要同时满足三条：pid 活着、仍是我们的壳进程、且不是上次开机留下的记录。
+  // 「已有实例还活着」要同时满足四条：pid 不是自己、不是要接班的那个、pid 活着、
+  // 仍是我们的壳进程、且不是上次开机留下的记录。
   // 只看 pid 会在系统重启后被别家进程（pid 复用）骗过去 ⇒ 用户看到的症状是「点了没反应」。
-  if (existing !== null && existing.pid !== pid && isAlive(existing.pid)) {
+  // succeedsPid（#119）：整应用重启时新实例是被旧实例拉起来的，旧实例此刻往往还活着——
+  // 不豁免它，新实例会判定「已有实例」→ 激活旧实例后自己退出 → 净结果什么都没起来。
+  const succeedsPid = options.succeedsPid
+  if (existing !== null && existing.pid !== pid && existing.pid !== succeedsPid && isAlive(existing.pid)) {
     const sameBoot = bootId === '' || existing.bootId === '' || existing.bootId === bootId
     if (sameBoot && isOurProcess(existing.pid)) {
       return { acquired: false, previous: existing, record: existing }
