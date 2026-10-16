@@ -7,7 +7,8 @@ import { ApplicationMenu, BrowserView, BrowserWindow, BuildConfig, ContextMenu, 
 import { acceptShimScript } from './accept-shim.ts'
 import { systemLocale } from './locale.ts'
 import { installApplicationMenu } from './menu.ts'
-import { deriveMaximized, ensureNativeMaximizeStyles, getWorkAreaForFrame, toggleWindowMaximize, windowMaxState, type WindowMaxState } from './window-max.ts'
+import { deriveMaximized, ensureNativeMaximizeStyles, getWorkAreaForFrame, HEAL_MAX_REPLACES, healVerdict, isMaximizedPlacementDamaged, toggleWindowMaximize, windowMaxState, type WindowMaxState } from './window-max.ts'
+import { shellLogLine } from './shell-log.ts'
 import { bootPreloadScript } from './preload.ts'
 import { attachShellRpc } from './rpc-bridge.ts'
 import { startService, type ServiceOptions, type ShellService } from './service.ts'
@@ -256,8 +257,8 @@ function scheduleFrameSave(win: BrowserWindow, profile: string): void {
 }
 /**
  * 几何立即落盘（scheduleFrameSave 定时器 / 关窗 flush / 退出 flush 三处共用）：
- * 最大化态 = 原生旗标 ∨ 几何推导——后者兜住「补丁失败走了手动 setFrame」的场景，
- * 那种窗口原生旗标恒 false，只记旗标的话重启就丢最大化态。
+ * 最大化态 = 原生旗标 ∨ 几何推导——后者兜住旗标未落的窗口（启动期、系统贴靠
+ * 等场景），只记旗标的话重启就丢最大化态。
  */
 function saveFrameNow(win: BrowserWindow, profile: string): void {
   const frame = win.getFrame()
@@ -392,29 +393,61 @@ function refreshTray(): void {
  * 天然不触发。触发面：focus + resize（去抖）+ focus 后延迟复查——实机证明落位
  * 外扩在恢复动画完成后才定格，focus 当拍检查经常早于损坏成形；resize 则在最终
  * 摆位后必到。每次判定都落日志（含 workArea 取不取得到），实机排查有据可查。
+ * 三轮重开（双屏 2K 越屏依旧）定位：前两轮的损坏判定错用了状态推导的
+ * deriveMaximized(frame, workArea, true)——旗标为真它恒真，判定永远「落位正常」，
+ * 自愈从未触发（4K 屏系统不走外扩补偿，死代码因此在前两轮实机验证中没现形）。
+ * 改用专用损坏判定 isMaximizedPlacementDamaged（容差 4px：THICKFRAME 边框 96DPI
+ * 就有 8px/边，8px 容差会把恰好 8px 的外扩当正常吃掉），并加同段最大化期重摆
+ * 上限（HEAL_MAX_REPLACES）防「重摆→resize→再检查」循环闪窗。
  */
 const healCheckTimers = new Map<string, ReturnType<typeof setTimeout>>()
+/** 延迟复查的登记版计时器：可被重摆取消顺延（裸 setTimeout 不受管，会在重摆动画
+ *  中途开火——实机「恢复时抖几下」的来源）。 */
+const healRecheckTimers = new Map<string, ReturnType<typeof setTimeout>>()
+/** 同段最大化期已原生重摆次数（healVerdict 的计数存储）。只在最大化期结束（旗标
+ * 落下）或窗口销毁时清零；判定 clean 不重置——若 damaged↔clean 交替刷新预算，
+ * 上限就挡不住「重摆→动画中途量到好帧→再损坏」的循环。 */
+const healReplaces = new Map<string, number>()
 /** 去抖窗口：resize 连发期间只做最后一次检查，重摆引发的 resize 不叠加。 */
 const HEAL_DEBOUNCE_MS = 250
-/** focus 后延迟复查：给恢复动画留出定格时间。 */
+/** 延迟复查间隔：给恢复/重摆动画留出定格时间。 */
 const HEAL_RECHECK_DELAY_MS = 350
 
 function healMaximizedPlacement(win: BrowserWindow, profile: string, reason: string): void {
   if (process.platform !== 'win32') return
-  if (!win.isMaximized()) return
+  if (!win.isMaximized()) {
+    healReplaces.delete(profile) // 旗标落下 = 一段最大化期结束，重摆计数清零
+    return
+  }
   const frame = win.getFrame()
   const workArea = getWorkAreaForFrame(frame)
   if (workArea === null) {
-    console.log(`[shell] #80 heal 检查（${reason}）：workArea 取不到（ffi 失败？），跳过`)
+    shellLogLine(`[shell] #80 heal 检查（${reason}）：workArea 取不到（ffi 失败？），跳过`)
     return
   }
-  if (deriveMaximized(frame, workArea, true)) {
-    console.log(`[shell] #80 heal 检查（${reason}）：落位正常，不干预`)
+  const verdict = healVerdict(isMaximizedPlacementDamaged(frame, workArea), healReplaces.get(profile) ?? 0)
+  if (verdict === 'clean') {
+    shellLogLine(`[shell] #80 heal 检查（${reason}）：落位正常，不干预 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}`)
     return
   }
-  console.log(`[shell] #80 heal 检查（${reason}）：落位外扩 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}，原生重摆`)
+  if (verdict === 'exhausted') {
+    shellLogLine(`[shell] #80 heal 检查（${reason}）：已重摆 ${HEAL_MAX_REPLACES} 次仍外扩，停止防循环 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}（重摆也落不好，日志留给上游 WM_NCCALCSIZE 根治）`)
+    return
+  }
+  healReplaces.set(profile, (healReplaces.get(profile) ?? 0) + 1)
+  shellLogLine(
+    `[shell] #80 heal 检查（${reason}）：落位外扩 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}，原生重摆（第 ${healReplaces.get(profile)} 次）`,
+  )
   win.unmaximize()
   win.maximize()
+  // 重摆会引发 resize 与动画：作废在途的去抖检查与延迟复查，重摆落定后重排一次
+  // 复查——后续判定全部锚在最近一次摆位动作之后，不在动画中途开火（实机抖动修复）。
+  const pendingDebounce = healCheckTimers.get(profile)
+  if (pendingDebounce !== undefined) {
+    clearTimeout(pendingDebounce)
+    healCheckTimers.delete(profile)
+  }
+  scheduleHealRecheck(win, profile, '重摆后复查')
 }
 
 /** resize/focus 入口的去抖包装：同窗连发只留最后一次。 */
@@ -426,6 +459,17 @@ function scheduleHealCheck(win: BrowserWindow, profile: string, reason: string):
     healCheckTimers.delete(profile)
     healMaximizedPlacement(win, profile, reason)
   }, HEAL_DEBOUNCE_MS))
+}
+
+/** 延迟复查的登记版：重摆时会被取消顺延，复查永远落在最近一次摆位动作之后。 */
+function scheduleHealRecheck(win: BrowserWindow, profile: string, reason: string): void {
+  if (process.platform !== 'win32') return
+  const previous = healRecheckTimers.get(profile)
+  if (previous !== undefined) clearTimeout(previous)
+  healRecheckTimers.set(profile, setTimeout(() => {
+    healRecheckTimers.delete(profile)
+    healMaximizedPlacement(win, profile, reason)
+  }, HEAL_RECHECK_DELAY_MS))
 }
 
 function showMainWindow(): void {
@@ -708,10 +752,6 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
   })
   win.on('focus', () => {
     focusedProfile = profile
-    scheduleHealCheck(win, profile, 'focus')
-    // 实机证据：落位外扩在恢复动画完成后才定格，focus 当拍检查常早于损坏成形，
-    // 延迟复查一次兜住。
-    setTimeout(() => healMaximizedPlacement(win, profile, 'focus+350ms'), HEAL_RECHECK_DELAY_MS)
     // lane 稳定接入点跟随焦点（旧壳 forwarder.rs：新连接落焦点实例，存量不动）。
     // #73：启动恢复最大化断言（唯一断言点）——Windows 上从未显示的窗 maximize 可能不落
     // 旗标（建窗时试过不稳），首次获得焦点时窗口必然已可见，再补一次并推送图标重查；
@@ -727,6 +767,12 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
         shellRpcHandle.notifyWindowState()
       }
     }
+    // #80 自检排在启动补 maximize 之后：去抖 250ms/复查 350ms 都落在补推完成后，
+    // 不会量到启动最大化动画中途的还原帧（与 #73 收敛方向一致）。
+    scheduleHealCheck(win, profile, 'focus')
+    // 实机证据：落位外扩在恢复动画完成后才定格，focus 当拍检查常早于损坏成形，
+    // 延迟复查一次兜住。
+    scheduleHealRecheck(win, profile, 'focus+350ms')
     // 转发器挂在先起的那份服务面上，这里找到它再指目标。
     focusedLaneForwarder()?.setTarget(services.get(profile)?.state.lanePort ?? 0)
     refreshTray()
@@ -760,6 +806,14 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
       } catch {}
     }
     windows.delete(profile)
+    // #80：heal 的挂起去抖/延迟复查定时器与重摆计数随窗口回收（迟到的定时器不再摸已销毁的窗）
+    const healTimer = healCheckTimers.get(profile)
+    if (healTimer !== undefined) clearTimeout(healTimer)
+    healCheckTimers.delete(profile)
+    const healRecheck = healRecheckTimers.get(profile)
+    if (healRecheck !== undefined) clearTimeout(healRecheck)
+    healRecheckTimers.delete(profile)
+    healReplaces.delete(profile)
     // 窗口没了就撤销它的视图 token（旧壳的 capability 是静态文件，这里跟着窗口走）
     views.revokeLabel(windowKey(profile))
     // 窗口里的 guest 子 webview 跟着窗口一起回收（否则会留在窗口之外无法关闭）
