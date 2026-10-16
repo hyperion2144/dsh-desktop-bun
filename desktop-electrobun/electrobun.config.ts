@@ -87,6 +87,12 @@ export default {
       // 托盘图标：prepare:bundle 把旧的 32x32.png 拷到 resources/tray.png，再落进包内 runtime/
       'resources/tray.png': 'runtime/tray.png',
       // Windows 托盘：shell tray 用 .ico（win32 原生格式），资源同上链路
+      // Windows 通知身份图标（#107）：身份注册的 IconUri 指向包内这份（运行时经
+      // win-notify-identity 解析 resources/ 与 runtime/ 两处）。源由 prepare:bundle 物化，
+      // 缺失时不声明这条 copy（Electrobun 的 copy 不会「源缺就跳过」，与 dylib 同口径）。
+      ...(existsSync(join(import.meta.dir, 'resources', 'app-icon.ico'))
+        ? { 'resources/app-icon.ico': 'runtime/app-icon.ico' }
+        : {}),
       'resources/tray.ico': 'runtime/tray.ico',
       // macOS 通知桥（旧壳 notify_un.rs 的等价物）：dylib 由 `bun run build:native` 编出来，
       // 先编后打（见 package.json 的 build 链），装完才有真授权状态与真投递。

@@ -46,7 +46,6 @@ module.exports = __toCommonJS(index_exports);
 
 // src/client/shell-rpc.ts
 var RPC_ENDPOINT = "/__shell__/rpc";
-var WINDOW_ENDPOINT = "/__shell__/window";
 var VIEW_TOKEN_HEADER = "x-dsh-shell-view";
 var DEFAULT_TIMEOUT_MS = 15e3;
 var MAX_ID = 1e10;
@@ -171,85 +170,11 @@ function createShellRpc(deps) {
   };
 }
 var shellRpc = createShellRpc();
-async function sendWindowAction(action, deps) {
-  const method = { minimize: "window_minimize", "toggle-maximize": "window_toggle_maximize", close: "window_close" }[action];
-  const rpc = deps?.rpc ?? shellRpc;
-  const readGlobals = deps?.readGlobals ?? (() => globalThis);
-  if (typeof readGlobals().__electrobunHostBridge?.postMessage === "function") {
-    await rpc.invoke(method, {}, { timeoutMs: 3e4 });
-    return;
-  }
-  const fetchImpl = deps?.fetchImpl ?? ((...a) => fetch(...a));
-  const token = readGlobals().__DSH_SHELL_VIEW_TOKEN__;
-  const response = await fetchImpl(WINDOW_ENDPOINT, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...typeof token === "string" && token !== "" ? { [VIEW_TOKEN_HEADER]: token } : {} },
-    body: JSON.stringify({ action })
-  });
-  if (!response.ok) throw new Error(`window action failed: ${String(response.status)}`);
-}
 
 // src/client/local-chrome.ts
-var STRIP_HEIGHT = {
-  darwin: 28,
-  win32: 32,
-  linux: 32
-};
+var DARWIN_STRIP_HEIGHT = 28;
 var TRAFFIC_LIGHT_BAND = 76;
-var CAPTION_CONTROLS_WIDTH = 138;
 var FRAME_LAYER_SELECTOR = "[data-shell-overlay]";
-function runWindowAction(action) {
-  sendWindowAction(action).catch((error) => console.error("[dsh-desktop] window action failed", error));
-}
-var maximizeIconSvg = (maximized) => maximized ? '<rect x="1.5" y="4.5" width="7" height="6" stroke="currentColor" strokeWidth="1" fill="none" /><path d="M3.5 4.5V2.5H10.5V9H8.5" stroke="currentColor" strokeWidth="1" fill="none" />' : '<rect x="1.5" y="1.5" width="9" height="9" stroke="currentColor" strokeWidth="1" fill="none" />';
-function syncMaximizeIcon() {
-  const button = document.querySelector(".dshDesktopCaptionButton-maximize");
-  if (button === null) return;
-  shellRpc.invoke("window_get_state", void 0, { timeoutMs: 5e3 }).then((state) => {
-    button.innerHTML = `<svg viewBox="0 0 12 12" aria-hidden="true">${maximizeIconSvg(state.maximized)}</svg>`;
-    button.setAttribute("aria-label", state.maximized ? "\u8FD8\u539F" : "\u6700\u5927\u5316");
-  }).catch(() => void 0);
-}
-function makeCaptionButton(aria, extraClass, svgPath) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = `dshDesktopCaptionButton${extraClass ? ` ${extraClass}` : ""}`;
-  button.setAttribute("aria-label", aria);
-  button.innerHTML = `<svg viewBox="0 0 12 12" aria-hidden="true">${svgPath}</svg>`;
-  return button;
-}
-function buildWindowControls(platform) {
-  const box = document.createElement("div");
-  box.className = "dshDesktopWindowControls";
-  box.appendChild(makeCaptionButton("\u6700\u5C0F\u5316", "", '<path d="M1 6h10" stroke="currentColor" strokeWidth="1" fill="none" />'));
-  box.appendChild(makeCaptionButton("\u6700\u5927\u5316", "dshDesktopCaptionButton-maximize", maximizeIconSvg(false)));
-  box.appendChild(makeCaptionButton("\u5173\u95ED", "dshDesktopCaptionButton-close", '<path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1" />'));
-  box.addEventListener("click", (event) => {
-    const button = event.target.closest("button");
-    const action = button?.getAttribute("aria-label");
-    if (action === "\u6700\u5C0F\u5316") runWindowAction("minimize");
-    else if (action === "\u6700\u5927\u5316" || action === "\u8FD8\u539F") {
-      runWindowAction("toggle-maximize");
-      syncMaximizeIcon();
-    } else if (action === "\u5173\u95ED") runWindowAction("close");
-  });
-  if (platform !== "darwin") {
-    syncMaximizeIcon();
-    shellRpc.onMessage((name) => {
-      if (name === "window_state_changed") syncMaximizeIcon();
-    });
-    let resizeTimer = 0;
-    window.addEventListener("resize", () => {
-      window.clearTimeout(resizeTimer);
-      resizeTimer = window.setTimeout(syncMaximizeIcon, 200);
-    });
-    window.addEventListener("focus", () => syncMaximizeIcon());
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") syncMaximizeIcon();
-    });
-  }
-  return box;
-}
 function locateLayout() {
   const layer = document.querySelector(FRAME_LAYER_SELECTOR);
   const frame = layer?.parentElement;
@@ -258,7 +183,6 @@ function locateLayout() {
   return { frame, sidebar: children[0] ?? frame, center: children[1] ?? null, rightColumn: children[2] ?? null };
 }
 function installLocalChrome(platform) {
-  const height = STRIP_HEIGHT[platform];
   const host = document.createElement("div");
   host.className = "dshDesktopChromeHost";
   const strip = document.createElement("div");
@@ -266,10 +190,8 @@ function installLocalChrome(platform) {
   const drag = document.createElement("div");
   drag.className = "dshDesktopChromeDrag";
   drag.classList.add("electrobun-webkit-app-region-drag");
-  if (platform !== "darwin") drag.addEventListener("dblclick", () => runWindowAction("toggle-maximize"));
   strip.appendChild(drag);
-  if (platform !== "darwin") strip.appendChild(buildWindowControls(platform));
-  host.appendChild(strip);
+  if (platform === "darwin") host.appendChild(strip);
   document.body.appendChild(host);
   const STATUS_BAR_HEIGHT = 24;
   const STATUS_TEXT = {
@@ -469,7 +391,7 @@ function installLocalChrome(platform) {
       return;
     }
     attempts = 0;
-    const { frame, sidebar, center, rightColumn } = layout;
+    const { frame, sidebar } = layout;
     ensureSidebarScroll(sidebar);
     const sidebarWidth = sidebar.offsetWidth;
     sidebar.style.paddingBottom = `${STATUS_BAR_HEIGHT}px`;
@@ -478,21 +400,15 @@ function installLocalChrome(platform) {
       const collapsed = frame.hasAttribute("data-sidebar-collapsed");
       frame.style.setProperty("transition", "none", "important");
       if (collapsed) {
-        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${height}px;background:transparent;`;
+        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${DARWIN_STRIP_HEIGHT}px;background:transparent;`;
         drag.style.cssText = "position:absolute;inset:0;";
         sidebar.style.paddingTop = "";
         bar.style.display = "none";
       } else {
-        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${height}px;`;
+        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${DARWIN_STRIP_HEIGHT}px;`;
         drag.style.cssText = "position:absolute;inset:0;";
         bar.style.display = "";
       }
-    } else {
-      strip.style.cssText = `left:${sidebarWidth}px;right:0;top:0;height:${height}px;`;
-      drag.style.cssText = `position:absolute;top:0;bottom:0;left:0;right:${CAPTION_CONTROLS_WIDTH}px;`;
-      if (center !== null) center.style.paddingTop = `${height}px`;
-      const rightPanel = rightColumn?.querySelector("[data-sidebar-right-panel]");
-      if (rightPanel !== null) rightPanel.style.top = `${height}px`;
     }
   };
   try {
@@ -516,9 +432,6 @@ function installLocalChrome(platform) {
         attributes: true,
         attributeFilter: ["data-sidebar-collapsed", "data-details-collapsed", "style"]
       });
-      if (layout.rightColumn !== null) {
-        mutationObserver.observe(layout.rightColumn, { childList: true, subtree: true });
-      }
     }
     return true;
   };
@@ -546,9 +459,6 @@ function installLocalChrome(platform) {
       found.sidebar.style.removeProperty("border-right");
       found.frame.style.removeProperty("transition");
       found.frame.style.removeProperty("grid-template-columns");
-      if (found.center !== null) found.center.style.paddingTop = "";
-      const rightPanel = found.rightColumn?.querySelector("[data-sidebar-right-panel]");
-      if (rightPanel !== null) rightPanel.style.top = "";
     }
     for (const el of minWidthPatched) el.style.minWidth = "";
     for (const el of overflowXPatched) el.style.overflowX = "";
@@ -581,11 +491,6 @@ var ADVANCED_STYLES = `
    \u7528\u5F39\u7A97\u7A33\u5B9A\u6807\u8BB0\u5B9A\u4F4D\uFF0C\u4E0D\u4F9D\u8D56 hash \u7C7B\u540D\u3002 */
 [role="dialog"][aria-modal="true"] nav { min-height: 0; overflow: hidden; }
 [role="dialog"][aria-modal="true"] nav > div:last-child { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-.dshDesktopWindowControls { position: absolute; top: 0; right: 0; height: 100%; display: flex; align-items: stretch; }
-.dshDesktopCaptionButton { width: 46px; border: none; margin: 0; padding: 0; background: transparent; color: var(--dsw-alias-label-primary, currentColor); display: grid; place-items: center; cursor: default; }
-.dshDesktopCaptionButton:hover { background: rgba(128, 128, 128, 0.18); }
-.dshDesktopCaptionButton-close:hover { background: #e81123; color: #fff; }
-.dshDesktopCaptionButton svg { width: 12px; height: 12px; display: block; }
 /* \u4FA7\u8FB9\u680F\u5185\u5BB9\u533A\u6EDA\u52A8\uFF08local-chrome.ts ensureSidebarScroll \u6253\u7A33\u5B9A\u6807\u8BB0\uFF1B\u5185\u8054 overflow
    \u5DF2\u8986\u76D6 stock \u7684 hidden\uFF0C\u8FD9\u91CC\u53EA\u505A\u6EDA\u52A8\u6761\u89C2\u611F\u4E0E\u6EDA\u52A8\u94FE\u6536\u655B\uFF09\u3002 */
 [data-dsh-desktop-scroll] { overscroll-behavior: contain; scrollbar-width: thin; }
@@ -3138,6 +3043,82 @@ function registerDesktopSettings(ctx) {
 
 // src/client/notifications-tab.tsx
 var import_react4 = require("react");
+
+// src/client/notification-sound-ui.ts
+var SOUND_EXTENSIONS = ["wav", "mp3", "ogg"];
+var CUSTOM_PREFIX = "custom:";
+var FALLBACK_REASON = "\u672C\u673A\u6CA1\u6709\u8BE5\u683C\u5F0F\u7684\u64AD\u653E\u540E\u7AEF";
+function soundExtension(name) {
+  if (typeof name !== "string") return null;
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const extension = name.slice(dot + 1).toLowerCase();
+  return SOUND_EXTENSIONS.includes(extension) ? extension : null;
+}
+function customSoundName(value) {
+  if (typeof value !== "string" || !value.startsWith(CUSTOM_PREFIX)) return null;
+  const name = value.slice(CUSTOM_PREFIX.length);
+  return name === "" ? null : name;
+}
+function soundOptionState(capability, value) {
+  const name = customSoundName(value);
+  if (name === null) return { ok: true, reason: null, extension: null };
+  const extension = soundExtension(name);
+  if (extension === null) return { ok: true, reason: null, extension: null };
+  const support = capability?.formats?.[extension];
+  if (support === void 0 || support === null || typeof support.ok !== "boolean") {
+    return { ok: true, reason: null, extension };
+  }
+  if (support.ok) return { ok: true, reason: null, extension };
+  const reason = typeof support.reason === "string" && support.reason.trim() !== "" ? support.reason : null;
+  return { ok: false, reason: reason ?? FALLBACK_REASON, extension };
+}
+function soundUnavailableReason(capability, value) {
+  const state = soundOptionState(capability, value);
+  return state.ok ? null : state.reason;
+}
+function customSoundOptions(names, capability) {
+  if (!Array.isArray(names)) return [];
+  return names.map((name) => {
+    const value = `${CUSTOM_PREFIX}${name}`;
+    const reason = soundUnavailableReason(capability, value);
+    if (reason === null) return { value, label: name, disabled: false, title: void 0 };
+    return { value, label: `${name}\uFF08\u672C\u673A\u65E0\u6CD5\u64AD\u653E\uFF1A${reason}\uFF09`, disabled: true, title: reason };
+  });
+}
+function capabilityHint(capability) {
+  const hint = capability?.hint;
+  return typeof hint === "string" && hint.trim() !== "" ? hint : null;
+}
+function configuredSoundWarning(capability, sound) {
+  const reason = soundUnavailableReason(capability, sound);
+  if (reason === null) return null;
+  const name = customSoundName(sound);
+  return name === null ? `\u672C\u673A\u65E0\u6CD5\u64AD\u653E\uFF1A${reason}` : `\u672C\u673A\u65E0\u6CD5\u64AD\u653E\u300C${name}\u300D\uFF1A${reason}`;
+}
+function previewFailure(result) {
+  if (typeof result !== "object" || result === null) return null;
+  const { played, audible } = result;
+  if (typeof played !== "string" || played === "") return null;
+  if (audible !== false) return null;
+  const target = played.startsWith(CUSTOM_PREFIX) ? played.slice(CUSTOM_PREFIX.length) : played;
+  return target === "default" ? "\u8BD5\u542C\u6CA1\u6709\u51FA\u58F0\uFF1A\u672C\u673A\u6CA1\u6709\u53EF\u7528\u7684\u64AD\u653E\u540E\u7AEF" : `\u8BD5\u542C\u6CA1\u6709\u51FA\u58F0\uFF1A\u672C\u673A\u65E0\u6CD5\u64AD\u653E\u300C${target}\u300D`;
+}
+var UNAVAILABLE_MACOS_TEXT = "\u5F53\u524D\u73AF\u5883\u65E0\u6CD5\u67E5\u8BE2\u7CFB\u7EDF\u901A\u77E5\u6743\u9650\uFF08dev \u88F8\u4E8C\u8FDB\u5236\u6216\u5E73\u53F0\u4E0D\u652F\u6301\uFF09\uFF1B\u9A8C\u6536\u8BF7\u4F7F\u7528\u6253\u5305\u540E\u7684 .app\u3002";
+var UNAVAILABLE_CHIP = "\u6743\u9650\u4E0D\u53EF\u7528";
+function permissionUnavailableCopy(platform) {
+  if (platform === "win32" || platform === "linux") {
+    const name = platform === "win32" ? "Windows" : "Linux";
+    return {
+      chip: null,
+      neutral: true,
+      text: `${name} \u7684\u901A\u77E5\u7531\u7CFB\u7EDF\u901A\u77E5\u4E2D\u5FC3\u8D1F\u8D23\uFF0C\u672C\u5E94\u7528\u4E0D\u67E5\u8BE2\u6388\u6743\u72B6\u6001\uFF1B\u80FD\u5426\u5F39\u51FA\u4EE5\u7CFB\u7EDF\u8BBE\u7F6E\u4E3A\u51C6\u3002`
+    };
+  }
+  return { chip: UNAVAILABLE_CHIP, neutral: false, text: UNAVAILABLE_MACOS_TEXT };
+}
+
+// src/client/notifications-tab.tsx
 var import_jsx_runtime4 = require("react/jsx-runtime");
 function invoke3(cmd, args) {
   return shellRpc.invoke(cmd, args);
@@ -3149,6 +3130,7 @@ var PANEL_CSS2 = `
 [data-notification-settings] .n-banner { display:flex; gap:10px; align-items:center; border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-left:3px solid var(--dsw-alias-state-warn,#e8a33d); background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); border-radius:8px; padding:9px 12px; font-size:12.5px; margin-bottom:10px; }
 [data-notification-settings] .n-banner.granted { border-left-color:var(--dsw-alias-state-success,#2fbf71); }
 [data-notification-settings] .n-banner.denied { border-left-color:var(--dsw-alias-state-danger,#e5534b); }
+[data-notification-settings] .n-banner.neutral { border-left-color:var(--dsw-alias-border-l,#ffffff1f); }
 [data-notification-settings] .n-banner .grow { flex:1; min-width:0; }
 [data-notification-settings] .n-chip { display:inline-block; font-size:11px; border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-radius:6px; padding:1px 7px; color:var(--dsw-alias-label-secondary,#9aa4b2); white-space:nowrap; }
 [data-notification-settings] .n-chip.ok { color:var(--dsw-alias-state-success,#2fbf71); border-color:var(--dsw-alias-state-success,#2fbf71); }
@@ -3187,8 +3169,15 @@ function ensureStyles2() {
 function NotificationSettingsPanel() {
   const [data, setData] = (0, import_react4.useState)(null);
   const [busy, setBusy] = (0, import_react4.useState)(false);
+  const [previewNote, setPreviewNote] = (0, import_react4.useState)(null);
+  const [loadFailed, setLoadFailed] = (0, import_react4.useState)(false);
   const refresh = (0, import_react4.useCallback)(() => {
-    invoke3("get_notifications_state").then(setData).catch(() => {
+    invoke3("get_notifications_state").then((res) => {
+      setLoadFailed(false);
+      setData(res);
+    }).catch((e) => {
+      logFail(e);
+      setLoadFailed(true);
     });
   }, []);
   (0, import_react4.useEffect)(() => {
@@ -3221,7 +3210,7 @@ function NotificationSettingsPanel() {
     });
   }, [save]);
   if (data === null) {
-    return /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { "data-notification-settings": true, className: "n-note", children: "\u52A0\u8F7D\u4E2D\u2026" });
+    return /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { "data-notification-settings": true, className: "n-note", children: loadFailed ? "\u901A\u77E5\u8BBE\u7F6E\u8BFB\u53D6\u5931\u8D25\uFF1A\u684C\u9762\u58F3\u6CA1\u6709\u54CD\u5E94\uFF08\u8BE6\u89C1\u63A7\u5236\u53F0\uFF09" : "\u52A0\u8F7D\u4E2D\u2026" });
   }
   const requestPerm = () => {
     setBusy(true);
@@ -3241,11 +3230,24 @@ function NotificationSettingsPanel() {
       });
     }).catch((e) => console.warn("[notifications] \u5BFC\u5165\u97F3\u6548\u5931\u8D25", e));
   };
+  const previewSound = (id, sound) => {
+    invoke3("preview_notification_sound", { sound }).then((res) => {
+      const failure = previewFailure(res);
+      setPreviewNote(failure === null ? null : { id, text: failure });
+    }).catch((e) => {
+      logFail(e);
+      setPreviewNote({ id, text: "\u8BD5\u542C\u5931\u8D25\uFF1A\u684C\u9762\u58F3\u6CA1\u6709\u54CD\u5E94\uFF08\u8BE6\u89C1\u63A7\u5236\u53F0\uFF09" });
+    });
+  };
   const groupLabel = (gid) => data.groups.find(([g]) => g === gid)?.[1] ?? gid;
   const grouped = data.groups.map(([gid]) => ({
     gid,
     rows: data.scenarios.filter((s) => s.group === gid)
   }));
+  const capability = data.capability ?? null;
+  const soundHint = capabilityHint(capability);
+  const soundChoices = customSoundOptions(data.sounds, capability);
+  const permissionUnavailable = permissionUnavailableCopy(capability?.platform);
   return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { "data-notification-settings": true, className: data.config.enabled ? "" : "n-mastoff", children: [
     data.permission === "granted" ? /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-banner granted", children: [
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "n-chip ok", children: "\u5DF2\u6388\u4E88" }),
@@ -3256,9 +3258,9 @@ function NotificationSettingsPanel() {
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "grow", children: "\u901A\u77E5\u6A2A\u5E45\u4E0D\u4F1A\u663E\u793A\u3002\u53EF\u5728\u7CFB\u7EDF\u8BBE\u7F6E\u4E2D\u624B\u52A8\u5F00\u542F\uFF1B\u5F00\u53D1\u671F\u53EF\u6267\u884C tccutil reset Notifications com.arcreel.dsh-desktop-tauriapp \u540E\u91CD\u8BD5\u3002" }),
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "n-btn ghost mini", onClick: openSysPrefs, children: "\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E" }),
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "n-btn mini", onClick: requestPerm, disabled: busy, children: "\u7533\u8BF7\u6743\u9650" })
-    ] }) : data.permission === "unavailable" ? /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-banner", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "n-chip", children: "\u6743\u9650\u4E0D\u53EF\u7528" }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "grow", children: "\u5F53\u524D\u73AF\u5883\u65E0\u6CD5\u67E5\u8BE2\u7CFB\u7EDF\u901A\u77E5\u6743\u9650\uFF08dev \u88F8\u4E8C\u8FDB\u5236\u6216\u5E73\u53F0\u4E0D\u652F\u6301\uFF09\uFF1B\u9A8C\u6536\u8BF7\u4F7F\u7528\u6253\u5305\u540E\u7684 .app\u3002" })
+    ] }) : data.permission === "unavailable" ? /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: `n-banner${permissionUnavailable.neutral ? " neutral" : ""}`, children: [
+      permissionUnavailable.chip !== null && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "n-chip", children: permissionUnavailable.chip }),
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "grow", children: permissionUnavailable.text })
     ] }) : /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-banner", children: [
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "n-chip warn", children: "\u672A\u51B3\u5B9A" }),
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "grow", children: "\u5C1A\u672A\u5411\u7CFB\u7EDF\u7533\u8BF7\u901A\u77E5\u6743\u9650\uFF0C\u9996\u6B21\u7533\u8BF7\u4F1A\u5F39\u7CFB\u7EDF\u6388\u6743\u7A97\u3002" }),
@@ -3349,6 +3351,8 @@ function NotificationSettingsPanel() {
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "n-gname", children: groupLabel(gid) }),
         rows.map((s) => {
           const conf = data.config.scenarios[s.id] ?? { enabled: s.defaultOn, sound: "default" };
+          const soundWarning = configuredSoundWarning(capability, conf.sound);
+          const failureNote = previewNote !== null && previewNote.id === s.id ? previewNote.text : null;
           return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-srow", children: [
             /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-sinfo", children: [
               /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("b", { children: s.name }),
@@ -3356,7 +3360,9 @@ function NotificationSettingsPanel() {
                 s.id,
                 " \xB7 ",
                 s.desc
-              ] })
+              ] }),
+              soundWarning !== null && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "n-note", style: { color: "var(--dsw-alias-state-warn,#e8a33d)" }, children: soundWarning }),
+              failureNote !== null && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "n-note", style: { color: "var(--dsw-alias-state-danger,#e5534b)" }, children: failureNote })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
               "span",
@@ -3376,6 +3382,7 @@ function NotificationSettingsPanel() {
                 value: conf.sound,
                 onChange: (e) => {
                   const v = e.target.value;
+                  setPreviewNote(null);
                   if (v === "__choose") chooseSound();
                   else patch((c) => {
                     const cur = c.scenarios[s.id] ?? { enabled: s.defaultOn, sound: "default" };
@@ -3385,7 +3392,7 @@ function NotificationSettingsPanel() {
                 children: [
                   /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("option", { value: "default", children: "\u7CFB\u7EDF\u9ED8\u8BA4" }),
                   /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("option", { value: "none", children: "\u65E0\u58F0" }),
-                  data.sounds.map((n) => /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("option", { value: `custom:${n}`, children: n }, n)),
+                  soundChoices.map((opt) => /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("option", { value: opt.value, disabled: opt.disabled, title: opt.title, children: opt.label }, opt.value)),
                   /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("option", { value: "__choose", children: "\u81EA\u5B9A\u4E49\u6587\u4EF6\u2026" })
                 ]
               }
@@ -3395,10 +3402,7 @@ function NotificationSettingsPanel() {
               {
                 className: "n-btn ghost mini",
                 title: "\u8BD5\u542C",
-                onClick: () => {
-                  void invoke3("preview_notification_sound", { sound: conf.sound }).catch(() => {
-                  });
-                },
+                onClick: () => previewSound(s.id, conf.sound),
                 children: "\u25B6"
               }
             )
@@ -3408,6 +3412,10 @@ function NotificationSettingsPanel() {
       /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-note", children: [
         "\u81EA\u5B9A\u4E49\u97F3\u6548\u6587\u4EF6\uFF08wav / mp3 / ogg\uFF0C\u22645MB\uFF09\u5BFC\u5165\u540E\u5B58\u653E\u4E8E\u6570\u636E\u76EE\u5F55 sounds/\uFF0C\u53EF\u968F\u65F6\u5728\u4E0B\u62C9\u4E2D\u5207\u6362\u6216\u8986\u76D6\u3002",
         busy ? " \xB7 \u4FDD\u5B58\u4E2D\u2026" : ""
+      ] }),
+      soundHint !== null && /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-banner", style: { marginTop: 10, marginBottom: 0 }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "n-chip warn", children: "\u97F3\u6548" }),
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "grow", children: soundHint })
       ] })
     ] })
   ] });

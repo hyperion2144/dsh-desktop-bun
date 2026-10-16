@@ -284,3 +284,64 @@ export function ensureNativeMaximizeStyles(): boolean {
     return false
   }
 }
+
+// ── 聚合判定与切换（RPC 漏斗与 /__shell__/window 端点共用，#112 抽取）────
+//
+// 抽取前这两段逻辑在 rpc-bridge.ts（漏斗，可注入）与 index.ts（HTTP 端点）各写一份；
+// 现在收口在本模块——本模块的既定职责就是最大化态判定（见文件头③）。
+
+/** 原生窗口动作面（BrowserWindow 的结构子集；测试可注入假窗）。 */
+export interface NativeWindowActions {
+  getFrame(): WindowFrame
+  isMaximized(): boolean
+  maximize(): void
+  unmaximize(): void
+}
+
+/** 平台/工作区/样式补丁的注入点（测试用；缺省见各字段）。 */
+export interface WindowMaxOptions {
+  /** 平台（缺省 process.platform）。 */
+  platform?: NodeJS.Platform
+  /** 工作区取法（缺省 win32 走 user32 ffi，其余平台恒 null）。 */
+  workArea?: (near: WindowFrame) => WindowFrame | null
+  /** 样式补丁生效动作（缺省 win32 走枚举补丁，其余平台恒 false；幂等可重入）。 */
+  maximizeStylesPatched?: () => boolean
+}
+
+/** 最大化态聚合结果（GET /__shell__/window 的载荷形状）。 */
+export interface WindowMaxState {
+  maximized: boolean
+}
+
+/**
+ * 最大化态聚合判定：win32 用工作区几何兑底原生旗标，其余平台只看旗标。
+ * rpc-bridge（window_get_state）与 index.ts（onWindowState / toggle 判定）共用。
+ */
+export function windowMaxState(
+  win: Pick<NativeWindowActions, 'getFrame' | 'isMaximized'>,
+  opts: WindowMaxOptions = {},
+): WindowMaxState {
+  const platform = opts.platform ?? process.platform
+  const workAreaOf = opts.workArea ?? getWorkAreaForFrame
+  const frame = win.getFrame()
+  const workArea = platform === 'win32' ? workAreaOf(frame) : null
+  return { maximized: deriveMaximized(frame, workArea, win.isMaximized()) }
+}
+
+/**
+ * 原生最大化切换（#80 拍板：任何情况下不用 setFrame 自摆）。maximize 方向先补
+ * win32 样式位（否则 SW_MAXIMIZE 不按工作区收缩，上游 #558），补丁失败也直接
+ * 原生 maximize。
+ */
+export function toggleWindowMaximize(win: NativeWindowActions, opts: WindowMaxOptions = {}): void {
+  const platform = opts.platform ?? process.platform
+  const { maximized } = windowMaxState(win, opts)
+  if (maximized) {
+    win.unmaximize()
+    return
+  }
+  const stylesPatched =
+    opts.maximizeStylesPatched ?? (() => (platform === 'win32' ? ensureNativeMaximizeStyles() : false))
+  if (platform === 'win32') stylesPatched()
+  win.maximize()
+}

@@ -13,6 +13,7 @@ import {
   type ShellMenuItem,
 } from '../src/bun/context-menu.ts'
 import { OPEN_EXTERNAL_ENDPOINT, externalLinksScript, isExternalUrl } from '../src/bun/external.ts'
+import { TITLEBAR_WINDOW_ENDPOINT, titlebarScript, WINDOWS_TITLEBAR_HEIGHT } from '../src/bun/titlebar.ts'
 import { VIEW_TOKEN_HEADER } from '../src/shared/view-grant.ts'
 
 const SELF = 'http://127.0.0.1:6391'
@@ -140,5 +141,29 @@ describe('右键菜单：注入脚本', () => {
     expect(script).toContain('data-files-path')
     expect(script).toContain('filesEntry')
     expect(script).toContain('filesPath')
+  })
+})
+
+describe('标题栏带（#112）：win32/linux 上收壳 preload 的声明式适配', () => {
+  test('win32：官方标记 + 高度变量 + 拖拽热区 + 三键 + 窗口端点', () => {
+    const script = titlebarScript('win32', 'tok-t')
+    expect(script).toContain('dataset.windowsTitlebar')
+    expect(script).toContain('--dsh-windows-titlebar-height')
+    expect(script).toContain(JSON.stringify(WINDOWS_TITLEBAR_HEIGHT))
+    expect(script).toContain('electrobun-webkit-app-region-drag')
+    // 拖拽几何绕开官方 leadingSeat（left:88px）：主 drag 区自 168px 起，座位可点
+    expect(script).toContain('dsh-shell-titlebar-drag-main')
+    expect(script).toContain(TITLEBAR_WINDOW_ENDPOINT)
+    expect(script).toContain(VIEW_TOKEN_HEADER)
+    expect(script).toContain('最小化')
+    expect(script).toContain('最大化')
+    expect(script).toContain('关闭')
+    // 双击拖拽带 = 最大化切换；三键不依赖 dsh 页面与插件状态（验收增补）
+    expect(script).toContain('dblclick')
+    expect(script).toContain('keepalive')
+  })
+
+  test('darwin：系统红绿灯，不注入（空串跳过）', () => {
+    expect(titlebarScript('darwin', 'tok-t')).toBe('')
   })
 })

@@ -330,6 +330,7 @@ describe('/__shell__/window 端点（A5 自绘窗口控制）', () => {
   function withWindowServer(
     onWindowControl: (action: 'minimize' | 'toggle-maximize' | 'close') => void,
     run: (origin: string) => Promise<void>,
+    onWindowState?: () => { maximized: boolean },
   ): Promise<void> {
     const dist = tempDir()
     const probe = Bun.serve({ port: 0, fetch: () => new Response('upstream') })
@@ -344,6 +345,7 @@ describe('/__shell__/window 端点（A5 自绘窗口控制）', () => {
       port,
       bootPayload: () => null,
       onWindowControl,
+      onWindowState,
     })
     try {
       return run(server.origin).finally(() => server.stop())
@@ -383,5 +385,23 @@ describe('/__shell__/window 端点（A5 自绘窗口控制）', () => {
       const response = await fetch(`${origin}/__shell__/window`)
       expect(response.status).toBe(405)
     })
+  })
+
+  test('GET + onWindowState ⇒ 200 {maximized}（#112 标题栏带图标查询）', async () => {
+    let calls = 0
+    await withWindowServer(
+      () => undefined,
+      async (origin) => {
+        const response = await fetch(`${origin}/__shell__/window`)
+        expect(response.status).toBe(200)
+        expect(response.headers.get('cache-control')).toBe('no-store')
+        expect(await response.json()).toEqual({ maximized: true })
+        expect(calls).toBe(1)
+      },
+      () => {
+        calls += 1
+        return { maximized: true }
+      },
+    )
   })
 })

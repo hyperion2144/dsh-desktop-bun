@@ -6,11 +6,22 @@
  * 场景区（6 组 12 行：名称+id·说明 | 开关 | 音效下拉 | 试听▶）。
  * 数据面：get_notifications_state 一次拉全；改动即时 set_notifications_config 落盘
  * （宿主单写者）；音效选择经 choose_notification_sound + import_notification_sound。
+ * #74：壳给的「本机播放能力」（capability）可能整个缺失（老壳 / 测试桩）——判定全在
+ * notification-sound-ui.ts 里，缺失按「不判定」处理；试听「真放了但没出声」与「已配置但本机
+ * 播不了」都要在面板里看得见，不许静默、不许假成功。
  * 权限被拒（macOS 27 对 ad-hoc 签名的静默拒绝，#130/#142）：引导打开系统设置手动开启。
  */
 import React, { useCallback, useEffect, useState } from 'react'
 import type { ClientContext } from './ctx-types.ts'
 import { shellRpc } from './shell-rpc.ts'
+import {
+  capabilityHint,
+  configuredSoundWarning,
+  previewFailure,
+  customSoundOptions,
+  permissionUnavailableCopy,
+  type SoundCapability,
+} from './notification-sound-ui.ts'
 
 export const inject = ['slots']
 
@@ -32,6 +43,8 @@ interface NotificationState {
   scenarios: ScenarioRow[]
   groups: [string, string][]
   sounds: string[]
+  /** #74：本机播放能力；老壳 / 未接播放层时缺省（面板按「不判定」处理，不许因此炸掉）。 */
+  capability?: SoundCapability | null
 }
 
 /** 壳 RPC 统一通道（#50）：签名保持旧本地 invoke 不变，调用点零改动。 */
@@ -48,6 +61,7 @@ const PANEL_CSS = `
 [data-notification-settings] .n-banner { display:flex; gap:10px; align-items:center; border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-left:3px solid var(--dsw-alias-state-warn,#e8a33d); background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); border-radius:8px; padding:9px 12px; font-size:12.5px; margin-bottom:10px; }
 [data-notification-settings] .n-banner.granted { border-left-color:var(--dsw-alias-state-success,#2fbf71); }
 [data-notification-settings] .n-banner.denied { border-left-color:var(--dsw-alias-state-danger,#e5534b); }
+[data-notification-settings] .n-banner.neutral { border-left-color:var(--dsw-alias-border-l,#ffffff1f); }
 [data-notification-settings] .n-banner .grow { flex:1; min-width:0; }
 [data-notification-settings] .n-chip { display:inline-block; font-size:11px; border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-radius:6px; padding:1px 7px; color:var(--dsw-alias-label-secondary,#9aa4b2); white-space:nowrap; }
 [data-notification-settings] .n-chip.ok { color:var(--dsw-alias-state-success,#2fbf71); border-color:var(--dsw-alias-state-success,#2fbf71); }
@@ -88,11 +102,22 @@ function ensureStyles(): void {
 function NotificationSettingsPanel(): React.ReactElement {
   const [data, setData] = useState<NotificationState | null>(null)
   const [busy, setBusy] = useState(false)
+  /** 试听失败提示（#74）：只有「真放了但没出声」才写；成功或换行即清。 */
+  const [previewNote, setPreviewNote] = useState<{ id: string; text: string } | null>(null)
+  /** 数据面整个拉不到（老壳没有这条命令等）：如实说，别让面板永远停在「加载中…」。 */
+  const [loadFailed, setLoadFailed] = useState(false)
 
   const refresh = useCallback((): void => {
     invoke<NotificationState>('get_notifications_state')
-      .then(setData)
-      .catch(() => {})
+      .then((res) => {
+        setLoadFailed(false)
+        setData(res)
+      })
+      .catch((e) => {
+        // 缺 capability 不吭声，整条命令失败也不许留白（#74）
+        logFail(e)
+        setLoadFailed(true)
+      })
   }, [])
 
   useEffect(() => {
@@ -129,7 +154,11 @@ function NotificationSettingsPanel(): React.ReactElement {
   }, [save])
 
   if (data === null) {
-    return <div data-notification-settings className="n-note">加载中…</div>
+    return (
+      <div data-notification-settings className="n-note">
+        {loadFailed ? '通知设置读取失败：桌面壳没有响应（详见控制台）' : '加载中…'}
+      </div>
+    )
   }
 
 
@@ -157,11 +186,32 @@ function NotificationSettingsPanel(): React.ReactElement {
       .catch((e) => console.warn('[notifications] 导入音效失败', e))
   }
 
+  /** 试听（#74）：壳会说「真放出去了但没出声」——那种必须看得见，不许静默。 */
+  const previewSound = (id: string, sound: string): void => {
+    invoke<unknown>('preview_notification_sound', { sound })
+      .then((res) => {
+        const failure = previewFailure(res)
+        setPreviewNote(failure === null ? null : { id, text: failure })
+      })
+      .catch((e) => {
+        logFail(e)
+        setPreviewNote({ id, text: '试听失败：桌面壳没有响应（详见控制台）' })
+      })
+  }
+
   const groupLabel = (gid: string): string => data.groups.find(([g]) => g === gid)?.[1] ?? gid
   const grouped = data.groups.map(([gid]) => ({
     gid,
     rows: data.scenarios.filter((s) => s.group === gid),
   }))
+
+  // #74：能力报告可能整个缺失（老壳 / 测试桩）——判定全在 notification-sound-ui 里，
+  // 缺失一律按「不判定」处理，面板照常渲染。
+  const capability = data.capability ?? null
+  const soundHint = capabilityHint(capability)
+  const soundChoices = customSoundOptions(data.sounds, capability)
+  // PR #100 实测反馈：win32/linux 没有「通知授权」这个概念，旧文案（dev 裸二进制 / .app）是假话
+  const permissionUnavailable = permissionUnavailableCopy(capability?.platform)
 
   return (
     <div data-notification-settings className={data.config.enabled ? '' : 'n-mastoff'}>
@@ -180,9 +230,9 @@ function NotificationSettingsPanel(): React.ReactElement {
           <button className="n-btn mini" onClick={requestPerm} disabled={busy}>申请权限</button>
         </div>
       ) : data.permission === 'unavailable' ? (
-        <div className="n-banner">
-          <span className="n-chip">权限不可用</span>
-          <span className="grow">当前环境无法查询系统通知权限（dev 裸二进制或平台不支持）；验收请使用打包后的 .app。</span>
+        <div className={`n-banner${permissionUnavailable.neutral ? ' neutral' : ''}`}>
+          {permissionUnavailable.chip !== null && <span className="n-chip">{permissionUnavailable.chip}</span>}
+          <span className="grow">{permissionUnavailable.text}</span>
         </div>
       ) : (
         <div className="n-banner">
@@ -260,11 +310,24 @@ function NotificationSettingsPanel(): React.ReactElement {
             <div className="n-gname">{groupLabel(gid)}</div>
             {rows.map((s) => {
               const conf = data.config.scenarios[s.id] ?? { enabled: s.defaultOn, sound: 'default' }
+              // #74：已配置但本机播不了的音效，行里就要看得见（不只在被禁用的下拉项里）
+              const soundWarning = configuredSoundWarning(capability, conf.sound)
+              const failureNote = previewNote !== null && previewNote.id === s.id ? previewNote.text : null
               return (
                 <div className="n-srow" key={s.id}>
                   <div className="n-sinfo">
                     <b>{s.name}</b>
                     <span className="n-mono" style={{ display: 'block' }}>{s.id} · {s.desc}</span>
+                    {soundWarning !== null && (
+                      <div className="n-note" style={{ color: 'var(--dsw-alias-state-warn,#e8a33d)' }}>
+                        {soundWarning}
+                      </div>
+                    )}
+                    {failureNote !== null && (
+                      <div className="n-note" style={{ color: 'var(--dsw-alias-state-danger,#e5534b)' }}>
+                        {failureNote}
+                      </div>
+                    )}
                   </div>
                   <span
                     className={`n-switch ${conf.enabled ? 'on' : ''}`}
@@ -279,6 +342,8 @@ function NotificationSettingsPanel(): React.ReactElement {
                     value={conf.sound}
                     onChange={(e) => {
                       const v = e.target.value
+                      // 换了音效，上一次的试听结论就不算数了（#74）
+                      setPreviewNote(null)
                       if (v === '__choose') chooseSound()
                       else patch((c) => {
                         const cur = c.scenarios[s.id] ?? { enabled: s.defaultOn, sound: 'default' }
@@ -288,15 +353,17 @@ function NotificationSettingsPanel(): React.ReactElement {
                   >
                     <option value="default">系统默认</option>
                     <option value="none">无声</option>
-                    {data.sounds.map((n) => (
-                      <option key={n} value={`custom:${n}`}>{n}</option>
+                    {soundChoices.map((opt) => (
+                      <option key={opt.value} value={opt.value} disabled={opt.disabled} title={opt.title}>
+                        {opt.label}
+                      </option>
                     ))}
                     <option value="__choose">自定义文件…</option>
                   </select>
                   <button
                     className="n-btn ghost mini"
                     title="试听"
-                    onClick={() => { void invoke('preview_notification_sound', { sound: conf.sound }).catch(() => {}) }}
+                    onClick={() => previewSound(s.id, conf.sound)}
                   >
                     ▶
                   </button>
@@ -308,6 +375,12 @@ function NotificationSettingsPanel(): React.ReactElement {
          <div className="n-note">
            自定义音效文件（wav / mp3 / ogg，≤5MB）导入后存放于数据目录 sounds/，可随时在下拉中切换或覆盖。{busy ? ' · 保存中…' : ''}
          </div>
+         {soundHint !== null && (
+           <div className="n-banner" style={{ marginTop: 10, marginBottom: 0 }}>
+             <span className="n-chip warn">音效</span>
+             <span className="grow">{soundHint}</span>
+           </div>
+         )}
         </div>
       </div>
   )
