@@ -112,12 +112,20 @@ describe('右键菜单：结构', () => {
     expect(isOpenablePath('')).toBe(false)
   })
 
-  test('「打开 DevTools」只在 dev 菜单出现，且垫底（release 不出现）', () => {
+  test('「打开 DevTools」只随菜单开关出现（dev 恒开；打包态=开关开+口开），且垫底', () => {
     const release = contextMenuItems(none, false)
     expect(release.some((item) => item.action === SHELL_MENU_ACTIONS.openDevTools)).toBe(false)
     const dev = contextMenuItems(none, false, { devTools: true })
     expect(dev[dev.length - 1]).toMatchObject({ label: '打开 DevTools', action: SHELL_MENU_ACTIONS.openDevTools })
     expect(dev[dev.length - 2]).toEqual({ type: 'separator' })
+  })
+
+  test('win 打包态（#106 返工）：同一「打开 DevTools」入口，点击由壳分发为合成 F12；复制地址形态已废弃', () => {
+    const win = contextMenuItems(none, false, { devTools: true })
+    expect(win[win.length - 1]).toMatchObject({ label: '打开 DevTools', action: SHELL_MENU_ACTIONS.openDevTools })
+    expect(win[win.length - 2]).toEqual({ type: 'separator' })
+    // 「复制 DevTools 调试地址」不再存在（维护者拍板废弃：CDP 地址贴浏览器是空白页，不是用户要的形态）
+    expect(win.map((item) => item.label)).not.toContain('复制 DevTools 调试地址')
   })
 })
 

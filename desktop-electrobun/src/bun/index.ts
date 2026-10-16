@@ -45,7 +45,7 @@ import {
   type WindowFrame,
 } from './window-state.ts'
 import { loadSettings } from './settings-store.ts'
-import { applyCdpDebugPort, DEVTOOLS_PORT_ENV, DEVTOOLS_PORT_OVERRIDE_ENV, devToolsMenuEnabled, isPortBindable, planDevToolsBoot } from './devtools.ts'
+import { applyCdpDebugPort, DEVTOOLS_PORT_ENV, DEVTOOLS_PORT_OVERRIDE_ENV, devToolsMenuEnabled, isPortBindable, planDevToolsBoot, sendDevToolsKeystroke } from './devtools.ts'
 import { activeProfile, type DesktopSettings } from '../shared/settings.ts'
 import { closeAction, offsetFrame, planWindowOpen, windowKey } from '../shared/window-targets.ts'
 import type { LaneForwarder } from './lane-forwarder.ts'
@@ -133,7 +133,6 @@ const instanceProfile = activeProfile(bootSettings, process.env)
 // 所以启动决策放这里做完；菜单可见 ⇔ 口已开（同一份 plan 推出，禁中间态）。
 const devToolsPlan = await planDevToolsBoot({
   isPackaged: build.isPackaged,
-  cefAvailable: wantsCef,
   settingOn: bootSettings.devTools === true,
   envOverride: process.env[DEVTOOLS_PORT_OVERRIDE_ENV],
   isFree: isPortBindable,
@@ -141,21 +140,19 @@ const devToolsPlan = await planDevToolsBoot({
 // C environ 双写（dylib 用 C getenv 读开关；Bun map 写入不穿透，实测见 devtools.ts 头注）。
 // 写入失败 = CDP 开不了：cdpReady 落 false，菜单同批不出现（禁中间态，fail-closed）。
 const devToolsCdpReady = devToolsPlan.enableCdp && devToolsPlan.port !== null
-  ? applyCdpDebugPort(devToolsPlan.port)
+  ? applyCdpDebugPort(devToolsPlan.port, { cefAvailable: wantsCef })
   : false
 if (devToolsPlan.enableCdp && !devToolsCdpReady) {
-  console.error('[shell] 开发者工具：调试口 env 写入失败（libc setenv 不可用），本次不开口、不出菜单')
+  console.error('[shell] 开发者工具：调试口 env 写入失败（C environ 写入不可用），本次不开口、不出菜单')
 }
 if (devToolsPlan.reason === 'enabled-by-setting') {
-  console.log(`[shell] 开发者工具：已开启，CEF 远程调试口 127.0.0.1:${String(devToolsPlan.port)}（重启后生效；本机任意进程可借该口在页面里执行代码）`)
+  console.log(`[shell] 开发者工具：已开启，${wantsCef ? 'CEF' : 'WebView2'} 远程调试口 127.0.0.1:${String(devToolsPlan.port)}（重启后生效${wantsCef ? '' : '；DevTools 按需打开：F12 或右键菜单（合成 F12），不自动弹窗'}；本机任意进程可借该口在页面里执行代码）`)
 } else if (devToolsPlan.reason === 'port-unavailable') {
   console.error(`[shell] 开发者工具：端口 ${String(devToolsPlan.port)} 被占用，本次不开调试口、不出菜单（可用 ${DEVTOOLS_PORT_OVERRIDE_ENV} 换口）`)
 } else if (devToolsPlan.reason === 'port-invalid') {
   console.error(`[shell] 开发者工具：${DEVTOOLS_PORT_OVERRIDE_ENV} 非法（需要 1-65535 整数），按未开启处理`)
 } else if (devToolsPlan.reason === 'dev-build') {
   console.log('[shell] 开发者工具：dev 构建，DevTools 菜单恒可见（打包态才吃 dev_tools 开关）')
-} else if (devToolsPlan.reason === 'cef-only') {
-  console.log('[shell] 开发者工具：本构建不含 CEF（win 走 WebView2），CEF CDP 桥不适用——打包态不出 DevTools 菜单；dev 构建照常（openDevTools 与后端无关）')
 } else {
   console.log('[shell] 开发者工具：未开启（设置 dev_tools）——不监听调试口、不出菜单')
 }
@@ -546,13 +543,15 @@ function serviceOptionsFor(profile: string): ServiceOptions {
       const linkIsExternal =
         request.linkUrl !== null && isExternalUrl(request.linkUrl, originOf(profile))
       // 菜单可见性唯一事实源在 devtools.ts：dev 构建恒可见；打包态＝开关开且本次启动口已开（可见⇔口开）。
-      const items = contextMenuItems(request, linkIsExternal, {
-        devTools: devToolsMenuEnabled({
-          isPackaged: BuildConfig.getSync().isPackaged,
-          settingOn: bootSettings.devTools === true,
-          cdpReady: devToolsCdpReady,
-        }),
+      const isPackagedBuild = BuildConfig.getSync().isPackaged
+      const devToolsMenuOn = devToolsMenuEnabled({
+        isPackaged: isPackagedBuild,
+        settingOn: bootSettings.devTools === true,
+        cdpReady: devToolsCdpReady,
       })
+      // 菜单统一「打开 DevTools」（#106 返工）：CEF＝openDevTools 应用内 inspector；
+      // win＝点击后壳发合成 F12（与物理按键同路径弹原生 DevTools 窗），复制地址形态已废弃。
+      const items = contextMenuItems(request, linkIsExternal, { devTools: devToolsMenuOn })
       // 「挂不上也要出声」：菜单内容进日志，实机排查时能看出是哪一档
       console.log(`[shell] 右键菜单：${items.map((item) => item.label ?? item.role ?? item.type ?? '?').join(' | ')}`)
       ContextMenu.showContextMenu(items as unknown[])
@@ -1338,9 +1337,18 @@ if (!noWindow) {
       }
       return
     }
-    // dev 菜单：打开当前聚焦窗口的 inspector（Electrobun BrowserView.openDevTools）
+    // 菜单：打开当前聚焦窗口的 DevTools——CEF 走 openDevTools（应用内 inspector）；
+    // win 走合成 F12（#106 返工：上游 WebView2 壳无 openDevTools 实现，物理 F12 由 WebView2 默认能力响应）。
     if (action === SHELL_MENU_ACTIONS.openDevTools) {
-      focusedWindow()?.webview?.openDevTools()
+      if (process.platform === 'win32') {
+        if (sendDevToolsKeystroke()) {
+          console.log('[shell] 开发者工具：已发送 F12 键击（WebView2 原生响应，与物理按键同路径）')
+        } else {
+          console.error('[shell] 开发者工具：user32 键击不可用，请直接按 F12 / Ctrl+Shift+I')
+        }
+      } else {
+        focusedWindow()?.webview?.openDevTools()
+      }
       return
     }
     const url = detail?.data?.url
@@ -1354,6 +1362,7 @@ if (!noWindow) {
     }
     if (action === SHELL_MENU_ACTIONS.copyLink && url !== undefined) {
       Utils.clipboardWriteText(url)
+      return
     }
   })
   // 测试钩子：启动时把这些 profile 的窗口一并开出来（多窗口的实机/CI 验证用，逗号分隔）
