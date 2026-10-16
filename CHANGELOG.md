@@ -23,6 +23,7 @@
 - 运行时下载可取消（#97）：下载进行中时按钮组出现「取消」（无二次确认），走新命令 `cancel_runtime_download`——与通用 `cancel_download` 并列，运行时安装不在下载管理器内，有自己的单飞状态。取消 = **树级**停止安装进程树（复用 #60 的 `process-tree.stopProcessTree`，pnpm 的构建/lifecycle 孙进程继承管道写端，只杀直接子进程会等不到 EOF）→ 删半成品目录 → 落**独立终态** `cancelled`（面板中性蓝「已取消 · 重试下载」，不与失败混同、不再回落成「安装失败（exit -15）」）。没有任务时是幂等 no-op（连点两次不报错），取消后单飞状态复位、同版本可立即重下；装完了才点取消按成功收尾、不删目录。
 
 ### Changed
+- 托盘「重启 dsh 服务」升级为「重启应用」（#126）：整个应用退出并自动拉起（复用 #119 的接班式 relaunch），动作 id 同步改名为 `tray:restart-app`；面板的「重启 dsh 服务」仍是 DSH 侧重启，不变。
 - CI 触发策略分流（#7）：push/PR 只跑检查（typecheck + test，新增 Check workflow）；完整构建（三平台 + 断言 + 冒烟 + 上传）仅由 workflow_dispatch 与 tag push 触发。
 - dsh 宿主由随包 Node sidecar 改为 Bun 直跑；启动链对齐官方桌面（`loadProfileDirectory` + `resolvedProfile`，profile 由 dsh 自身逻辑初始化）。
 - 页面跑在壳自建 loopback origin 上：静态资产本地优先、真实 secure context（存储可写）、注入经 `dshDesktopBoot.ready()` 交付。

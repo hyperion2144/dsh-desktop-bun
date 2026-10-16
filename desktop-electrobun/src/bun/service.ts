@@ -1273,8 +1273,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       settings: () => liveSettings,
       save: saveSettings,
       restartService: async () => {
-        // #60：面板「重启 dsh 服务」= 壳级完整重启（退出级 teardown → 全新启动，与托盘同语义）；
+        // #60：面板「重启 dsh 服务」= 壳级完整重启（退出级 teardown → 全新启动，壳本体/托盘不退出）；
         // 无窗口/测试没有壳 teardown 回调，回落宿主级 restartHost（已树安全）。
+        // #126 起托盘那项已是「重启应用」（整应用重来），不再是本条的同语义兄弟。
         if (options.onFullRestart !== undefined) {
           await options.onFullRestart()
           return
