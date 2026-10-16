@@ -14,11 +14,6 @@ const ADVANCED_STYLES = `
    用弹窗稳定标记定位，不依赖 hash 类名。 */
 [role="dialog"][aria-modal="true"] nav { min-height: 0; overflow: hidden; }
 [role="dialog"][aria-modal="true"] nav > div:last-child { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-.dshDesktopWindowControls { position: absolute; top: 0; right: 0; height: 100%; display: flex; align-items: stretch; }
-.dshDesktopCaptionButton { width: 46px; border: none; margin: 0; padding: 0; background: transparent; color: var(--dsw-alias-label-primary, currentColor); display: grid; place-items: center; cursor: default; }
-.dshDesktopCaptionButton:hover { background: rgba(128, 128, 128, 0.18); }
-.dshDesktopCaptionButton-close:hover { background: #e81123; color: #fff; }
-.dshDesktopCaptionButton svg { width: 12px; height: 12px; display: block; }
 /* 侧边栏内容区滚动（local-chrome.ts ensureSidebarScroll 打稳定标记；内联 overflow
    已覆盖 stock 的 hidden，这里只做滚动条观感与滚动链收敛）。 */
 [data-dsh-desktop-scroll] { overscroll-behavior: contain; scrollbar-width: thin; }

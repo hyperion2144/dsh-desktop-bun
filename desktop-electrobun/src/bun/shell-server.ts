@@ -22,6 +22,7 @@ import { isExternalUrl } from './external.ts'
 import { VIEW_TOKEN_HEADER, denyReason, isCommandAllowed } from '../shared/view-grant.ts'
 import type { ViewGrant, ViewRegistry } from '../shared/view-grant.ts'
 import { isOpenablePath, type ContextMenuRequest } from './context-menu.ts'
+import type { WindowMaxState } from './window-max.ts'
 import type { ProfileOpRequest, ProfileOpResult } from './profile-dialog.ts'
 
 /** 官方 web-document.ts 的同一行：index 会等异步的 Host 注入，先把 promise 挂上。 */
@@ -55,6 +56,8 @@ export interface ShellServerOptions {
   onActivate?: () => void
   /** 自绘窗口控制（A5）：页面三键 → 主进程操作 BrowserWindow */
   onWindowControl?: (action: 'minimize' | 'toggle-maximize' | 'close') => void
+  /** 最大化态读取（#112 壳层标题栏带）：GET /__shell__/window 回 { maximized }；缺省时 GET 仍 405 */
+  onWindowState?: () => WindowMaxState
   /** F9：托盘弹框的新建/迁移 profile 提交（服务面实现） */
   /** F12：页面内确认弹窗的回填（旧壳 ui_input_confirm） */
   onInputConfirm?: (flow: string, value: string) => void
@@ -488,6 +491,10 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
         }
         // 自绘窗口控制（A5）：最小化 / 最大化切换 / 关闭
         if (decision.rel === 'window') {
+          if (request.method.toUpperCase() === 'GET') {
+            if (options.onWindowState === undefined) return new Response('method not allowed', { status: 405 })
+            return Response.json(options.onWindowState(), { headers: { 'cache-control': 'no-store' } })
+          }
           if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
           if (options.onWindowControl === undefined) return new Response('no window host', { status: 501 })
           let action = ''

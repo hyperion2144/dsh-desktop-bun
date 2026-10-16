@@ -14,6 +14,7 @@ import { carrierScript, type CarrierPlatform } from './carrier.ts'
 import { acceptShimScript } from './accept-shim.ts'
 import { contextMenuScript } from './context-menu.ts'
 import { externalLinksScript } from './external.ts'
+import { titlebarScript } from './titlebar.ts'
 export const BOOT_ENDPOINT = '/__shell__/boot'
 
 import { VIEW_TOKEN_HEADER } from '../shared/view-grant.ts'
@@ -86,7 +87,9 @@ export function bootPreloadScript(locale: string, platform: CarrierPlatform, sel
     '}',
     // 载体标记：dsh 前端只在 globalThis.dshDesktop 存在时才装浏览器 guest 桥（旧壳同款）
     carrierScript(carrier),
-    // 窗口 chrome 与平台标记：由桌面插件 advanced-shell/styles 接管（#23/#44），骨架期 chrome.ts 注入退役。
+    // 标题栏带（win/linux，#112）：官方 data-windows-titlebar 声明式适配 + 壳层拖拽带与三键，
+    // 不依赖 dsh 页面插件状态；darwin 系统红绿灯，不注入。
+    ...(platform === 'darwin' ? [] : [titlebarScript(platform, viewToken)]),
     // 外链（会话里的链接、侧边栏浏览器「在系统浏览器打开」）不把壳自己的窗口带走：
     // 上游契约是 window.open，CEF 下没人接，这里改发壳端点 → Utils.openExternal。
     externalLinksScript(selfOrigin, viewToken),

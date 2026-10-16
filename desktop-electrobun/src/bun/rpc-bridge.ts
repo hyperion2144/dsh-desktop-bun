@@ -17,7 +17,7 @@
 // 超时：官方默认单请求 1000ms；「选择音效文件」「重启宿主」这类命令远超它，壳口径放宽。
 import { dispatchRpc, type RpcRouter } from './rpc.ts'
 import { denyReason, isCommandAllowed, type ViewGrant } from '../shared/view-grant.ts'
-import { deriveMaximized, ensureNativeMaximizeStyles, getWorkAreaForFrame, type WindowFrame } from './window-max.ts'
+import { ensureNativeMaximizeStyles, getWorkAreaForFrame, toggleWindowMaximize, windowMaxState, type WindowFrame, type WindowMaxState } from './window-max.ts'
 
 /** 壳的官方 RPC 单请求超时（官方默认 1000ms 对文件选择器/重启宿主太紧）。 */
 export const SHELL_RPC_MAX_REQUEST_TIME = 120_000
@@ -65,22 +65,10 @@ export function createShellRpcFunnel(deps: ShellRpcDeps): ShellRpcFunnel {
   const workAreaOf = deps.workArea ?? getWorkAreaForFrame
   // 样式补丁按漏斗实例记忆：本窗首次 toggle 枚举补丁一次，多窗口后建的窗也能补到。
   const stylesPatched = deps.maximizeStylesPatched ?? (() => (platform === 'win32' ? ensureNativeMaximizeStyles() : false))
-  const deriveState = (): { maximized: boolean } => {
-    const frame = deps.window.getFrame()
-    const workArea = platform === 'win32' ? workAreaOf(frame) : null
-    return { maximized: deriveMaximized(frame, workArea, deps.window.isMaximized()) }
-  }
+  const deriveState = (): WindowMaxState => windowMaxState(deps.window, { platform, workArea: workAreaOf })
   const toggleMaximize = (): void => {
-    const { maximized } = deriveState()
-    if (maximized) {
-      deps.window.unmaximize()
-      return
-    }
-    // win32 先补系统最大化样式位（否则 SW_MAXIMIZE 不按工作区收缩，上游 #558）；
-    // 补丁失败也直接原生 maximize——维护者拍板（#80）：拒绝一切自绘窗口尺寸，
-    // 任何情况下不用 setFrame 自摆。
-    if (platform === 'win32') stylesPatched()
-    deps.window.maximize()
+    // 判定/样式位/原生切换收口在 window-max.ts（与 /__shell__/window 端点共用，#112）。
+    toggleWindowMaximize(deps.window, { platform, workArea: workAreaOf, maximizeStylesPatched: stylesPatched })
   }
   return async (method, params) => {
     // 授权先行：三键与命令一视同仁（shell 视图全放行；guest/remote 即便拿到

@@ -46,7 +46,6 @@ module.exports = __toCommonJS(index_exports);
 
 // src/client/shell-rpc.ts
 var RPC_ENDPOINT = "/__shell__/rpc";
-var WINDOW_ENDPOINT = "/__shell__/window";
 var VIEW_TOKEN_HEADER = "x-dsh-shell-view";
 var DEFAULT_TIMEOUT_MS = 15e3;
 var MAX_ID = 1e10;
@@ -171,85 +170,11 @@ function createShellRpc(deps) {
   };
 }
 var shellRpc = createShellRpc();
-async function sendWindowAction(action, deps) {
-  const method = { minimize: "window_minimize", "toggle-maximize": "window_toggle_maximize", close: "window_close" }[action];
-  const rpc = deps?.rpc ?? shellRpc;
-  const readGlobals = deps?.readGlobals ?? (() => globalThis);
-  if (typeof readGlobals().__electrobunHostBridge?.postMessage === "function") {
-    await rpc.invoke(method, {}, { timeoutMs: 3e4 });
-    return;
-  }
-  const fetchImpl = deps?.fetchImpl ?? ((...a) => fetch(...a));
-  const token = readGlobals().__DSH_SHELL_VIEW_TOKEN__;
-  const response = await fetchImpl(WINDOW_ENDPOINT, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...typeof token === "string" && token !== "" ? { [VIEW_TOKEN_HEADER]: token } : {} },
-    body: JSON.stringify({ action })
-  });
-  if (!response.ok) throw new Error(`window action failed: ${String(response.status)}`);
-}
 
 // src/client/local-chrome.ts
-var STRIP_HEIGHT = {
-  darwin: 28,
-  win32: 32,
-  linux: 32
-};
+var DARWIN_STRIP_HEIGHT = 28;
 var TRAFFIC_LIGHT_BAND = 76;
-var CAPTION_CONTROLS_WIDTH = 138;
 var FRAME_LAYER_SELECTOR = "[data-shell-overlay]";
-function runWindowAction(action) {
-  sendWindowAction(action).catch((error) => console.error("[dsh-desktop] window action failed", error));
-}
-var maximizeIconSvg = (maximized) => maximized ? '<rect x="1.5" y="4.5" width="7" height="6" stroke="currentColor" strokeWidth="1" fill="none" /><path d="M3.5 4.5V2.5H10.5V9H8.5" stroke="currentColor" strokeWidth="1" fill="none" />' : '<rect x="1.5" y="1.5" width="9" height="9" stroke="currentColor" strokeWidth="1" fill="none" />';
-function syncMaximizeIcon() {
-  const button = document.querySelector(".dshDesktopCaptionButton-maximize");
-  if (button === null) return;
-  shellRpc.invoke("window_get_state", void 0, { timeoutMs: 5e3 }).then((state) => {
-    button.innerHTML = `<svg viewBox="0 0 12 12" aria-hidden="true">${maximizeIconSvg(state.maximized)}</svg>`;
-    button.setAttribute("aria-label", state.maximized ? "\u8FD8\u539F" : "\u6700\u5927\u5316");
-  }).catch(() => void 0);
-}
-function makeCaptionButton(aria, extraClass, svgPath) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = `dshDesktopCaptionButton${extraClass ? ` ${extraClass}` : ""}`;
-  button.setAttribute("aria-label", aria);
-  button.innerHTML = `<svg viewBox="0 0 12 12" aria-hidden="true">${svgPath}</svg>`;
-  return button;
-}
-function buildWindowControls(platform) {
-  const box = document.createElement("div");
-  box.className = "dshDesktopWindowControls";
-  box.appendChild(makeCaptionButton("\u6700\u5C0F\u5316", "", '<path d="M1 6h10" stroke="currentColor" strokeWidth="1" fill="none" />'));
-  box.appendChild(makeCaptionButton("\u6700\u5927\u5316", "dshDesktopCaptionButton-maximize", maximizeIconSvg(false)));
-  box.appendChild(makeCaptionButton("\u5173\u95ED", "dshDesktopCaptionButton-close", '<path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1" />'));
-  box.addEventListener("click", (event) => {
-    const button = event.target.closest("button");
-    const action = button?.getAttribute("aria-label");
-    if (action === "\u6700\u5C0F\u5316") runWindowAction("minimize");
-    else if (action === "\u6700\u5927\u5316" || action === "\u8FD8\u539F") {
-      runWindowAction("toggle-maximize");
-      syncMaximizeIcon();
-    } else if (action === "\u5173\u95ED") runWindowAction("close");
-  });
-  if (platform !== "darwin") {
-    syncMaximizeIcon();
-    shellRpc.onMessage((name) => {
-      if (name === "window_state_changed") syncMaximizeIcon();
-    });
-    let resizeTimer = 0;
-    window.addEventListener("resize", () => {
-      window.clearTimeout(resizeTimer);
-      resizeTimer = window.setTimeout(syncMaximizeIcon, 200);
-    });
-    window.addEventListener("focus", () => syncMaximizeIcon());
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") syncMaximizeIcon();
-    });
-  }
-  return box;
-}
 function locateLayout() {
   const layer = document.querySelector(FRAME_LAYER_SELECTOR);
   const frame = layer?.parentElement;
@@ -258,7 +183,6 @@ function locateLayout() {
   return { frame, sidebar: children[0] ?? frame, center: children[1] ?? null, rightColumn: children[2] ?? null };
 }
 function installLocalChrome(platform) {
-  const height = STRIP_HEIGHT[platform];
   const host = document.createElement("div");
   host.className = "dshDesktopChromeHost";
   const strip = document.createElement("div");
@@ -266,10 +190,8 @@ function installLocalChrome(platform) {
   const drag = document.createElement("div");
   drag.className = "dshDesktopChromeDrag";
   drag.classList.add("electrobun-webkit-app-region-drag");
-  if (platform !== "darwin") drag.addEventListener("dblclick", () => runWindowAction("toggle-maximize"));
   strip.appendChild(drag);
-  if (platform !== "darwin") strip.appendChild(buildWindowControls(platform));
-  host.appendChild(strip);
+  if (platform === "darwin") host.appendChild(strip);
   document.body.appendChild(host);
   const STATUS_BAR_HEIGHT = 24;
   const STATUS_TEXT = {
@@ -469,7 +391,7 @@ function installLocalChrome(platform) {
       return;
     }
     attempts = 0;
-    const { frame, sidebar, center, rightColumn } = layout;
+    const { frame, sidebar } = layout;
     ensureSidebarScroll(sidebar);
     const sidebarWidth = sidebar.offsetWidth;
     sidebar.style.paddingBottom = `${STATUS_BAR_HEIGHT}px`;
@@ -478,21 +400,15 @@ function installLocalChrome(platform) {
       const collapsed = frame.hasAttribute("data-sidebar-collapsed");
       frame.style.setProperty("transition", "none", "important");
       if (collapsed) {
-        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${height}px;background:transparent;`;
+        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${DARWIN_STRIP_HEIGHT}px;background:transparent;`;
         drag.style.cssText = "position:absolute;inset:0;";
         sidebar.style.paddingTop = "";
         bar.style.display = "none";
       } else {
-        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${height}px;`;
+        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${DARWIN_STRIP_HEIGHT}px;`;
         drag.style.cssText = "position:absolute;inset:0;";
         bar.style.display = "";
       }
-    } else {
-      strip.style.cssText = `left:${sidebarWidth}px;right:0;top:0;height:${height}px;`;
-      drag.style.cssText = `position:absolute;top:0;bottom:0;left:0;right:${CAPTION_CONTROLS_WIDTH}px;`;
-      if (center !== null) center.style.paddingTop = `${height}px`;
-      const rightPanel = rightColumn?.querySelector("[data-sidebar-right-panel]");
-      if (rightPanel !== null) rightPanel.style.top = `${height}px`;
     }
   };
   try {
@@ -516,9 +432,6 @@ function installLocalChrome(platform) {
         attributes: true,
         attributeFilter: ["data-sidebar-collapsed", "data-details-collapsed", "style"]
       });
-      if (layout.rightColumn !== null) {
-        mutationObserver.observe(layout.rightColumn, { childList: true, subtree: true });
-      }
     }
     return true;
   };
@@ -546,9 +459,6 @@ function installLocalChrome(platform) {
       found.sidebar.style.removeProperty("border-right");
       found.frame.style.removeProperty("transition");
       found.frame.style.removeProperty("grid-template-columns");
-      if (found.center !== null) found.center.style.paddingTop = "";
-      const rightPanel = found.rightColumn?.querySelector("[data-sidebar-right-panel]");
-      if (rightPanel !== null) rightPanel.style.top = "";
     }
     for (const el of minWidthPatched) el.style.minWidth = "";
     for (const el of overflowXPatched) el.style.overflowX = "";
@@ -581,11 +491,6 @@ var ADVANCED_STYLES = `
    \u7528\u5F39\u7A97\u7A33\u5B9A\u6807\u8BB0\u5B9A\u4F4D\uFF0C\u4E0D\u4F9D\u8D56 hash \u7C7B\u540D\u3002 */
 [role="dialog"][aria-modal="true"] nav { min-height: 0; overflow: hidden; }
 [role="dialog"][aria-modal="true"] nav > div:last-child { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-.dshDesktopWindowControls { position: absolute; top: 0; right: 0; height: 100%; display: flex; align-items: stretch; }
-.dshDesktopCaptionButton { width: 46px; border: none; margin: 0; padding: 0; background: transparent; color: var(--dsw-alias-label-primary, currentColor); display: grid; place-items: center; cursor: default; }
-.dshDesktopCaptionButton:hover { background: rgba(128, 128, 128, 0.18); }
-.dshDesktopCaptionButton-close:hover { background: #e81123; color: #fff; }
-.dshDesktopCaptionButton svg { width: 12px; height: 12px; display: block; }
 /* \u4FA7\u8FB9\u680F\u5185\u5BB9\u533A\u6EDA\u52A8\uFF08local-chrome.ts ensureSidebarScroll \u6253\u7A33\u5B9A\u6807\u8BB0\uFF1B\u5185\u8054 overflow
    \u5DF2\u8986\u76D6 stock \u7684 hidden\uFF0C\u8FD9\u91CC\u53EA\u505A\u6EDA\u52A8\u6761\u89C2\u611F\u4E0E\u6EDA\u52A8\u94FE\u6536\u655B\uFF09\u3002 */
 [data-dsh-desktop-scroll] { overscroll-behavior: contain; scrollbar-width: thin; }

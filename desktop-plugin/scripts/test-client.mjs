@@ -488,7 +488,7 @@ assert.equal(area.value, 'xy', '输入框 value 里的控制字符也被擦掉')
 
 
 
-// ── shell-rpc（#50）：统一传输层，三通道选择 / wire 协议 / 超时 / 窗口三键 ──
+// ── shell-rpc（#50）：统一传输层，三通道选择 / wire 协议 / 超时 ──
 await build({
   entryPoints: [join(root, 'src/client/shell-rpc.ts')],
   outfile: join(tmp, 'shell-rpc.mjs'),
@@ -498,7 +498,7 @@ await build({
   target: 'node20',
   logLevel: 'silent',
 })
-const { createShellRpc, sendWindowAction } = await import(pathToFileURL(join(tmp, 'shell-rpc.mjs')).href)
+const { createShellRpc } = await import(pathToFileURL(join(tmp, 'shell-rpc.mjs')).href)
 
 // 官方桥：捕获 postMessage 包形，回包经 receiveMessageFromHost 注入
 {
@@ -639,22 +639,6 @@ const { createShellRpc, sendWindowAction } = await import(pathToFileURL(join(tmp
   assert.equal(fetchCalls, 0, '官方通道超时后不打 fetch 兑底')
 }
 
-// 窗口三键：官方通道 window_* 方法；无桥时 /__shell__/window 兑底
-{
-  const sent = []
-  const globals = { __electrobunHostBridge: { postMessage: (raw) => sent.push(JSON.parse(raw)) }, __electrobun: {} }
-  const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
-  const p = sendWindowAction('toggle-maximize', { rpc, readGlobals: () => globals })
-  assert.equal(sent[0].method, 'window_toggle_maximize', '三键走官方 RPC 方法')
-  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 1, success: true, payload: null })
-  await p
-
-  const calls = []
-  const fetchImpl = async (url, init) => { calls.push({ url, init }); return { ok: true } }
-  await sendWindowAction('minimize', { fetchImpl, readGlobals: () => ({ __DSH_SHELL_VIEW_TOKEN__: 't2' }) })
-  assert.equal(calls[0].url, '/__shell__/window', '无桥三键兑底到窗口端点')
-  assert.deepEqual(JSON.parse(calls[0].init.body), { action: 'minimize' })
-}
 
 // ── devtools-toggle（#69）：开发者工具开关的状态机与安全面文案 ──
 await build({

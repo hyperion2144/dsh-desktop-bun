@@ -21,6 +21,7 @@ import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-s
 import type { ShellStage } from './stages.ts'
 import { dshHome, layout, resolveBuiltinRuntimeDir, type ShellLayout } from './runtime.ts'
 import { startShellServer, type BootPayload, type ShellServer, type ShellServerOptions } from './shell-server.ts'
+import type { WindowMaxState } from './window-max.ts'
 import { readHostRecords, sweepStaleHosts, upsertHostRecord, writeHostRecords } from './host-registry.ts'
 import { createRestartLedger } from './supervisor.ts'
 import type { ContextMenuRequest } from './context-menu.ts'
@@ -104,6 +105,8 @@ export interface ServiceOptions {
   onActivate?: () => void
   /** 自绘窗口控制（A5）：页面三键 → 主进程操作 BrowserWindow */
   onWindowControl?: (action: 'minimize' | 'toggle-maximize' | 'close') => void
+  /** 最大化态读取（#112 壳层标题栏带）：GET /__shell__/window 回 { maximized }；缺省时 GET 仍 405 */
+  onWindowState?: () => WindowMaxState
   onLog?: (line: string) => void
   /** 通知权限桥（index.ts 注入同一个实例；缺省自建） */
   notifyBridge?: NativeNotify
@@ -739,6 +742,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onContextMenu: options.onContextMenu,
     onActivate: options.onActivate,
     onWindowControl: options.onWindowControl,
+    onWindowState: options.onWindowState,
     onProfileOp: (request) => service.profileOp(request),
     onInputConfirm: options.onInputConfirm,
     views: options.views,

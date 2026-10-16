@@ -7,7 +7,7 @@ import { ApplicationMenu, BrowserView, BrowserWindow, BuildConfig, ContextMenu, 
 import { acceptShimScript } from './accept-shim.ts'
 import { systemLocale } from './locale.ts'
 import { installApplicationMenu } from './menu.ts'
-import { deriveMaximized, ensureNativeMaximizeStyles, getWorkAreaForFrame } from './window-max.ts'
+import { deriveMaximized, ensureNativeMaximizeStyles, getWorkAreaForFrame, toggleWindowMaximize, windowMaxState, type WindowMaxState } from './window-max.ts'
 import { bootPreloadScript } from './preload.ts'
 import { attachShellRpc } from './rpc-bridge.ts'
 import { startService, type ServiceOptions, type ShellService } from './service.ts'
@@ -459,6 +459,16 @@ function focusedWindow(): BrowserWindow | null {
   return mainWindow
 }
 
+/**
+ * 焦点窗的最大化态（#112 壳层标题栏带）：判定收口在 window-max.ts 的 windowMaxState
+ * （与 RPC window_get_state 同源）。无焦点窗时回 false（无窗场景图标无意义）。
+ */
+function focusedWindowState(): WindowMaxState {
+  const win = focusedWindow()
+  if (win === null) return { maximized: false }
+  return windowMaxState(win)
+}
+
 /** 起/profile 复用一份服务面：每份服务面 = 一个 dsh 宿主 + 一个 loopback origin。 */
 async function ensureService(profile: string): Promise<ShellService> {
   const existing = services.get(profile)
@@ -515,8 +525,8 @@ function serviceOptionsFor(profile: string): ServiceOptions {
       if (action === 'minimize') {
         win.minimize()
       } else if (action === 'toggle-maximize') {
-        if (win.isMaximized()) win.unmaximize()
-        else win.maximize()
+        // 与 RPC window_toggle_maximize 同语义：判定/样式位/原生切换收口在 window-max.ts（#112）。
+        toggleWindowMaximize(win)
       } else {
         // #50 验证反馈：兑底端点的关窗也走统一策略（要拿到 profile 才能判主/副窗）
         const focusedEntry = [...windows.values()].find((entry) => entry.window === win)
@@ -528,6 +538,10 @@ function serviceOptionsFor(profile: string): ServiceOptions {
         if (closePolicyAction === 'close') win.close()
         else if (closePolicyAction === 'quit') void shutdown()
       }
+    },
+    onWindowState: () => {
+      // GET /__shell__/window（#112 壳层标题栏带的最大化图标查询）：与漏斗同源推导
+      return focusedWindowState()
     },
     onProfileOpApplied: (op, profile) => {
       // F9：创建成功直接开那扇窗（ensureService 会装依赖并拉宿主）；迁移完成刷新托盘。
