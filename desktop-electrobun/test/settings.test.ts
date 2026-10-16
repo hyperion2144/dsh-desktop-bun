@@ -327,6 +327,29 @@ layoutSuite('layout > profile 决议', () => {
     saveSettings(home, normalizeSettings({ active_profile: 'web' }))
     const settings = loadSettings({ home }).settings
     const env = { DSH_HOME: home, DSH_SHELL_RUNTIME_DIR: layoutRuntime }
-    expect(layout({ env, profile: activeProfile(settings, env) }).profile).toBe('web')
+    const result = layout({ env, profile: activeProfile(settings, env) })
+    expect(result.profile).toBe('web')
+    // 树是全的：#117 新增的 unresolved 不该有东西
+    expect(result.unresolved).toBe(null)
+  })
+})
+
+// #117：布局/运行时解析不出来时 layout() **不再抛**。
+// 服务面是用来「管 DSH」的，不是「DSH 起来了才算存在」——解析失败也要先把壳自己的部分立起来
+// （托盘、设置、profile、退出），否则用户连「换一个运行时」都点不到。
+// 挂在 layoutSuite 外面：失败路径本身就是没有完整运行时树，正是这条要验的场景。
+describe('layout > 解析失败不抛（#117）', () => {
+  test('运行时树不完整：不抛，unresolved 点名缺哪几项，壳自己的字段仍是真值', () => {
+    const home = tempHome()
+    const brokenTree = mkdtempSync(join(tmpdir(), 'dsh-broken-tree-')) // 空目录：dsh lib 与前端 dist 都在不了
+    const result = layout({ env: { DSH_HOME: home }, runtimeDir: brokenTree, profile: 'web' })
+
+    expect(result.unresolved).toMatch(/壳布局不完整/)
+    expect(result.unresolved).toMatch(/dsh lib/)
+    // 壳自己的部分照常可用——托盘/设置/profile 全靠这几项，与 DSH 起不起得来无关
+    expect(result.profile).toBe('web')
+    expect(result.home).toBe(home)
+    expect(result.profileDir).toBe(join(home, 'profiles', 'web'))
+    expect(result.runtimeDir).toBe(brokenTree)
   })
 })

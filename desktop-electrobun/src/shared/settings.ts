@@ -186,6 +186,7 @@ export const NOTIFICATION_SCENARIOS: readonly ScenarioMeta[] = [
   { id: 'task.complete', group: 'g-task', name: '任务完成', desc: '失焦时提醒回来看看', defaultOn: true },
   { id: 'config.error', group: 'g-cfg', name: '配置错误', desc: 'token 无法识别等', defaultOn: true },
   { id: 'config.info', group: 'g-cfg', name: '配置提示', desc: '端口保存等低危信息', defaultOn: false },
+  { id: 'register.cli', group: 'g-cfg', name: 'CLI 注册', desc: '注册/注销 dsh 系统命令的结果反馈', defaultOn: true },
   { id: 'dsh.approval', group: 'g-task', name: '等待审批', desc: 'dsh 会话等待你的审批确认', defaultOn: true },
   { id: 'dsh.error', group: 'g-task', name: '会话错误', desc: 'dsh 会话运行出错', defaultOn: true },
 ]

@@ -47,10 +47,10 @@ export interface CommandDeps {
   dshVersion?: () => string
   openExternal?: (url: string) => void
   closeWindow?: () => void
-  /** 试听音效（设置面板的「试听」；缺省不响，但要回一条可诊断的话） */
-  playSound?: (name: string) => void
-  /** 系统默认提示音的试听（旧壳 `preview_notification_sound("default")`） */
-  playSystemSound?: () => void
+  /** 试听音效（设置面板的「试听」）：真的出声才 true；没后端时 false，面板据此提示（不再假报成功） */
+  playSound?: (name: string) => boolean
+  /** 系统默认提示音的试听（旧壳 `preview_notification_sound("default")`）：真起了进程才 true */
+  playSystemSound?: () => boolean
   /** 弹原生文件选择器选音频（返回绝对路径或 null；旧壳 tauri-plugin-dialog） */
   pickSoundFile?: () => Promise<string | null>
   /** 把音频文件收进 `$DSH_HOME/sounds/`，返回入库文件名（旧壳 sounds::import_file） */
@@ -519,6 +519,8 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
         })),
         groups: NOTIFICATION_GROUPS,
         sounds: listSounds(deps.home),
+        // 本机播放能力（三平台后端探测的结论）：面板据此禁用没后端的格式、并说明原因
+        capability: deps.notifier?.soundCapability() ?? null,
       }
     },
     set_notifications_config: (args) => {
@@ -548,14 +550,15 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       deps.log(`[notify] 试听请求：sound = ${sound === '' ? '(空)' : sound}`)
       if (sound === '' || sound === 'none') {
         deps.log('[notify] 试听：none/空 ⇒ 不响')
-        return { played: null, sound }
+        return { played: null, sound, audible: false }
       }
       if (sound === 'default') {
-        deps.playSystemSound?.()
-        return { played: 'default', sound }
+        const audible = deps.playSystemSound?.() === true
+        if (!audible) deps.log('[notify] 试听系统提示音：本机没有可用后端，未出声')
+        return { played: 'default', sound, audible }
       }
-      deps.playSound?.(sound)
-      return { played: sound, sound }
+      const audible = deps.playSound?.(sound) === true
+      return { played: sound, sound, audible }
     },
     // 选文件（返回路径，由 import_notification_sound 收进 sounds/）
     choose_notification_sound: async () => (await deps.pickSoundFile?.()) ?? null,

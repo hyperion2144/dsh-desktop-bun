@@ -21,6 +21,7 @@ import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-s
 import type { ShellStage } from './stages.ts'
 import { dshHome, layout, resolveBuiltinRuntimeDir, type ShellLayout } from './runtime.ts'
 import { startShellServer, type BootPayload, type ShellServer, type ShellServerOptions } from './shell-server.ts'
+import type { WindowMaxState } from './window-max.ts'
 import { readHostRecords, sweepStaleHosts, upsertHostRecord, writeHostRecords } from './host-registry.ts'
 import { createRestartLedger } from './supervisor.ts'
 import type { ContextMenuRequest } from './context-menu.ts'
@@ -35,7 +36,8 @@ import { detectSystemProxy } from './system-proxy.ts'
 import type { ProxyEnv } from '../shared/proxy-env.ts'
 import { createKeepAwake, syncPreventSleep } from './keep-awake.ts'
 import { startNotifyServer } from './notify-server.ts'
-import { createNotifier, importSound as importSoundFile, systemDefaultSoundCommand, type Notifier } from './notifications.ts'
+import { createNotifier, importSound as importSoundFile, type Notifier } from './notifications.ts'
+import { systemDefaultSoundCommand } from './sound-playback.ts'
 import { createNativeNotify, type NativeNotify } from './notify-un.ts'
 import type { ViewRegistry } from '../shared/view-grant.ts'
 import type { GuestCommands } from './guest-manager.ts'
@@ -69,6 +71,9 @@ import {
 } from './runtime-store.ts'
 import { createRuntimeDownloader, ensureNodeShim, ensureShimDir, installRuntime, resolvePnpmCjs } from './runtime-install.ts'
 
+
+/** #117：服务面自己管 DSH 的判别位（ShellState.status 取这个联合）。 */
+export type ShellServiceStatus = 'stopped' | 'starting' | 'running' | 'failed' | 'blocked'
 export interface ServiceOptions {
   /** 平台（命令表要回给页面；缺省 process.platform） */
   platform?: NodeJS.Platform
@@ -104,6 +109,8 @@ export interface ServiceOptions {
   onActivate?: () => void
   /** 自绘窗口控制（A5）：页面三键 → 主进程操作 BrowserWindow */
   onWindowControl?: (action: 'minimize' | 'toggle-maximize' | 'close') => void
+  /** 最大化态读取（#112 壳层标题栏带）：GET /__shell__/window 回 { maximized }；缺省时 GET 仍 405 */
+  onWindowState?: () => WindowMaxState
   onLog?: (line: string) => void
   /** 通知权限桥（index.ts 注入同一个实例；缺省自建） */
   notifyBridge?: NativeNotify
@@ -148,6 +155,14 @@ export interface ShellState {
   settingsProvenance: { created: boolean; migrated: boolean; recovered: boolean }
   /** 启动被阻塞的原因（旧壳 ForeignUnknown：端口被陌生程序占用，只报错不代杀）；未阻塞时无此字段 */
   blocked?: string
+  /**
+   * #117：服务面自己管 DSH 的判别位。服务面**先于** DSH 存在：
+   * stopped=壳的面全就绪但还没拉 DSH / starting=正在拉 / running=DSH 已就绪 /
+   * failed=拉过但没起来（看 error）/ blocked=端口被陌生程序占着，自动拉起被拒（看 blocked）。
+   */
+  status: ShellServiceStatus
+  /** status === 'failed' 时的原因。托盘据此显示，用户改完运行时还能再拉一次。 */
+  error: string | null
 }
 
 export interface ShellService {
@@ -184,6 +199,14 @@ export interface ShellService {
   onProfileOpApplied: (op: 'create' | 'migrate', profile: string) => void
   /** 官方 RPC 的命令表（惰性；壳 RPC 漏斗派发用，见 rpc-bridge.ts #50） */
   rpcRouter: () => RpcRouter | null
+  /**
+   * #117：把 DSH 拉起来 —— 服务面**管理** DSH 的动作，不是服务面**存在**的前提。
+   * startService() 不调它；调用方（index.ts 冷启动 / serve.ts 黑盒握手 / 托盘改完运行时再试一次）
+   * 决定什么时候要 DSH。已经在 running / 正在拉 / blocked 时都是空操作（或复用正在拉的那次，
+   * 不重复 spawn 宿主）。失败不重建服务面：落 failed 态 + 记原因 + 照旧抛给调用方——
+   * 壳自己的部分（托盘/设置/切换运行时/退出）此时完全可用，这正是 #117 要的死局出口。
+   */
+  ensureRunning: () => Promise<void>
 }
 
 export async function startService(options: ServiceOptions): Promise<ShellService> {
@@ -532,7 +555,19 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // remote 视图 token（#47）：铸给 mobile-access 远程命令桥；守护器重启宿主时沿用同一枚
   let remoteViewToken: string | undefined
   let hostInjections: readonly unknown[] = []
+  // #101：boot 载荷是否已可写（applyInjections 声明在前，载荷声明在后；声明前的早期更新只落 hostInjections）
+  let bootPayloadLive = false
   let cookie = ''
+
+  // #101：宿主运行期图重算（插件更新/装卸）会经 HOST-INJECTIONS 通道推送新清单，boot 载荷必须
+  // 跟着刷新——页面每次刷新都从 /__shell__/boot 现取，冻在 ready 快照就是 #101 的死态。
+  // HOST-INJECTIONS 到达即换载荷；远程模式不会收到（无宿主）。bootPayloadLive 守护声明前的
+  // 极窄早期窗口（宿主 ready → 载荷首次填充之间）：更新先落 hostInjections，不会被丢。
+  const applyInjections = (rows: readonly unknown[]): void => {
+    hostInjections = rows
+    if (bootPayloadLive) bootPayload.injections = [...rows]
+    log(`[shell] 注入清单更新：injections = ${String(rows.length)}（宿主图重算，boot 载荷已刷新）`)
+  }
   // 起宿主 + 取 cookie。守护器重启时重复调这个（同一个 cookie 变量与服务面 options）。
   // 设置面板会写盘：内存里也同步一份，免得面板读回来还是旧值（必须先于 connect：connect 里会读）
   let liveSettings = settings
@@ -579,6 +614,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         mode: hostMode,
         env: childEnv,
         onLog: log,
+        onInjections: applyInjections,
         patchFiles,
         upstreamPort,
         shellPagePort: pagePort,
@@ -604,6 +640,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         mode: 'existing',
         env: childEnv,
         onLog: log,
+        onInjections: applyInjections,
         patchFiles,
         upstreamPort,
         shellPagePort: pagePort,
@@ -643,8 +680,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   })
   let blockedMessage: string | undefined
   // 远程模式跳过本地端口认领（旧壳 startup 远程短路：根本不走本地 spawn 链）
+  // #117：把「认领判定」（壳的事，startService 阶段就跑完）与「把 DSH 拉起来」（服务面管的事）拆开。
+  // 这里只决定该不该拉、为什么不该拉；真拉是 ensureRunning() 的活。
+  let shouldConnect = false
   if (remoteAddr !== null || decision === 'free') {
-    await connect()
+    shouldConnect = true
   } else if (decision === 'foreign-unknown') {
     blockedMessage = `端口 ${String(upstreamPort)} 被其他实例或程序占用（profile=${paths.profile}），已停止自动拉起；可在设置中调整该 profile 的端口后重试`
     log(`[shell] ${blockedMessage}`)
@@ -653,7 +693,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     const freed = await stopPortOwner({ port: upstreamPort, log })
     if (freed) {
       log(`[shell] 已清理 127.0.0.1:${String(upstreamPort)} 上的旧实例，由壳重新拉起上游`)
-      await connect()
+      shouldConnect = true
     } else {
       blockedMessage = `端口 ${String(upstreamPort)} 清理失败，仍被其他程序占用（profile=${paths.profile}）；可在设置中调整该 profile 的端口后重试`
       log(`[shell] ${blockedMessage}`)
@@ -726,6 +766,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onContextMenu: options.onContextMenu,
     onActivate: options.onActivate,
     onWindowControl: options.onWindowControl,
+    onWindowState: options.onWindowState,
     onProfileOp: (request) => service.profileOp(request),
     onInputConfirm: options.onInputConfirm,
     views: options.views,
@@ -742,6 +783,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   const server = startShellServer(serverOptions)
   options.onStage?.('server')
   bootPayload.injections = [...hostInjections]
+  // #101：从这里起 boot 载荷可写；applyInjections 在此之前的极窄窗口只更新 hostInjections（不丢）
+  bootPayloadLive = true
   // 手机稳定接入点（旧壳 forwarder.rs #94）：监听遗留 lane 端口（laneForwarderPort > lanePort > 3091），
   // 新连接落本实例的 lane；外部 dsh 占了端口时退场（手机直连它即可）。多实例下只有先起的那份
   // 服务面拿得到转发器（同端口第二绑定必失败），index.ts 的焦点切换会找到它更新目标。
@@ -785,6 +828,10 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     settings,
     settingsProvenance: { created: loaded.created, migrated: loaded.migrated, recovered: loaded.recovered },
     ...(blockedMessage === undefined ? {} : { blocked: blockedMessage }),
+    // #117：此刻要么 blocked（端口占着，自动拉起被拒），要么 stopped（壳的面全就绪，DSH 还没拉）。
+    // 「把 DSH 拉起来」是 ensureRunning() 的事，不再是 startService() 返回的前提。
+    status: blockedMessage === undefined ? 'stopped' : 'blocked',
+    error: null,
   }
   await Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
 
@@ -919,14 +966,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     options.onHostRestart?.(state)
     void supervise()
   }
-  if (host !== undefined) {
-    registerHost()
-    void supervise()
-  } else {
-    log('端口被外部实例占用：等用户选完「兼容 / 高级」再拉起（弹框期间不 spawn 宿主）')
-  }
+  // #117：registerHost / supervise 跟着 ensureRunning 走了 —— 它们描述的是「宿主在跑」这件事，
+  // 而 startService 现在只负责把服务面立起来。端口台账（writeClaim）与诊断快照仍在这里。
   log(`端口台账：${JSON.stringify(claims)}`)
   options.onStage?.('ready')
+// #117：'ready' 阶段不再在这里推 —— 它得等 DSH 真的就绪，由 ensureRunning() 推（启动界面据此收尾）。
 
   // ---- D2 守护器：周期 TCP 判活（旧壳 lib.rs 守护器的等价物，语义照旧壳）----
   // 只管「运行中」：readyOnce 之前（启动/重启期/等选模式）归 spawn 与守护器退出事件管。
@@ -1009,6 +1053,90 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     if (!result.ok) throw new Error(result.error)
     return `${profile}：依赖已重建`
   }
+
+  // ---- #117：服务面管 DSH 的那条线 ----
+  /** 落判别位并写状态文件。「DSH 怎么了」在壳内的唯一事实源（托盘/面板/诊断快照都读 state）。 */
+  const setStatus = (next: ShellServiceStatus, error: string | null = null): void => {
+    state.status = next
+    state.error = error
+    void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
+  }
+  /** 正在拉的那次（并发调用复用它，不重复 spawn 宿主） */
+  let starting: Promise<void> | null = null
+  /**
+   * 按当前设置重新解析运行时布局，并就地更新服务面认的那一份（paths/共享池/distDir/状态文件）。
+   * 设置面板切版本与托盘切版本共用这条。**切不出来就落 failed 态并抛，绝不拿旧布局去拉宿主**——
+   * 把现在还能跑的 DSH 弄死，换来的还是一个起不来的。
+   */
+  const adoptLayout = (): void => {
+    const next = layout({ env, profile: paths.profile, preferred: liveSettings.dshRuntime })
+    if (next.unresolved !== null) {
+      setStatus('failed', next.unresolved)
+      log(`运行时切换失败：${next.unresolved}（保持当前运行时不动）`)
+      throw new Error(next.unresolved)
+    }
+    if (next.runtimeDir !== paths.runtimeDir) {
+      log(
+        `运行时切换：${paths.runtimeVersion ?? paths.runtimeDir} → ${next.runtimeVersion ?? next.runtimeDir}（${next.runtimeKind}）`
+      )
+    }
+    Object.assign(paths, next)
+    // #13：运行时变了，共享池立即重指（全局一份，重指一次全部 profile 生效；迁移清理幂等）
+    reconcileProfileFor(paths.profile)
+    serverOptions.distDir = paths.distDir
+    state.runtimeDir = paths.runtimeDir
+    state.distDir = paths.distDir
+    void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
+  }
+  /**
+   * 把 DSH 拉起来 —— 服务面**管理** DSH 的动作，不是它**存在**的前提。
+   * 调用方（index.ts 冷启动 / serve.ts 黑盒握手 / 托盘改完运行时再试一次）决定什么时候要 DSH。
+   *
+   * 失败不重建服务面：落 failed 态 + 记原因 + 照旧抛给调用方。壳自己的部分（托盘/设置/
+   * profile/退出）此时完全可用 —— 这正是 #117：DSH 起不来时用户仍然能换一个运行时再试。
+   */
+  const ensureRunning = async (): Promise<void> => {
+    if (stopping) return
+    if (state.status === 'running') return
+    // 端口被陌生程序占着：重试没用，得先改该 profile 的端口（状态里已经有原因）
+    if (state.status === 'blocked') throw new Error(state.blocked ?? '端口被占用')
+    if (starting !== null) return await starting
+    // #117：用户刚在托盘/面板换了运行时 → 设置里的偏好与服务面认的运行时已经不是一回事，
+    // 重新解析一次布局。切不出来 adoptLayout 自己落 failed 并抛，不会拿旧布局去拉。
+    if (liveSettings.dshRuntime !== (paths.runtimeVersion ?? null)) adoptLayout()
+    // 布局/运行时一个都解析不出来：没有可启动的宿主。服务面照样在，原因说清楚就行。
+    if (paths.unresolved !== null) {
+      setStatus('failed', paths.unresolved)
+      log(`[shell] dsh 起不来：${paths.unresolved}`)
+      throw new Error(paths.unresolved)
+    }
+    setStatus('starting')
+    starting = (async (): Promise<void> => {
+      if (shouldConnect) {
+        await connect()
+        serverOptions.upstreamOrigin = hostOrigin !== '' ? hostOrigin : `http://127.0.0.1:${String(upstreamPort)}`
+        applyHost()
+      }
+      registerHost()
+      readyOnce = true
+      dshStatusCode = 2
+      options.onStage?.('ready')
+      setStatus('running')
+      // 崩溃自愈/退避重启那条线跟服务面绑在一起，不跟某一次启动绑（#60 的语义原样保留）
+      void supervise()
+    })()
+    try {
+      await starting
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      dshStatusCode = 5
+      setStatus('failed', reason)
+      log(`[shell] dsh 未起来：${reason}（服务面仍在：托盘/设置/切换运行时/退出都可用）`)
+      throw error
+    } finally {
+      starting = null
+    }
+  }
   const service: ShellService = {
     state,
     paths,
@@ -1017,6 +1145,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     rpcRouter: () => rpcRouter,
     notify: notifyBridge,
     settings: () => liveSettings,
+    // #117：服务面管理 DSH 的入口。起服务面不等它；什么时候要 DSH 由调用方说。
+    ensureRunning,
     save: saveSettings,
     runtime: () => runtimeSnapshot(),
     fetchCatalog: (source) =>
@@ -1080,23 +1210,13 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       if (stopping) return
       // 设置面板切了运行时版本：这里重新解析选中项（同一个 paths 对象就地更新，
       // 服务面、状态与命令表都以它为事实源），再杀宿主——守护器会带着新运行时重启。
-      const next = layout({
-        env,
-        profile: paths.profile,
-        preferred: liveSettings.dshRuntime,
-      })
-      if (next.runtimeDir !== paths.runtimeDir) {
-        log(
-          `运行时切换：${paths.runtimeVersion ?? paths.runtimeDir} → ${next.runtimeVersion ?? next.runtimeDir}（${next.runtimeKind}）`
-        )
+      adoptLayout()
+      // #117：服务面还没在跑 DSH 时，切运行时不需要走「杀宿主」那条路——直接按新布局拉起来即可。
+      // 只有 DSH 已经在跑的时候，才需要先把旧宿主停下来。
+      if (state.status !== 'running' && state.status !== 'starting') {
+        await ensureRunning()
+        return
       }
-      Object.assign(paths, next)
-      // #13：运行时变了，共享池立即重指（全局一份，重指一次全部 profile 生效；迁移清理幂等）
-      reconcileProfileFor(paths.profile)
-      serverOptions.distDir = paths.distDir
-      state.runtimeDir = paths.runtimeDir
-      state.distDir = paths.distDir
-      void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
       // 远程/本地互切：先重算 remoteAddr（设置面板 nsSave 已落盘），再分流——
       // 远程模式没有宿主可杀，直接把服务面切过去；从远程切回本地时也没有宿主，立即拉起。
       // 其余（本地→本地）杀掉宿主即可：退出会唤醒守护器，由它重启并把服务面切过去。
@@ -1166,21 +1286,22 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       profiles: () => listProfiles(home, paths.profile),
       openExternal: options.onOpenExternal,
       closeWindow: options.onCloseWindow,
-      playSound: (name) => {
-        notifier.previewSound(name)
-      },
+      playSound: (name) => notifier.previewSound(name),
       playSystemSound: () => {
         const command = systemDefaultSoundCommand(options.platform ?? process.platform)
         if (command === null) {
-          log('[notify] 系统默认提示音只在 macOS 上试听')
-          return
+          // 没有后端就如实回 false：面板会提示「本机不支持」，不再假报成功（#74）
+          log('[notify] 系统默认提示音：本机没有可用播放后端，未出声')
+          return false
         }
         try {
           const child = Bun.spawn(command, { stdout: 'ignore', stderr: 'ignore' })
           child.unref?.()
           log(`[notify] 试听系统提示音：${command.join(' ')}（pid = ${String(child.pid)}）`)
+          return true
         } catch (error) {
           log(`[notify] 系统音试听失败：${error instanceof Error ? error.message : String(error)}`)
+          return false
         }
       },
       pickSoundFile: options.pickSoundFile,

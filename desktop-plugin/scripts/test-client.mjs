@@ -488,7 +488,7 @@ assert.equal(area.value, 'xy', '输入框 value 里的控制字符也被擦掉')
 
 
 
-// ── shell-rpc（#50）：统一传输层，三通道选择 / wire 协议 / 超时 / 窗口三键 ──
+// ── shell-rpc（#50）：统一传输层，三通道选择 / wire 协议 / 超时 ──
 await build({
   entryPoints: [join(root, 'src/client/shell-rpc.ts')],
   outfile: join(tmp, 'shell-rpc.mjs'),
@@ -498,7 +498,7 @@ await build({
   target: 'node20',
   logLevel: 'silent',
 })
-const { createShellRpc, sendWindowAction } = await import(pathToFileURL(join(tmp, 'shell-rpc.mjs')).href)
+const { createShellRpc } = await import(pathToFileURL(join(tmp, 'shell-rpc.mjs')).href)
 
 // 官方桥：捕获 postMessage 包形，回包经 receiveMessageFromHost 注入
 {
@@ -639,22 +639,6 @@ const { createShellRpc, sendWindowAction } = await import(pathToFileURL(join(tmp
   assert.equal(fetchCalls, 0, '官方通道超时后不打 fetch 兑底')
 }
 
-// 窗口三键：官方通道 window_* 方法；无桥时 /__shell__/window 兑底
-{
-  const sent = []
-  const globals = { __electrobunHostBridge: { postMessage: (raw) => sent.push(JSON.parse(raw)) }, __electrobun: {} }
-  const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
-  const p = sendWindowAction('toggle-maximize', { rpc, readGlobals: () => globals })
-  assert.equal(sent[0].method, 'window_toggle_maximize', '三键走官方 RPC 方法')
-  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 1, success: true, payload: null })
-  await p
-
-  const calls = []
-  const fetchImpl = async (url, init) => { calls.push({ url, init }); return { ok: true } }
-  await sendWindowAction('minimize', { fetchImpl, readGlobals: () => ({ __DSH_SHELL_VIEW_TOKEN__: 't2' }) })
-  assert.equal(calls[0].url, '/__shell__/window', '无桥三键兑底到窗口端点')
-  assert.deepEqual(JSON.parse(calls[0].init.body), { action: 'minimize' })
-}
 
 // ── devtools-toggle（#69）：开发者工具开关的状态机与安全面文案 ──
 await build({
@@ -793,6 +777,126 @@ const rdu = await import(pathToFileURL(join(tmp, 'runtime-download-ui.mjs')).hre
   assert.equal(rdu.runtimeDownloadHint({ failed: 'boom' }), 'boom')
   assert.equal(rdu.runtimeDownloadHint('downloading'), '')
 }
+
+// ── notification-sound-ui（#74）：自定义音效可用性判定 / 试听失败不静默 ──
+await build({
+  entryPoints: [join(root, 'src/client/notification-sound-ui.ts')],
+  outfile: join(tmp, 'notification-sound-ui.mjs'),
+  format: 'esm',
+  platform: 'node',
+  bundle: true,
+  target: 'node20',
+  logLevel: 'silent',
+})
+const nsui = await import(pathToFileURL(join(tmp, 'notification-sound-ui.mjs')).href)
+
+// 一份「mp3/ogg 没后端」的能力报告（Linux 上没装 paplay/ffmpeg 的真实形状）
+const MP3_REASON = 'PATH 上找不到能播 .mp3 的播放器（paplay / pw-play / ffplay / mpg123）'
+const OGG_REASON = '系统自带播放器不认 Ogg Vorbis：装上 ffmpeg（提供 ffplay）后才能播'
+const cap = {
+  platform: 'linux',
+  formats: {
+    wav: { ok: true, backend: 'aplay', reason: null },
+    mp3: { ok: false, backend: null, reason: MP3_REASON },
+    ogg: { ok: false, backend: null, reason: OGG_REASON },
+  },
+  hint: '本机没有 .mp3 / .ogg 的播放后端：PATH 上找不到能播 .mp3 的播放器',
+}
+
+// ① capability 整个缺失（老壳 / 测试桩 / 没接播放层）：不炸、不禁用、不报警
+for (const missing of [null, undefined, {}, { formats: null }, { formats: { mp3: null } }]) {
+  const opts = nsui.customSoundOptions(['a.wav', 'b.mp3'], missing)
+  assert.equal(opts.length, 2, '缺能力报告时下拉项照旧列全')
+  assert.deepEqual(opts[0], { value: 'custom:a.wav', label: 'a.wav', disabled: false, title: undefined }, '缺报告时不禁用')
+  assert.equal(opts[1].label, 'b.mp3', '缺报告时不往文案里塞原因')
+  assert.equal(nsui.soundOptionState(missing, 'custom:b.mp3').ok, true, '缺报告时自定义档当可用')
+  assert.equal(nsui.configuredSoundWarning(missing, 'custom:b.mp3'), null, '缺报告时不出告警')
+}
+assert.deepEqual(nsui.customSoundOptions(null, null), [], 'sounds 缺失回空数组，不炸')
+assert.equal(nsui.customSoundOptions(['a.wav'], null).length, 1, 'sounds 正常时照常出项')
+assert.equal(nsui.capabilityHint(null), null, '无能力报告不出总说明')
+assert.equal(nsui.capabilityHint({ hint: '   ' }), null, '空白 hint 当没有（不画空行）')
+assert.equal(nsui.capabilityHint({ hint: 7 }), null, '非字符串 hint 当没有')
+assert.equal(nsui.capabilityHint(cap), cap.hint, '有 hint 时原样透传')
+
+// ② 扩展名没后端的选项：禁用 + 原因写进文案（用户看得见，不只藏 title）
+const choices = nsui.customSoundOptions(['叮.wav', '提示音.mp3', '警报.ogg'], cap)
+assert.equal(choices[0].disabled, false, '有后端的扩展名不禁用')
+assert.equal(choices[0].label, '叮.wav', '可用的项文案不加料')
+assert.equal(choices[1].disabled, true, '没后端的 .mp3 下拉里禁用')
+assert.ok(choices[1].label.startsWith('提示音.mp3'), '禁用项仍带音效名')
+assert.ok(choices[1].label.includes(MP3_REASON), '禁用原因写进选项文案（可见）')
+assert.equal(choices[1].title, MP3_REASON, 'title 给原因全文')
+assert.equal(choices[2].disabled, true, '没后端的 .ogg 同样禁用')
+assert.ok(choices[2].label.includes(OGG_REASON), 'ogg 原因同样可见')
+
+// 内置档不做格式判定（default / none / __choose 永远可选）
+for (const builtin of ['default', 'none', '__choose', '']) {
+  assert.equal(nsui.soundOptionState(cap, builtin).ok, true, `内置档 ${builtin || '(空)'} 不判定`)
+}
+assert.equal(nsui.soundOptionState(cap, 'custom:a.aac').ok, true, '白名单外的扩展名不误报（导入时就已拦）')
+assert.equal(nsui.soundOptionState(cap, 'custom:无后缀').ok, true, '无后缀不误报')
+assert.ok(nsui.soundOptionState({ formats: { ogg: { ok: false, backend: null, reason: null } } }, 'custom:x.ogg').reason, '壳侧没给原因时有兜底文案（不出空尾巴）')
+assert.equal(nsui.soundExtension('a.WAV'), 'wav', '扩展名大小写不敏感')
+assert.equal(nsui.soundExtension('a.aac'), null, '白名单外回 null')
+assert.equal(nsui.soundExtension('.bashrc'), null, '隐藏文件不算后缀')
+assert.equal(nsui.customSoundName('custom:x.ogg'), 'x.ogg', 'custom: 前缀剥掉')
+assert.equal(nsui.customSoundName('none'), null, '内置档不是自定义音')
+assert.equal(nsui.customSoundName('custom:'), null, '空名不算自定义音')
+
+// ③ 已配置但本机播不了：行里（不只下拉里）也要看得见
+const warn = nsui.configuredSoundWarning(cap, 'custom:提示音.mp3')
+assert.ok(warn.includes('提示音.mp3'), '告警点名哪个音效')
+assert.ok(warn.includes(MP3_REASON), '告警带原因')
+assert.equal(nsui.configuredSoundWarning(cap, 'custom:叮.wav'), null, '能播的不告警')
+assert.equal(nsui.configuredSoundWarning(cap, 'default'), null, '系统默认不告警')
+
+// ④ 试听：真放了但没出声 ⇒ 可见失败；none/空档与老壳缺 audible 都不报错
+const failed = nsui.previewFailure({ played: 'custom:提示音.mp3', sound: '提示音.mp3', audible: false })
+assert.ok(typeof failed === 'string' && failed.length > 0, 'audible=false 且有 played 时给失败文案')
+assert.ok(failed.includes('提示音.mp3'), '失败文案点名播不响的音效')
+assert.ok(nsui.previewFailure({ played: 'default', sound: 'default', audible: false }).includes('本机没有可用的播放后端'), '系统默认档没后端也给话说')
+assert.equal(nsui.previewFailure({ played: 'custom:叮.wav', sound: '叮.wav', audible: true }), null, '真响了不报错')
+assert.equal(nsui.previewFailure({ played: 'custom:叮.wav', sound: '叮.wav' }), null, '缺 audible（老壳）不显示失败')
+assert.equal(nsui.previewFailure({ played: 'custom:叮.wav', sound: '叮.wav', audible: undefined }), null, 'audible=undefined 不显示失败')
+assert.equal(nsui.previewFailure({ played: null, sound: 'none', audible: false }), null, 'played=null（none/空档）不算失败')
+assert.equal(nsui.previewFailure({ played: '', sound: '', audible: false }), null, 'played 空串不算失败')
+assert.equal(nsui.previewFailure(null), null, '响应为空不炸')
+assert.equal(nsui.previewFailure(undefined), null, '响应缺省不炸')
+assert.equal(nsui.previewFailure('ok'), null, '响应非对象不炸')
+
+// ⑤ 「权限不可用」横幅平台化（PR #100 实测反馈）：win/linux 上「dev 裸二进制 / 打包后的 .app」是假话
+const OLD_UNAVAILABLE_TEXT = '当前环境无法查询系统通知权限（dev 裸二进制或平台不支持）；验收请使用打包后的 .app。'
+for (const plat of ['win32', 'linux']) {
+  const copy = nsui.permissionUnavailableCopy(plat)
+  assert.equal(copy.neutral, true, `${plat}：中性横幅（不带告警语气）`)
+  assert.equal(copy.chip, null, `${plat}：不画「权限不可用」chip`)
+  assert.ok(!copy.text.includes('打包后的 .app'), `${plat}：文案不含「打包后的 .app」`)
+  assert.ok(!copy.text.includes('dev 裸二进制'), `${plat}：文案不含「dev 裸二进制」`)
+  assert.ok(copy.text.includes('系统通知中心'), `${plat}：说清通知归系统通知中心`)
+  assert.ok(copy.text.includes('不查询授权状态'), `${plat}：说清壳不查询授权状态`)
+}
+assert.ok(nsui.permissionUnavailableCopy('win32').text.includes('Windows'), 'win32 点名 Windows')
+assert.ok(nsui.permissionUnavailableCopy('linux').text.includes('Linux'), 'linux 点名 Linux')
+// darwin 与不可知平台（缺失 / 非字符串 / 未知值）：逐字保留旧文案，不许把「不知道」当 Windows
+for (const plat of ['darwin', undefined, null, '', 0, {}, [], 'freebsd', 'win32 ', 'Win32']) {
+  const copy = nsui.permissionUnavailableCopy(plat)
+  assert.equal(copy.text, OLD_UNAVAILABLE_TEXT, `平台 ${String(plat)} 逐字保留旧文案`)
+  assert.equal(copy.chip, '权限不可用', `平台 ${String(plat)} 保留旧 chip`)
+  assert.equal(copy.neutral, false, `平台 ${String(plat)} 保留原观感`)
+}
+
+// 面板接线（源码级门禁）：判定绿了但没画到 DOM 上 = #74 复发——史上面板还出过「整片空白」事故。
+const tabSource = readFileSync(join(root, 'src/client/notifications-tab.tsx'), 'utf8')
+assert.ok(tabSource.includes('data.capability ?? null'), 'capability 缺失时走容错读法')
+assert.ok(tabSource.includes('customSoundOptions(data.sounds, capability)'), '下拉项经可用性判定')
+assert.ok(tabSource.includes('disabled={opt.disabled}'), '没后端的格式真的落到 option[disabled] 上')
+assert.ok(tabSource.includes('configuredSoundWarning(capability, conf.sound)'), '已配置且本机不可播的音效行里判定')
+assert.ok(tabSource.includes('previewFailure(res)'), '试听响应经失败判定')
+assert.ok(tabSource.includes('setPreviewNote(failure === null ? null : { id, text: failure })'), '失败文案进可见状态')
+assert.ok(tabSource.includes('capabilityHint(capability)'), '缺后端总说明接进面板')
+assert.ok(tabSource.includes('permissionUnavailableCopy(capability?.platform)'), '权限不可用横幅取平台判定')
+assert.ok(tabSource.includes('{permissionUnavailable.text}'), '平台化文案画进横幅')
 
 
 

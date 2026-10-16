@@ -68,7 +68,7 @@ interface DesktopData {
   desktop_layout_on_phones?: boolean | null
   /** #186 防休眠：有会话在跑时阻止系统休眠（缺省 true；屏幕仍会照常熄灭） */
   prevent_sleep?: boolean | null
-  /** #69 开发者工具：打包态重启后开 CEF 远程调试口并放出菜单（缺省 false；安全面） */
+  /** #69 开发者工具：打包态重启后开远程调试口并放出菜单（CEF 或 win WebView2 载体；缺省 false；安全面） */
   dev_tools?: boolean | null
   /** #75 防休眠能力（壳探测到的系统抑制通道）：缺位 = 老壳，available:false = 本环境拿不到，面板必须明说降级 */
   keep_awake?: KeepAwakeCapabilityLike | null
@@ -1954,6 +1954,7 @@ function DesktopSettingsPanel(): React.ReactElement {
         {devToolsNote && <div style={NOTE_STYLE}>{devToolsNote}</div>}
         <div style={NOTE_STYLE}>
           开启后桌面壳在本机回环地址监听一个远程调试口，本机任意程序可借它在页面里执行代码。只在自己排查问题时开启，用完记得关掉并重启。
+          Windows 下按 F12 或右键菜单「打开 DevTools」打开（不自动弹窗）；mac/Linux 为「打开 DevTools」。
         </div>
         {devToolsConfirmKind !== null && (
           <div style={DEV_TOOLS_OVERLAY_STYLE}>

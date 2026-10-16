@@ -243,6 +243,8 @@ Section "un.install"
   RMDir /r "$INSTDIR\\App"
   DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@"
   DeleteRegKey HKCU "Software\\@@APP_ID@@"
+  ; #107：壳运行时写的通知身份键（HKCU\Software\Classes\AppUserModelId\<APP_ID>）一并清掉
+  DeleteRegKey HKCU "Software\\Classes\\AppUserModelId\\@@APP_ID@@"
   ; #78：清壳自有插件链接（.dsh 主目录不随卸载删除；残留悬空 junction 会让下次安装首次启动撞 EEXIST）
   Call un.CleanShellPluginLinks
 SectionEnd`

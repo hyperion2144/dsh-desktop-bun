@@ -40,9 +40,9 @@ const config = (patch: Partial<NotificationsConfig> = {}): NotificationsConfig =
 })
 
 describe('notify-policy：场景表与映射', () => {
-  test('场景 id 与设置表一一对应（14 条，无错别字）', () => {
+  test('场景 id 与设置表一一对应（15 条，无错别字）', () => {
     const ids = Object.values(SCENARIO)
-    expect(ids).toHaveLength(14)
+    expect(ids).toHaveLength(15)
     for (const id of ids) {
       const meta = scenarioMetaOf(id)
       expect(meta?.id).toBe(id)
@@ -219,6 +219,9 @@ describe('notifications：投递层', () => {
       notifications: config(),
       home: '/tmp/none',
       appName: 'DSH',
+      // 平台必须显式给：投递「系统默认音」在非 darwin 上由壳自己放、silent 会额外置真
+      // （见 sound-playback.test.ts），这里要钉的是「silent 跟随决策」，不能吃宿主默认值。
+      platform: 'darwin',
       show: (options) => shown.push(options),
     })
     notifier.notify(SCENARIO.TASK_COMPLETE, '会话跑完了')
@@ -253,7 +256,10 @@ describe('notifications：投递层', () => {
     const notifier = createNotifier({
       notifications: config(),
       home,
-      playCustom: (path) => played.push(path),
+      playCustom: (path) => {
+        played.push(path)
+        return true
+      },
       onLog: (line) => logs.push(line),
     })
 
@@ -269,7 +275,10 @@ describe('notifications：投递层', () => {
     const withSound = createNotifier({
       notifications: cfg,
       home,
-      playCustom: (path) => played.push(path),
+      playCustom: (path) => {
+        played.push(path)
+        return true
+      },
     })
     const decision = withSound.notify(SCENARIO.TASK_COMPLETE, '带响的')
     expect(decision.sound).toEqual({ kind: 'custom', name: 'ok.wav' })

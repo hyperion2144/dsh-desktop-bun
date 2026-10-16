@@ -46,7 +46,7 @@ export function shimScript(platform: string, argv: readonly string[]): string {
   const [exe = '', ...rest] = argv
   if (platform === 'win32') {
     const args = rest.map((arg) => `"${arg}"`).join(' ')
-    return `@echo off\r\n"${exe}"${args === '' ? '' : ` ${args}`} %*\r\n`
+    return `@echo off\r\nrem 由 dsh 桌面壳维护：指向当前运行时的 dsh 入口\r\n"${exe}"${args === '' ? '' : ` ${args}`} %*\r\n`
   }
   const args = rest.map(shellQuote).join(' ')
   const line = [shellQuote(exe), args].filter((part) => part !== '').join(' ')
@@ -148,7 +148,7 @@ export function registrationScript(input: { shim: string; target?: string; force
     `  if [ "$cur" = ${shim} ]; then`,
     '    exit 0',
     '  fi',
-    `  if ${shellQuote(input.force ? '1' : '0')} = '1'; then`,
+    `  if [ ${shellQuote(input.force ? '1' : '0')} = '1' ]; then`,
     '    /bin/mv "$t" "$t.bak.`/bin/date +%Y%m%d%H%M%S`" || exit 9',
     '  else',
     `    echo ${shellQuote(CONFLICT_MARKER)} >&2`,
@@ -157,6 +157,93 @@ export function registrationScript(input: { shim: string; target?: string; force
     'fi',
     `/bin/ln -sfn ${shim} "$t"`,
     '',
+  ].join('\n')
+}
+
+/** Linux 注册目标：`~/.local/bin/dsh`（XDG 惯例位，绝大多数发行版默认在 PATH）。 */
+export const LINUX_BIN_SUBDIR = '.local/bin'
+
+export function linuxRegistrationTarget(home: string): string {
+  return `${home.replace(/\/+$/, '')}/${LINUX_BIN_SUBDIR}/dsh`
+}
+
+/**
+ * Linux 安装脚本（用户身份 `/bin/sh -c` 直接跑，无需提权，工具走 PATH）：
+ * 结构与 macOS 提权脚本一致：幂等 exit 0 → 冲突 stderr 打标记 exit 3 →
+ * force 带时间戳备份后放行 → `ln -sfn`。
+ */
+export function linuxRegistrationScript(input: { shim: string; home: string; force: boolean }): string {
+  const target = linuxRegistrationTarget(input.home)
+  const shim = shellQuote(input.shim)
+  return [
+    `/bin/mkdir -p ${shellQuote(target.slice(0, target.lastIndexOf('/')))}`,
+    `t=${shellQuote(target)}`,
+    'if [ -e "$t" ] || [ -L "$t" ]; then',
+    '  cur=`readlink "$t" 2>/dev/null`',
+    `  if [ "$cur" = ${shim} ]; then`,
+    '    exit 0',
+    '  fi',
+    `  if [ ${shellQuote(input.force ? '1' : '0')} = '1' ]; then`,
+    '    mv "$t" "$t.bak.`date +%Y%m%d%H%M%S`" || exit 9',
+    '  else',
+    `    echo ${shellQuote(CONFLICT_MARKER)} >&2`,
+    '    exit 3',
+    '  fi',
+    'fi',
+    `/bin/ln -sfn ${shim} "$t"`,
+    '',
+  ].join('\n')
+}
+
+/**
+ * Windows 注册 = 把 shim 目录写进**用户 PATH**（`HKCU\Environment\Path` 注册表值）。
+ * 禁用 `setx`（历史 1024 字符截断 bug）；`reg query` 读原始值（保 %VAR% 不展开），
+ * PowerShell `Set-ItemProperty` 按原类型写回，写后广播 `WM_SETTINGCHANGE`
+ * 让资源管理器与新进程拿到新 PATH（已开着的终端不会热更新）。
+ */
+export type WindowsPathValueKind = 'REG_SZ' | 'REG_EXPAND_SZ'
+
+/** 解析 `reg query HKCU\Environment /v Path` 输出里的值行（类型 + 原始值）。 */
+export function parseWindowsPathRegQuery(stdout: string): { type: WindowsPathValueKind; raw: string } | null {
+  const match = /\s(REG_SZ|REG_EXPAND_SZ)\s+(.*)$/.exec(stripAnsi(stdout).trim())
+  if (match === null) return null
+  return { type: match[1] as WindowsPathValueKind, raw: (match[2] ?? '').trim() }
+}
+
+/** 用户 PATH 拆项（空项丢弃，保序不去重——顺序即优先级）。 */
+export function windowsUserPathEntries(raw: string): string[] {
+  return raw
+    .split(';')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '')
+}
+
+/** shim 目录是否已在用户 PATH 里（大小写/斜杠不敏感）。 */
+export function windowsPathHasEntry(entries: readonly string[], dir: string): boolean {
+  return entries.some((entry) => samePath(entry, dir, 'win32'))
+}
+
+/** 本壳历史安装的 shim 目录残留（同 app id 的 bin-dsh 目录但不是当前那份）：新终端按 PATH
+ *  顺序解析会命中旧幽灵项，注册时顺手清掉——只动我们自己的入口，不碰别人的。 */
+const OUR_SHIM_ENTRY = /com\.hyperion\.dsh-desktop-bun.*bin-dsh/i
+
+/** 新的用户 PATH 原始值：普通注册追加到末尾，force 前置（抢在用户级其他 dsh 之前）；
+ *  本壳旧安装的 shim 目录残留一并清掉（#62 PR 实测：幽灵项把 `dsh` 解析到旧坏入口）。 */
+export function windowsUserPathWrite(entries: readonly string[], dir: string, force: boolean): string {
+  const kept = entries.filter((entry) => !(OUR_SHIM_ENTRY.test(entry) && !samePath(entry, dir, 'win32')))
+  return force ? [dir, ...kept].join(';') : [...kept, dir].join(';')
+}
+
+/** 写回 + 广播 WM_SETTINGCHANGE 的 PowerShell 脚本（宿主以 `-EncodedCommand` 执行，免引号地狱）。 */
+export function windowsPathWriteScript(raw: string, type: WindowsPathValueKind): string {
+  const kind = type === 'REG_EXPAND_SZ' ? 'ExpandString' : 'String'
+  return [
+    `Set-ItemProperty -Path 'HKCU:\\Environment' -Name 'Path' -Value '${raw.replace(/'/g, "''")}' -Type ${kind}`,
+    "$sig = '[DllImport(\"user32.dll\", SetLastError = true, CharSet = CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);'",
+    '$type = Add-Type -MemberDefinition $sig -Name NativeMethods -Namespace DshPathBroadcast -PassThru',
+    '[UIntPtr]$result = [UIntPtr]::Zero',
+    // HWND_BROADCAST=0xffff，WM_SETTINGCHANGE=0x001A，SMTO_ABORTIFHUNG=0x0002
+    "$type::SendMessageTimeout([IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result) | Out-Null",
   ].join('\n')
 }
 

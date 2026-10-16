@@ -5,7 +5,7 @@
 // 由**主进程**用 Electrobun 的 `ContextMenu.showContextMenu` 弹原生菜单——复制/剪切/粘贴/全选
 // 走原生 role（macOS 上才有意义，Windows/Linux 由 CEF 自己处理 Ctrl 系快捷键）；「刷新」
 // 「在系统浏览器打开链接」「复制链接地址」「打开 / 打开文件夹（工作区文件行）」
-// 「打开 DevTools（仅 dev 构建）」是我们自己的 action，回到主进程执行。
+// 「打开 DevTools」（dev 构建 = CEF openDevTools；win = 合成 F12，#106 返工）是我们自己的 action。
 //
 // 这里是纯逻辑部分（菜单结构 + 注入脚本），执行部分在 index.ts。
 
@@ -44,7 +44,7 @@ export const SHELL_MENU_ACTIONS = {
 } as const
 /** 菜单附加开关（都可选；缺省＝不附加）。 */
 export interface ContextMenuOptions {
-  /** dev 构建追加「打开 DevTools」（release 不出现；判据见 BuildConfig.isPackaged）。 */
+  /** 追加「打开 DevTools」入口：dev 构建与 win 打包态（#106 返工）都出现；CEF 走 openDevTools，win 走合成 F12。 */
   devTools?: boolean
 }
 
@@ -55,7 +55,7 @@ export function isOpenablePath(path: string): boolean {
 
 /**
  * 原生菜单结构。`externalLink` 判定由调用方给（壳知道自己的 origin），
- * 返回的项里 `data` 带上执行时需要的参数；`options.devTools` 控制 dev 菜单项。
+ * 返回的项里 `data` 带上执行时需要的参数；`options.devTools` 控制 DevTools 入口（dev=CEF inspector；win=合成 F12）。
  */
 export function contextMenuItems(
   request: ContextMenuRequest,
@@ -95,7 +95,7 @@ export function contextMenuItems(
     }
     items.push({ role: 'selectAll' })
   }
-  // dev 构建才垫「打开 DevTools」（release 构建不出现）
+  // 「打开 DevTools」垫底：dev 构建（CEF openDevTools）与 win 打包态（#106 返工：合成 F12）都出现
   if (options.devTools === true) {
     items.push({ type: 'separator' })
     items.push({ label: '打开 DevTools', action: SHELL_MENU_ACTIONS.openDevTools })

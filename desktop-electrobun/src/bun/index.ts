@@ -7,12 +7,14 @@ import { ApplicationMenu, BrowserView, BrowserWindow, BuildConfig, ContextMenu, 
 import { acceptShimScript } from './accept-shim.ts'
 import { systemLocale } from './locale.ts'
 import { installApplicationMenu } from './menu.ts'
-import { deriveMaximized, ensureNativeMaximizeStyles, getWorkAreaForFrame } from './window-max.ts'
+import { deriveMaximized, ensureNativeMaximizeStyles, getWorkAreaForFrame, HEAL_MAX_REPLACES, healVerdict, isMaximizedPlacementDamaged, toggleWindowMaximize, windowMaxState, type WindowMaxState } from './window-max.ts'
+import { shellLogLine } from './shell-log.ts'
 import { bootPreloadScript } from './preload.ts'
 import { attachShellRpc } from './rpc-bridge.ts'
 import { startService, type ServiceOptions, type ShellService } from './service.ts'
 import { createNativeNotify } from './notify-un.ts'
 import type { RuntimeSnapshot } from './commands.ts'
+import { ensureWindowsNotifyIdentity } from './win-notify-identity.ts'
 import type { RuntimeDownloadStatus } from './runtime-install.ts'
 import { SHELL_MENU_ACTIONS, contextMenuItems, isOpenablePath } from './context-menu.ts'
 import { isExternalUrl } from './external.ts'
@@ -43,13 +45,15 @@ import {
   type WindowFrame,
 } from './window-state.ts'
 import { loadSettings } from './settings-store.ts'
-import { applyCdpDebugPort, DEVTOOLS_PORT_ENV, DEVTOOLS_PORT_OVERRIDE_ENV, devToolsMenuEnabled, isPortBindable, planDevToolsBoot } from './devtools.ts'
+import { applyCdpDebugPort, DEVTOOLS_PORT_ENV, DEVTOOLS_PORT_OVERRIDE_ENV, devToolsMenuEnabled, isPortBindable, planDevToolsBoot, sendDevToolsKeystroke } from './devtools.ts'
 import { activeProfile, type DesktopSettings } from '../shared/settings.ts'
 import { closeAction, offsetFrame, planWindowOpen, windowKey } from '../shared/window-targets.ts'
 import type { LaneForwarder } from './lane-forwarder.ts'
 import { createNotifier, type Notifier } from './notifications.ts'
+import { showWindowsBalloon } from './notify-win.ts'
 import { SCENARIO } from '../shared/notify-policy.ts'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { existsSync } from 'node:fs'
 import { createRegisterCli } from './register-cli.ts'
 import { registerTrayLabel } from '../shared/register-cli.ts'
 
@@ -57,8 +61,8 @@ import { registerTrayLabel } from '../shared/register-cli.ts'
 const CLIENT_VERSION = '0.1.0'
 /** 退出时等宿主与 CEF 子进程收尾的上限（超过就交给框架的优雅退出） */
 const SHELL_STOP_DEADLINE_MS = 8_000
-/** 启动失败时启动界面留在屏幕上的时长（让用户看清原因，然后自己退出） */
-const SPLASH_FAILURE_HOLD_MS = 30_000
+// #117：启动失败时不再有「留 30 秒再自己退掉」的时限——托盘先在，用户有自救入口，
+// 什么时候走由他决定（托盘 → 退出）。这个常量与它的注释一并撤掉。
 
 function fail(message: string, code: number): never {
   console.error(`[shell] ${message}`)
@@ -89,6 +93,9 @@ const noWindow = process.env.DSH_SHELL_NO_WINDOW === '1'
 const platform = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
 // macOS 的 Cmd+C/Cmd+V 由 NSMenu 的选择器驱动（见 menu.ts），不装菜单就没有系统剪贴板快捷键。
 if (platform === 'darwin') installApplicationMenu(ApplicationMenu, APP_NAME)
+// Windows 通知身份（#107）：抢在任何能发通知的环节之前声明 AUMID 并注册身份，
+// 通知横幅才显示应用名与图标（缺了就显示进程名「BUN」）。失败只降级不阻断启动。
+if (platform === 'win32') ensureWindowsNotifyIdentity({ log: (line) => console.log(line) })
 // 系统语言：CEF 默认 en-US，页面语言跟着错；旧壳（WKWebView）是天然跟随系统的。
 const locale = await systemLocale()
 // 页面外链与右键菜单都要主进程出面：CEF 不会自己弹菜单，也不接管 window.open。
@@ -126,7 +133,6 @@ const instanceProfile = activeProfile(bootSettings, process.env)
 // 所以启动决策放这里做完；菜单可见 ⇔ 口已开（同一份 plan 推出，禁中间态）。
 const devToolsPlan = await planDevToolsBoot({
   isPackaged: build.isPackaged,
-  cefAvailable: wantsCef,
   settingOn: bootSettings.devTools === true,
   envOverride: process.env[DEVTOOLS_PORT_OVERRIDE_ENV],
   isFree: isPortBindable,
@@ -134,21 +140,19 @@ const devToolsPlan = await planDevToolsBoot({
 // C environ 双写（dylib 用 C getenv 读开关；Bun map 写入不穿透，实测见 devtools.ts 头注）。
 // 写入失败 = CDP 开不了：cdpReady 落 false，菜单同批不出现（禁中间态，fail-closed）。
 const devToolsCdpReady = devToolsPlan.enableCdp && devToolsPlan.port !== null
-  ? applyCdpDebugPort(devToolsPlan.port)
+  ? applyCdpDebugPort(devToolsPlan.port, { cefAvailable: wantsCef })
   : false
 if (devToolsPlan.enableCdp && !devToolsCdpReady) {
-  console.error('[shell] 开发者工具：调试口 env 写入失败（libc setenv 不可用），本次不开口、不出菜单')
+  console.error('[shell] 开发者工具：调试口 env 写入失败（C environ 写入不可用），本次不开口、不出菜单')
 }
 if (devToolsPlan.reason === 'enabled-by-setting') {
-  console.log(`[shell] 开发者工具：已开启，CEF 远程调试口 127.0.0.1:${String(devToolsPlan.port)}（重启后生效；本机任意进程可借该口在页面里执行代码）`)
+  console.log(`[shell] 开发者工具：已开启，${wantsCef ? 'CEF' : 'WebView2'} 远程调试口 127.0.0.1:${String(devToolsPlan.port)}（重启后生效${wantsCef ? '' : '；DevTools 按需打开：F12 或右键菜单（合成 F12），不自动弹窗'}；本机任意进程可借该口在页面里执行代码）`)
 } else if (devToolsPlan.reason === 'port-unavailable') {
   console.error(`[shell] 开发者工具：端口 ${String(devToolsPlan.port)} 被占用，本次不开调试口、不出菜单（可用 ${DEVTOOLS_PORT_OVERRIDE_ENV} 换口）`)
 } else if (devToolsPlan.reason === 'port-invalid') {
   console.error(`[shell] 开发者工具：${DEVTOOLS_PORT_OVERRIDE_ENV} 非法（需要 1-65535 整数），按未开启处理`)
 } else if (devToolsPlan.reason === 'dev-build') {
   console.log('[shell] 开发者工具：dev 构建，DevTools 菜单恒可见（打包态才吃 dev_tools 开关）')
-} else if (devToolsPlan.reason === 'cef-only') {
-  console.log('[shell] 开发者工具：本构建不含 CEF（win 走 WebView2），CEF CDP 桥不适用——打包态不出 DevTools 菜单；dev 构建照常（openDevTools 与后端无关）')
 } else {
   console.log('[shell] 开发者工具：未开启（设置 dev_tools）——不监听调试口、不出菜单')
 }
@@ -250,8 +254,8 @@ function scheduleFrameSave(win: BrowserWindow, profile: string): void {
 }
 /**
  * 几何立即落盘（scheduleFrameSave 定时器 / 关窗 flush / 退出 flush 三处共用）：
- * 最大化态 = 原生旗标 ∨ 几何推导——后者兜住「补丁失败走了手动 setFrame」的场景，
- * 那种窗口原生旗标恒 false，只记旗标的话重启就丢最大化态。
+ * 最大化态 = 原生旗标 ∨ 几何推导——后者兜住旗标未落的窗口（启动期、系统贴靠
+ * 等场景），只记旗标的话重启就丢最大化态。
  */
 function saveFrameNow(win: BrowserWindow, profile: string): void {
   const frame = win.getFrame()
@@ -354,6 +358,10 @@ function trayState(): TrayState {
       }
     }),
     hostRunning: uiService().state.hostPid > 0,
+    // #117：服务面先于 DSH 存在，所以托盘在 DSH 没起来/起不来时照样拿得到真相，
+    // 并能把原因摆进状态行告诉用户「还能换一版再试」。
+    serviceStatus: uiService().state.status,
+    serviceError: uiService().state.error ?? uiService().state.blocked ?? null,
     runtimeLabel: runtimeLabelOf(snapshot),
     builtinVersion: snapshot.builtinVersion,
     runningVersion: snapshot.activeVersion,
@@ -386,29 +394,61 @@ function refreshTray(): void {
  * 天然不触发。触发面：focus + resize（去抖）+ focus 后延迟复查——实机证明落位
  * 外扩在恢复动画完成后才定格，focus 当拍检查经常早于损坏成形；resize 则在最终
  * 摆位后必到。每次判定都落日志（含 workArea 取不取得到），实机排查有据可查。
+ * 三轮重开（双屏 2K 越屏依旧）定位：前两轮的损坏判定错用了状态推导的
+ * deriveMaximized(frame, workArea, true)——旗标为真它恒真，判定永远「落位正常」，
+ * 自愈从未触发（4K 屏系统不走外扩补偿，死代码因此在前两轮实机验证中没现形）。
+ * 改用专用损坏判定 isMaximizedPlacementDamaged（容差 4px：THICKFRAME 边框 96DPI
+ * 就有 8px/边，8px 容差会把恰好 8px 的外扩当正常吃掉），并加同段最大化期重摆
+ * 上限（HEAL_MAX_REPLACES）防「重摆→resize→再检查」循环闪窗。
  */
 const healCheckTimers = new Map<string, ReturnType<typeof setTimeout>>()
+/** 延迟复查的登记版计时器：可被重摆取消顺延（裸 setTimeout 不受管，会在重摆动画
+ *  中途开火——实机「恢复时抖几下」的来源）。 */
+const healRecheckTimers = new Map<string, ReturnType<typeof setTimeout>>()
+/** 同段最大化期已原生重摆次数（healVerdict 的计数存储）。只在最大化期结束（旗标
+ * 落下）或窗口销毁时清零；判定 clean 不重置——若 damaged↔clean 交替刷新预算，
+ * 上限就挡不住「重摆→动画中途量到好帧→再损坏」的循环。 */
+const healReplaces = new Map<string, number>()
 /** 去抖窗口：resize 连发期间只做最后一次检查，重摆引发的 resize 不叠加。 */
 const HEAL_DEBOUNCE_MS = 250
-/** focus 后延迟复查：给恢复动画留出定格时间。 */
+/** 延迟复查间隔：给恢复/重摆动画留出定格时间。 */
 const HEAL_RECHECK_DELAY_MS = 350
 
 function healMaximizedPlacement(win: BrowserWindow, profile: string, reason: string): void {
   if (process.platform !== 'win32') return
-  if (!win.isMaximized()) return
+  if (!win.isMaximized()) {
+    healReplaces.delete(profile) // 旗标落下 = 一段最大化期结束，重摆计数清零
+    return
+  }
   const frame = win.getFrame()
   const workArea = getWorkAreaForFrame(frame)
   if (workArea === null) {
-    console.log(`[shell] #80 heal 检查（${reason}）：workArea 取不到（ffi 失败？），跳过`)
+    shellLogLine(`[shell] #80 heal 检查（${reason}）：workArea 取不到（ffi 失败？），跳过`)
     return
   }
-  if (deriveMaximized(frame, workArea, true)) {
-    console.log(`[shell] #80 heal 检查（${reason}）：落位正常，不干预`)
+  const verdict = healVerdict(isMaximizedPlacementDamaged(frame, workArea), healReplaces.get(profile) ?? 0)
+  if (verdict === 'clean') {
+    shellLogLine(`[shell] #80 heal 检查（${reason}）：落位正常，不干预 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}`)
     return
   }
-  console.log(`[shell] #80 heal 检查（${reason}）：落位外扩 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}，原生重摆`)
+  if (verdict === 'exhausted') {
+    shellLogLine(`[shell] #80 heal 检查（${reason}）：已重摆 ${HEAL_MAX_REPLACES} 次仍外扩，停止防循环 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}（重摆也落不好，日志留给上游 WM_NCCALCSIZE 根治）`)
+    return
+  }
+  healReplaces.set(profile, (healReplaces.get(profile) ?? 0) + 1)
+  shellLogLine(
+    `[shell] #80 heal 检查（${reason}）：落位外扩 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}，原生重摆（第 ${healReplaces.get(profile)} 次）`,
+  )
   win.unmaximize()
   win.maximize()
+  // 重摆会引发 resize 与动画：作废在途的去抖检查与延迟复查，重摆落定后重排一次
+  // 复查——后续判定全部锚在最近一次摆位动作之后，不在动画中途开火（实机抖动修复）。
+  const pendingDebounce = healCheckTimers.get(profile)
+  if (pendingDebounce !== undefined) {
+    clearTimeout(pendingDebounce)
+    healCheckTimers.delete(profile)
+  }
+  scheduleHealRecheck(win, profile, '重摆后复查')
 }
 
 /** resize/focus 入口的去抖包装：同窗连发只留最后一次。 */
@@ -420,6 +460,17 @@ function scheduleHealCheck(win: BrowserWindow, profile: string, reason: string):
     healCheckTimers.delete(profile)
     healMaximizedPlacement(win, profile, reason)
   }, HEAL_DEBOUNCE_MS))
+}
+
+/** 延迟复查的登记版：重摆时会被取消顺延，复查永远落在最近一次摆位动作之后。 */
+function scheduleHealRecheck(win: BrowserWindow, profile: string, reason: string): void {
+  if (process.platform !== 'win32') return
+  const previous = healRecheckTimers.get(profile)
+  if (previous !== undefined) clearTimeout(previous)
+  healRecheckTimers.set(profile, setTimeout(() => {
+    healRecheckTimers.delete(profile)
+    healMaximizedPlacement(win, profile, reason)
+  }, HEAL_RECHECK_DELAY_MS))
 }
 
 function showMainWindow(): void {
@@ -457,6 +508,16 @@ function focusedWindow(): BrowserWindow | null {
   return mainWindow
 }
 
+/**
+ * 焦点窗的最大化态（#112 壳层标题栏带）：判定收口在 window-max.ts 的 windowMaxState
+ * （与 RPC window_get_state 同源）。无焦点窗时回 false（无窗场景图标无意义）。
+ */
+function focusedWindowState(): WindowMaxState {
+  const win = focusedWindow()
+  if (win === null) return { maximized: false }
+  return windowMaxState(win)
+}
+
 /** 起/profile 复用一份服务面：每份服务面 = 一个 dsh 宿主 + 一个 loopback origin。 */
 async function ensureService(profile: string): Promise<ShellService> {
   const existing = services.get(profile)
@@ -486,13 +547,15 @@ function serviceOptionsFor(profile: string): ServiceOptions {
       const linkIsExternal =
         request.linkUrl !== null && isExternalUrl(request.linkUrl, originOf(profile))
       // 菜单可见性唯一事实源在 devtools.ts：dev 构建恒可见；打包态＝开关开且本次启动口已开（可见⇔口开）。
-      const items = contextMenuItems(request, linkIsExternal, {
-        devTools: devToolsMenuEnabled({
-          isPackaged: BuildConfig.getSync().isPackaged,
-          settingOn: bootSettings.devTools === true,
-          cdpReady: devToolsCdpReady,
-        }),
+      const isPackagedBuild = BuildConfig.getSync().isPackaged
+      const devToolsMenuOn = devToolsMenuEnabled({
+        isPackaged: isPackagedBuild,
+        settingOn: bootSettings.devTools === true,
+        cdpReady: devToolsCdpReady,
       })
+      // 菜单统一「打开 DevTools」（#106 返工）：CEF＝openDevTools 应用内 inspector；
+      // win＝点击后壳发合成 F12（与物理按键同路径弹原生 DevTools 窗），复制地址形态已废弃。
+      const items = contextMenuItems(request, linkIsExternal, { devTools: devToolsMenuOn })
       // 「挂不上也要出声」：菜单内容进日志，实机排查时能看出是哪一档
       console.log(`[shell] 右键菜单：${items.map((item) => item.label ?? item.role ?? item.type ?? '?').join(' | ')}`)
       ContextMenu.showContextMenu(items as unknown[])
@@ -513,8 +576,8 @@ function serviceOptionsFor(profile: string): ServiceOptions {
       if (action === 'minimize') {
         win.minimize()
       } else if (action === 'toggle-maximize') {
-        if (win.isMaximized()) win.unmaximize()
-        else win.maximize()
+        // 与 RPC window_toggle_maximize 同语义：判定/样式位/原生切换收口在 window-max.ts（#112）。
+        toggleWindowMaximize(win)
       } else {
         // #50 验证反馈：兑底端点的关窗也走统一策略（要拿到 profile 才能判主/副窗）
         const focusedEntry = [...windows.values()].find((entry) => entry.window === win)
@@ -526,6 +589,10 @@ function serviceOptionsFor(profile: string): ServiceOptions {
         if (closePolicyAction === 'close') win.close()
         else if (closePolicyAction === 'quit') void shutdown()
       }
+    },
+    onWindowState: () => {
+      // GET /__shell__/window（#112 壳层标题栏带的最大化图标查询）：与漏斗同源推导
+      return focusedWindowState()
     },
     onProfileOpApplied: (op, profile) => {
       // F9：创建成功直接开那扇窗（ensureService 会装依赖并拉宿主）；迁移完成刷新托盘。
@@ -688,10 +755,6 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
   })
   win.on('focus', () => {
     focusedProfile = profile
-    scheduleHealCheck(win, profile, 'focus')
-    // 实机证据：落位外扩在恢复动画完成后才定格，focus 当拍检查常早于损坏成形，
-    // 延迟复查一次兜住。
-    setTimeout(() => healMaximizedPlacement(win, profile, 'focus+350ms'), HEAL_RECHECK_DELAY_MS)
     // lane 稳定接入点跟随焦点（旧壳 forwarder.rs：新连接落焦点实例，存量不动）。
     // #73：启动恢复最大化断言（唯一断言点）——Windows 上从未显示的窗 maximize 可能不落
     // 旗标（建窗时试过不稳），首次获得焦点时窗口必然已可见，再补一次并推送图标重查；
@@ -707,6 +770,12 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
         shellRpcHandle.notifyWindowState()
       }
     }
+    // #80 自检排在启动补 maximize 之后：去抖 250ms/复查 350ms 都落在补推完成后，
+    // 不会量到启动最大化动画中途的还原帧（与 #73 收敛方向一致）。
+    scheduleHealCheck(win, profile, 'focus')
+    // 实机证据：落位外扩在恢复动画完成后才定格，focus 当拍检查常早于损坏成形，
+    // 延迟复查一次兜住。
+    scheduleHealRecheck(win, profile, 'focus+350ms')
     // 转发器挂在先起的那份服务面上，这里找到它再指目标。
     focusedLaneForwarder()?.setTarget(services.get(profile)?.state.lanePort ?? 0)
     refreshTray()
@@ -740,6 +809,14 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
       } catch {}
     }
     windows.delete(profile)
+    // #80：heal 的挂起去抖/延迟复查定时器与重摆计数随窗口回收（迟到的定时器不再摸已销毁的窗）
+    const healTimer = healCheckTimers.get(profile)
+    if (healTimer !== undefined) clearTimeout(healTimer)
+    healCheckTimers.delete(profile)
+    const healRecheck = healRecheckTimers.get(profile)
+    if (healRecheck !== undefined) clearTimeout(healRecheck)
+    healRecheckTimers.delete(profile)
+    healReplaces.delete(profile)
     // 窗口没了就撤销它的视图 token（旧壳的 capability 是静态文件，这里跟着窗口走）
     views.revokeLabel(windowKey(profile))
     // 窗口里的 guest 子 webview 跟着窗口一起回收（否则会留在窗口之外无法关闭）
@@ -848,6 +925,15 @@ async function restartDsh(): Promise<void> {
         console.error(`[shell] 完整重启：重启服务面失败（${profile}）`)
         continue
       }
+      // #117：startService 只把壳的面立起来了，DSH 得显式拉（冷启动那条路上是 ensureService 之后
+      // 紧跟一句 ensureRunning()）。拉不起来就跳过这份 profile 的窗口，但**服务面仍然留着**
+      // ——托盘还在，用户能接着换运行时再试（这正是 #117 的那个死局出口）。
+      try {
+        await fresh.ensureRunning()
+      } catch (error) {
+        console.error(`[shell] 完整重启：dsh 未起来（${profile}）：${String(error)}（服务面保留，可从托盘换运行时再试）`)
+        continue
+      }
       if (profile === instanceProfile) {
         // 启动 profile 的服务面引用要换新（uiService/托盘/实例锁都以它为事实源）
         service = fresh
@@ -892,21 +978,46 @@ async function restartServiceFromTray(): Promise<void> {
 }
 
 
-/** 托盘「运行时版本」：内置 / 某个已下载版本（写设置 + 杀宿主让守护器重起）。 */
+/**
+ * 托盘「运行时版本」：内置 / 某个已下载版本。
+ *
+ * #117：这条路径**不再要求 DSH 已经就绪**。运行时选中只是 `<DSH_HOME>/desktop-settings.json`
+ * 里的 `dsh_runtime`，而设置文件是壳独占的纯文件 IO（settings-store.ts：tmp+rename 原子写），
+ * 跟 DSH 进程活不活没关系。以前它之所以依赖 ready，是被「要重启」绑成了
+ * 「先把服务面拆了重建」——那是实现顺序，不是这份能力的内在要求。
+ */
 async function switchRuntimeFromTray(action: TrayAction): Promise<void> {
-  const patch: Record<string, unknown> =
-    action.version === undefined
-      ? { dsh_mode: 'builtin', dsh_runtime: null }
-      : { dsh_mode: 'builtin', dsh_runtime: action.version }
+  const svc = uiService()
+  // 维护者在本单明确同意：切任何一行都写版本号，含「内置」——`dsh_runtime: null` 与「没设置过」
+  // 同形，壳按未指定处理，跟设置面板的写法不一致（#97 裁决）。票面那条「#97 的口径不动」指的是
+  // resolveRuntimeSelection / selectRuntimeVersion 本体不动；这里是托盘侧写法，向后对齐。
+  const version = action.version ?? svc.runtime().builtinVersion
+  if (version === null || version === undefined) {
+    console.error('[shell] 切换运行时失败：拿不到内置版本号，先查内置运行时树是否完整')
+    refreshTray()
+    return
+  }
+  const patch: Record<string, unknown> = { dsh_mode: 'builtin', dsh_runtime: version }
   console.log(`[shell] 托盘：切换运行时 ${JSON.stringify(patch)}`)
-  uiService().save(patch)
+  try {
+    svc.save(patch)
+  } catch (error) {
+    console.error(`[shell] 切换运行时失败（写设置）：${String(error)}`)
+    refreshTray()
+    return
+  }
   refreshTray()
   try {
-    // #79（拍板 Q2）：切运行时与面板/托盘重启同一条 restartDsh——树级全重启 + splash UX，
-    // 不再是宿主级 restartHost（那条路留给守护器自愈）
-    await restartDsh()
+    // #117：分流的关键。DSH 已经在跑 → 树级全重启 + splash UX（#79 Q2 的原语义原样保留）；
+    // 还没起来 / 起不来 → 直接把这份服务面按新设置拉起来，**不拆服务面、不杀宿主**。
+    if (svc.state.status === 'running' || svc.state.status === 'starting') {
+      await restartDsh()
+    } else {
+      await svc.ensureRunning()
+    }
   } catch (error) {
-    console.error(`[shell] 切换运行时失败：${String(error)}`)
+    // 拉不起来不是死局：托盘还在，状态行会显示原因，用户可以再换一版再试。
+    console.error(`[shell] 切换运行时后仍未起来：${String(error)}`)
   }
   refreshTray()
 }
@@ -1083,6 +1194,24 @@ async function registerDshCliFromTray(): Promise<void> {
   }
   const result = await registerCli.register({ force })
   console.log(`[register] ${result.ok ? '注册成功' : '注册未完成'}：${result.message}`)
+  try {
+    notifier.notify(
+      SCENARIO.REGISTER_CLI,
+      result.message,
+      result.ok
+        ? 'dsh 命令注册成功'
+        : result.code === 'canceled'
+          ? 'dsh 命令注册取消'
+          : result.code === 'conflict'
+            ? 'dsh 命令注册有冲突'
+            : 'dsh 命令注册失败',
+    )
+  } catch (error) {
+    // 通知挂了不能连累托盘刷新——「出错了但没有日志、菜单不更新」的嫌疑路径（#62 实测）
+    console.log(`[register] 通知投递失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+  // 菜单只走 setState 更新：refreshTray 内部已有「异步刷新完再 setState」的延时更新，
+  // 这里不再额外 await/重复刷——菜单开着时多余的动作会把它顶掉（用户口径：拒绝所有菜单重建）
   refreshTray()
 }
 
@@ -1127,141 +1256,18 @@ const pushStage = (): void => {
   } catch {}
 }
 
-if (!noWindow) {
-  splash = new BrowserWindow({
-    title: APP_NAME,
-    html: splashHtml(),
-    renderer,
-    titleBarStyle: 'hiddenInset',
-    frame: { width: SPLASH_WIDTH, height: SPLASH_HEIGHT },
-  })
-  // 页面还没加载完时推阶段会被丢掉：dom-ready 之后再补推一次（也是浏览器对象可用的信号）
-  splash.on('dom-ready', () => {
-    splashReady = true
-    pushStage()
-  })
-}
-
-// dsh 系统命令注册（旧壳 `register/`）：shim 指向当前运行时，探测走用户真实登录 shell，
-// 状态缓存起来供托盘用（菜单重建很频繁，**绝不在这里同步 spawn shell**）。
-const registerCli = createRegisterCli({
-  log: (message) => console.log(message),
-  appSupport: appSupportDir(),
-  shellCommand: () => {
-    const paths = uiService().paths
-    return [process.execPath, '--no-install', '--preload', paths.preloadFile, join(paths.dshLibDir, 'bin.js')]
-  },
-})
-
-// 通知：决策在壳里（notify-policy）；macOS 上投递走我们自己的 UN 桥（旧壳 `notify_un.rs` 的路子：
-// 进程自己就有 bundle 身份、状态可查、授权可申请），桥不可用或投递失败再退回 Electrobun 的原生通道。
-// 裸 dev 进程没有 bundle id，UN 会硬崩——所以只在 available 时才调。
-const notifyBridge = createNativeNotify({ log: (line) => console.log(line) })
-const notifier: Notifier = createNotifier({
-  notifications: bootSettings.notifications,
-  home: dshHome(),
-  appName: APP_NAME,
-  show: (options) => {
-    if (
-      notifyBridge.available &&
-      notifyBridge.post({ title: options.title, body: options.body ?? '', sound: options.silent !== true })
-    ) {
-      return
-    }
-    Utils.showNotification?.(options)
-  },
-  isFullscreen: () => mainWindow?.isFullScreen() ?? false,
-  onLog: (line) => console.log(line),
-})
-let service: ShellService
-/** 找到持有 lane 转发器的那份服务面（多实例下只有先起的那份非 null）。 */
-const focusedLaneForwarder = (): LaneForwarder | null => {
-  for (const svc of services.values()) {
-    if (svc.laneForwarder !== null) return svc.laneForwarder
-  }
-  return null
-}
-try {
-  service = await ensureService(instanceProfile)
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error)
-  console.error(`[shell] 启动失败：${message}`)
-  notifier.notify(SCENARIO.STARTUP_ERROR, `桌面壳启动失败：${message}`)
-  // 无窗口模式（CI/黑盒）把失败原样抛出去；有启动界面就留在屏幕上让人看见原因
-  // 启动界面还没到 dom-ready 时不能推 JS（原生层会 FATAL）：那就只留日志
-  if (splash === null || !splashReady) throw error
-  try {
-    splash.webview?.executeJavascript(splashFailScript(message))
-  } catch {}
-  await Bun.sleep(SPLASH_FAILURE_HOLD_MS)
-  Utils.quit()
-  throw error
-}
-console.log(`SHELL-READY ${JSON.stringify({ ...service.state, locale })}`)
-// 服务面就绪：把 origin/页面 URL 回填给实例锁，第二个壳才能激活这个窗口
-updateInstance(instanceFile, process.pid, { origin: service.state.origin, pageUrl: service.state.pageUrl })
-// P2 测试钩子（旧壳 lib.rs:744 _AUTO_QUIT）：服务面就绪后延迟自动退出，给 CI/探针一个干净的结束信号
-if ((process.env.DSH_DESKTOP_AUTO_QUIT ?? '') !== '') {
-  const delayMs = Number(process.env.DSH_DESKTOP_AUTO_QUIT) > 0 ? Number(process.env.DSH_DESKTOP_AUTO_QUIT) : 3_000
-  setTimeout(() => {
-    console.log('[shell] DSH_DESKTOP_AUTO_QUIT 触发自动退出')
-    void shutdown()
-  }, delayMs).unref?.()
-}
-
-let startupBlocked = false
-if (!noWindow) {
-  // 启动被阻塞时在启动界面报错（端口被陌生程序占用；本壳/外部 dsh 占用已在壳内自动清场后自拉，不再询问）。
-  if (service.state.blocked !== undefined) {
-    splash?.webview?.executeJavascript(splashFailScript(service.state.blocked))
-    setTimeout(() => { void shutdown() }, SPLASH_FAILURE_HOLD_MS)
-    startupBlocked = true
-  }
-  // 标题栏形态与旧壳对齐：macOS 保留原生红绿灯并叠在内容上（旧壳 TitleBarStyle::Overlay），
-  // Windows/Linux 隐藏原生标题栏，caption 行与窗口按钮由插件 client 自绘（旧壳 decorations:false）。
-  if (!startupBlocked) await createProfileWindow(instanceProfile, service)
-  // 右键菜单里我们自己那几项（原生 role 由系统处理，不会回到这里）；
-  // 多窗口下作用在「最近聚焦」那个窗口上。
-  ContextMenu.on('context-menu-clicked', (event) => {
-    const detail = (event as { data?: { action?: string; data?: { url?: string; path?: string } } }).data
-    const action = detail?.action ?? ''
-    // 工作区文件行：打开文件 / 打开文件夹（系统默认方式，Utils.openPath）
-    if (action === SHELL_MENU_ACTIONS.openPath) {
-      const path = detail?.data?.path
-      if (typeof path === 'string' && isOpenablePath(path)) {
-        if (!Utils.openPath(path)) console.warn(`[shell] 系统没接住打开：${path}`)
-      }
-      return
-    }
-    // dev 菜单：打开当前聚焦窗口的 inspector（Electrobun BrowserView.openDevTools）
-    if (action === SHELL_MENU_ACTIONS.openDevTools) {
-      focusedWindow()?.webview?.openDevTools()
-      return
-    }
-    const url = detail?.data?.url
-    if (action === SHELL_MENU_ACTIONS.reload) {
-      focusedWindow()?.webview?.loadURL(uiService().state.pageUrl)
-      return
-    }
-    if (action === SHELL_MENU_ACTIONS.openExternal && url !== undefined) {
-      if (!Utils.openExternal(url)) console.warn(`[shell] 系统浏览器没接住外链：${url}`)
-      return
-    }
-    if (action === SHELL_MENU_ACTIONS.copyLink && url !== undefined) {
-      Utils.clipboardWriteText(url)
-    }
-  })
-  // 测试钩子：启动时把这些 profile 的窗口一并开出来（多窗口的实机/CI 验证用，逗号分隔）
-  const extraProfiles = (process.env.DSH_SHELL_OPEN_PROFILES ?? '')
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter((entry) => entry !== '' && entry !== instanceProfile)
-  for (const profile of extraProfiles) void openProfileWindow(profile)
-}
-
-// ---- 托盘：显示/隐藏、profile、运行时来源、退出 ----
-// 无窗口模式（CI/黑盒）不建托盘——那里没有窗口可隐藏，托盘只会碍事。
-if (!noWindow) {
+/**
+ * 冷启动第 ④ 步：托盘。#117 —— 托盘排在 DSH **之前**，这是这票的全部要害。
+ *
+ * 以前托盘排在最后（DSH 就绪之后），有个硬后果：DSH 一旦起不来（运行时版本问题是最常见
+ * 的那类），整条流断在托盘之前，用户连「换一个运行时」都点不到，只能退出去手改
+ * desktop-settings.json。托盘先在就不同了：它不需要 DSH 也能建出来（状态行走 serviceStatus
+ * 的 stopped / failed 分支，说得清「DSH 为什么没起来」），于是 DSH 起不来时用户仍然能
+ * 换一版再试、能退出。
+ */
+const startupTray = (): void => {
+  // 无窗口模式（CI/黑盒）不建托盘——那里没有窗口可隐藏，托盘只会碍事
+  if (noWindow) return
   const image = trayImagePath()
   if (image === null) {
     console.warn('[shell] 找不到托盘图标（resources/tray.png / runtime/tray.png），本次不建托盘')
@@ -1281,8 +1287,18 @@ if (!noWindow) {
           void openProfileWindow(instanceProfile)
         }
       },
-      log: (line) => console.log(line)
+      log: (line) => console.log(line),
     })
+    // 菜单保鲜（#62）：状态每 5s 走一次 fs 级快探测（不 spawn）。Electrobun 的 Tray 只有
+    // tray-clicked 一个事件、拿不到「菜单即将打开」的钩子，所以保鲜靠轮询而不是打开时现查；
+    // 只有状态真变了才 refreshTray()（它内部对菜单 JSON 去重，没变就完全不碰原生菜单）。
+    setInterval(() => {
+      if (tray === null) return
+      const before = registerCli.cached()
+      const after = registerCli.poll()
+      if (after.kind === before.kind && after.resolved === before.resolved) return
+      refreshTray()
+    }, 5_000)
     refreshTray()
   }
   // macOS Dock 图标被点（无可见窗口时）：把主窗带回来
@@ -1291,6 +1307,193 @@ if (!noWindow) {
     showMainWindow()
   })
 }
+
+/**
+ * 冷启动第 ⑤ 步：启动界面（起 DSH 那几十秒里给用户看的东西）。
+ * 排在托盘之后：托盘是「出事了还能自救」的常驻入口，优先级高于一次性的进度界面。
+ * 启动期间 serviceOptionsFor.onStage 推的阶段都记在 lastStage 上，这里 dom-ready 后补推一次。
+ */
+// 返回窗口而不直接写模块变量：赋值留在调用点，TypeScript 的控制流分析才看得见
+// 「splash 现在可能为 null」这件事（后续两处失败提示都在模块顶层读它）。
+const startupSplash = (): BrowserWindow | null => {
+  if (noWindow) return null
+  const win = new BrowserWindow({
+    title: APP_NAME,
+    html: splashHtml(),
+    renderer,
+    titleBarStyle: 'hiddenInset',
+    frame: { width: SPLASH_WIDTH, height: SPLASH_HEIGHT },
+  })
+  // 页面还没加载完时推阶段会被丢掉：dom-ready 之后再补推一次（也是浏览器对象可用的信号）
+  win.on('dom-ready', () => {
+    splashReady = true
+    pushStage()
+  })
+  return win
+}
+
+// dsh 系统命令注册（旧壳 `register/`）：shim 指向当前运行时，探测走用户真实登录 shell，
+// 状态缓存起来供托盘用（菜单重建很频繁，**绝不在这里同步 spawn shell**）。
+const registerCli = createRegisterCli({
+  log: (message) => console.log(message),
+  appSupport: appSupportDir(),
+  shellCommand: () => {
+    const paths = uiService().paths
+    // shim 里的 bun 优先取 launcher 旁的运行时（Electrobun 约定 <app 树>/bin/，bun.exe 就在 launcher 旁边）——
+    // 自定义安装/解压目录说了算；拿不到（dev 等）再退回当前进程的执行器（#62）
+    const bunBesideLauncher =
+      paths.launcherPath !== null
+        ? join(dirname(paths.launcherPath), process.platform === 'win32' ? 'bun.exe' : 'bun')
+        : null
+    const bun = bunBesideLauncher !== null && existsSync(bunBesideLauncher) ? bunBesideLauncher : process.execPath
+    return [bun, '--no-install', '--preload', paths.preloadFile, join(paths.dshLibDir, 'bin.js')]
+  },
+})
+
+// 通知：决策在壳里（notify-policy）；macOS 上投递走我们自己的 UN 桥（旧壳 `notify_un.rs` 的路子：
+// 进程自己就有 bundle 身份、状态可查、授权可申请），桥不可用或投递失败再退回 Electrobun 的原生通道。
+// 裸 dev 进程没有 bundle id，UN 会硬崩——所以只在 available 时才调。
+const notifyBridge = createNativeNotify({ log: (line) => console.log(line) })
+const notifier: Notifier = createNotifier({
+  notifications: bootSettings.notifications,
+  home: dshHome(),
+  appName: APP_NAME,
+  show: (options) => {
+    if (
+      notifyBridge.available &&
+      notifyBridge.post({ title: options.title, body: options.body ?? '', sound: options.silent !== true })
+    ) {
+      return
+    }
+    // Electrobun 自带的原生通道（上上版 Windows 注册成功走的就是它，别抢它前面）
+    if (Utils.showNotification) {
+      Utils.showNotification(options)
+      return
+    }
+    // 连原生通道都没有的平台才退到 PowerShell 气泡（notify-win.ts）
+    showWindowsBalloon({ title: options.title, body: options.body ?? '' })
+  },
+  isFullscreen: () => mainWindow?.isFullScreen() ?? false,
+  onLog: (line) => console.log(line),
+})
+let service: ShellService
+/** 找到持有 lane 转发器的那份服务面（多实例下只有先起的那份非 null）。 */
+const focusedLaneForwarder = (): LaneForwarder | null => {
+  for (const svc of services.values()) {
+    if (svc.laneForwarder !== null) return svc.laneForwarder
+  }
+  return null
+}
+try {
+  service = await ensureService(instanceProfile)
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error)
+  console.error(`[shell] 启动失败：${message}`)
+  notifier.notify(SCENARIO.STARTUP_ERROR, `桌面壳启动失败：${message}`)
+  // #117：能走到这里的是**壳自己**立不起服务面（设置文件写不进、端口听不了、HTTP 面起不来），
+  // 而不是 DSH 起不来——而托盘的状态来自服务面，托盘/启动界面都还没有自救入口可言。
+  // 这种就如实抛出去（dev 直接崩、CI 判红），不再「在屏幕上留 30 秒然后自己退掉」。
+  throw error
+}
+// ---- #117 冷启动编排：服务面 → 托盘 → 启动界面 → DSH → 桌面窗口 ----
+startupTray()
+splash = startupSplash()
+
+// DSH。就这一步失败也**不退出**：托盘已经在了，状态行摆着原因，
+// 用户能换一个运行时版本再试，也能从托盘退出（旧行为是报错→30 秒→自己退掉，等于把自救入口没收走）。
+let dshStarted = true
+try {
+  await service.ensureRunning()
+} catch (error) {
+  dshStarted = false
+  const message = error instanceof Error ? error.message : String(error)
+  console.error(`[shell] dsh 启动失败：${message}`)
+  notifier.notify(SCENARIO.STARTUP_ERROR, `dsh 启动失败：${message}`)
+  // 无窗口模式（CI/黑盒）没有托盘可救，把失败原样抛出去：缝 ① 靠这一条判红
+  if (noWindow) throw error
+  // 启动界面留着红字，告诉他还有别的路（启动界面还没到 dom-ready 时不能推 JS：原生层会 FATAL）
+  if (splash !== null && splashReady) {
+    try {
+      splash.webview?.executeJavascript(splashFailScript(`${message}\n\n托盘已就绪：在托盘里换运行时版本或退出。`))
+    } catch {}
+  }
+}
+if (dshStarted) {
+  console.log(`SHELL-READY ${JSON.stringify({ ...service.state, locale })}`)
+  // 服务面就绪：把 origin/页面 URL 回填给实例锁，第二个壳才能激活这个窗口
+  updateInstance(instanceFile, process.pid, { origin: service.state.origin, pageUrl: service.state.pageUrl })
+  // P2 测试钩子（旧壳 lib.rs:744 _AUTO_QUIT）：服务面就绪后延迟自动退出，给 CI/探针一个干净的结束信号
+  if ((process.env.DSH_DESKTOP_AUTO_QUIT ?? '') !== '') {
+    const delayMs = Number(process.env.DSH_DESKTOP_AUTO_QUIT) > 0 ? Number(process.env.DSH_DESKTOP_AUTO_QUIT) : 3_000
+    setTimeout(() => {
+      console.log('[shell] DSH_DESKTOP_AUTO_QUIT 触发自动退出')
+      void shutdown()
+    }, delayMs).unref?.()
+  }
+}
+
+// #117：DSH 没起来就不建桌面窗口（页面要的是 DSH），但**启动界面留着、托盘留着**——
+// 这正是这张单要的死局出口。
+let startupBlocked = false
+if (!noWindow) {
+  // 端口被陌生程序占着（service.state.blocked）或 DSH 根本没起来，都不进桌面窗口。
+  if (service.state.status !== 'running') {
+    // #117：失败原因已经在 ensureRunning 的 catch 里推过启动界面了，这里不重复推。
+    startupBlocked = true
+  }
+  // 标题栏形态与旧壳对齐：macOS 保留原生红绿灯并叠在内容上（旧壳 TitleBarStyle::Overlay），
+  // Windows/Linux 隐藏原生标题栏，caption 行与窗口按钮由插件 client 自绘（旧壳 decorations:false）。
+  if (!startupBlocked) await createProfileWindow(instanceProfile, service)
+  // 右键菜单里我们自己那几项（原生 role 由系统处理，不会回到这里）；
+  // 多窗口下作用在「最近聚焦」那个窗口上。
+  ContextMenu.on('context-menu-clicked', (event) => {
+    const detail = (event as { data?: { action?: string; data?: { url?: string; path?: string } } }).data
+    const action = detail?.action ?? ''
+    // 工作区文件行：打开文件 / 打开文件夹（系统默认方式，Utils.openPath）
+    if (action === SHELL_MENU_ACTIONS.openPath) {
+      const path = detail?.data?.path
+      if (typeof path === 'string' && isOpenablePath(path)) {
+        if (!Utils.openPath(path)) console.warn(`[shell] 系统没接住打开：${path}`)
+      }
+      return
+    }
+    // 菜单：打开当前聚焦窗口的 DevTools——CEF 走 openDevTools（应用内 inspector）；
+    // win 走合成 F12（#106 返工：上游 WebView2 壳无 openDevTools 实现，物理 F12 由 WebView2 默认能力响应）。
+    if (action === SHELL_MENU_ACTIONS.openDevTools) {
+      if (process.platform === 'win32') {
+        if (sendDevToolsKeystroke()) {
+          console.log('[shell] 开发者工具：已发送 F12 键击（WebView2 原生响应，与物理按键同路径）')
+        } else {
+          console.error('[shell] 开发者工具：user32 键击不可用，请直接按 F12 / Ctrl+Shift+I')
+        }
+      } else {
+        focusedWindow()?.webview?.openDevTools()
+      }
+      return
+    }
+    const url = detail?.data?.url
+    if (action === SHELL_MENU_ACTIONS.reload) {
+      focusedWindow()?.webview?.loadURL(uiService().state.pageUrl)
+      return
+    }
+    if (action === SHELL_MENU_ACTIONS.openExternal && url !== undefined) {
+      if (!Utils.openExternal(url)) console.warn(`[shell] 系统浏览器没接住外链：${url}`)
+      return
+    }
+    if (action === SHELL_MENU_ACTIONS.copyLink && url !== undefined) {
+      Utils.clipboardWriteText(url)
+      return
+    }
+  })
+  // 测试钩子：启动时把这些 profile 的窗口一并开出来（多窗口的实机/CI 验证用，逗号分隔）
+  const extraProfiles = (process.env.DSH_SHELL_OPEN_PROFILES ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '' && entry !== instanceProfile)
+  for (const profile of extraProfiles) void openProfileWindow(profile)
+}
+
+// 托盘的建法已经上移到冷启动编排里（startupTray，排在 DSH 之前——见 #117）。
 
 let stopping = false
 const shutdown = async (): Promise<void> => {
