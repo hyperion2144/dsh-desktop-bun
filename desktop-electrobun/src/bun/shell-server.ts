@@ -25,7 +25,6 @@ import type { ViewGrant, ViewRegistry } from '../shared/view-grant.ts'
 import { parseContextMenuRequest, type ContextMenuRequest } from './context-menu.ts'
 import { FOLLOWER_WAIT_MS, GetCoalescer, aggregationPolicy, type SharedGet } from './coalescing.ts'
 import { isWindowControlAction, type WindowControlAction, type WindowMaxState } from './window-max.ts'
-import type { ProfileOpRequest, ProfileOpResult } from './profile-dialog.ts'
 
 
 /** 官方 web-document.ts 的同一行：index 会等异步的 Host 注入，先把 promise 挂上。 */
@@ -61,10 +60,8 @@ export interface ShellServerOptions {
   onWindowControl?: (action: WindowControlAction) => void
   /** 最大化态读取（#112 壳层标题栏带）：GET /__shell__/window 回 { maximized }；缺省时 GET 仍 405 */
   onWindowState?: () => WindowMaxState
-  /** F9：托盘弹框的新建/迁移 profile 提交（服务面实现） */
   /** F12：页面内确认弹窗的回填（旧壳 ui_input_confirm） */
   onInputConfirm?: (flow: string, value: string) => void
-  onProfileOp?: (request: ProfileOpRequest) => Promise<ProfileOpResult>
   /** 壳 ↔ 页面 RPC（`/__shell__/rpc`）：调用方给命令表与错误语义，这里只管 HTTP */
   /**
    * 每视图授权（#220 决策 12）：页面桥带 `x-dsh-shell-view` 回来，这里查表拿视图种类。
@@ -599,26 +596,6 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           if (typeof body.flow !== 'string') return new Response('bad flow', { status: 400 })
           options.onInputConfirm(body.flow, typeof body.value === 'string' ? body.value : '')
           return new Response(null, { status: 204 })
-        }
-        if (decision.rel === 'profile-op') {
-          if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
-          if (options.onProfileOp === undefined) return new Response('not implemented', { status: 501 })
-          let body: unknown
-          try {
-            body = await request.json()
-          } catch {
-            return new Response('bad json', { status: 400 })
-          }
-          const op = (body as { op?: unknown }).op
-          if (op !== 'create' && op !== 'migrate') return new Response('unknown op', { status: 400 })
-          const payload = body as { target?: unknown; source?: unknown; overwrite?: unknown }
-          const result = await options.onProfileOp({
-            op,
-            target: typeof payload.target === 'string' ? payload.target : '',
-            source: typeof payload.source === 'string' ? payload.source : '',
-            overwrite: payload.overwrite === true,
-          })
-          return Response.json(result)
         }
         // 批量转发（#54 数据面聚合）：一次 POST 携 N 个子请求，壳并发转发、按序聚合返回；
         // 单个子请求失败不拖垮整批（各自回状态码）。整包响应 no-store。

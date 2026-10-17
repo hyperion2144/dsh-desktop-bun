@@ -804,7 +804,6 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onActivate: options.onActivate,
     onWindowControl: options.onWindowControl,
     onWindowState: options.onWindowState,
-    onProfileOp: (request) => service.profileOp(request),
     onInputConfirm: options.onInputConfirm,
     views: options.views,
     // #128：聚合档位读内存单写者（saveSettings 每次重新赋值 liveSettings）——切档即时生效，热路径零磁盘 IO。

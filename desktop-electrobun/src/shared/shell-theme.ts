@@ -3,8 +3,14 @@
  *
  * 主题是 DSH 那边的事：profile 的 `cordis.patch.yml` 里 `@deepseek-ai/dsh-client-ui-theme`
  * 这个层的 `config.preference` 取 `light` / `dark` / `system`（与宿主 user-settings
- * 文档里的 `ui-theme.preference` 同一个字段）。壳读不到这个字段时**跟随系统**——
- * 这也是 DSH 自己的缺省口径（`DEFAULT_PREFERENCE = system`），不是壳另发明一套。
+ * 文档里的 `ui-theme.preference` 同一个字段）。
+ *
+ * 读不到这个字段时的缺省是 **浅色**，不是「跟随系统」。实测依据（隔离实例：macOS 浅色、
+ * profile 里没写 preference）：DSH 页面渲染浅色，而这个壳里 CEF 的 `prefers-color-scheme`
+ * 报的是 dark——照「跟随系统」走，弹窗就成了深色贴在浅色应用上（真机反馈：「白色主题
+ * 黑色窗口？？？跟随主题呢？」）。所以缺省取产品在同样情况下的渲染结果（浅色），
+ * 只有用户显式选了 `system` 才交给媒体查询。
+ *
  *
  * 落实办法是 CSS 变量 + `prefers-color-scheme`，不用 JS 监听系统变化：闪屏和提醒窗都是
  * `html:` 文档，没有桥可用；媒体查询天生就跟着系统走，重开窗口也不会失同步。
@@ -15,8 +21,8 @@ export type ShellThemePreference = 'light' | 'dark' | 'system'
 
 export const SHELL_THEME_PREFERENCES: readonly ShellThemePreference[] = ['light', 'dark', 'system']
 
-/** 读不到配置时的缺省：跟随系统（= DSH 的 DEFAULT_PREFERENCE）。 */
-export const DEFAULT_SHELL_THEME: ShellThemePreference = 'system'
+/** 读不到配置时的缺省：产品在同样情况下渲染浅色（依据见文件头注释）。 */
+export const DEFAULT_SHELL_THEME: ShellThemePreference = 'light'
 
 export const SHELL_THEME_PLUGIN = '@deepseek-ai/dsh-client-ui-theme'
 
