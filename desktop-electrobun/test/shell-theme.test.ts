@@ -50,12 +50,15 @@ describe('shellThemeFromPatchYaml：主题偏好是 DSH 的，不另发明一套
     expect(shellThemeFromPatchYaml('- id: ui-theme\n  name: "@deepseek-ai/dsh-client-ui-theme"\n  config: { preference: dark }\n')).toBe('dark')
   })
 
-  test('没文件、没那层、值不认识 ⇒ 一律跟随系统（= DSH 的 DEFAULT_PREFERENCE）', () => {
+  test('没文件、没那层、值不认识 ⇒ 缺省浅色（产品在同样情况下的渲染结果）', () => {
     expect(shellThemeFromPatchYaml(null)).toBe(DEFAULT_SHELL_THEME)
     expect(shellThemeFromPatchYaml('   \n')).toBe(DEFAULT_SHELL_THEME)
-    expect(shellThemeFromPatchYaml(PATCH_OTHER_LAYER)).toBe('system')
-    expect(shellThemeFromPatchYaml('- id: ui-theme\n  name: "@deepseek-ai/dsh-client-ui-theme"\n  config:\n    preference: neon\n')).toBe('system')
-    expect(shellThemeFromPatchYaml('- id: ui-theme\n  name: "@deepseek-ai/dsh-client-ui-theme"\n')).toBe('system')
+    expect(shellThemeFromPatchYaml(PATCH_OTHER_LAYER)).toBe(DEFAULT_SHELL_THEME)
+    expect(shellThemeFromPatchYaml('- id: ui-theme\n  name: "@deepseek-ai/dsh-client-ui-theme"\n  config:\n    preference: neon\n')).toBe(DEFAULT_SHELL_THEME)
+    expect(shellThemeFromPatchYaml('- id: ui-theme\n  name: "@deepseek-ai/dsh-client-ui-theme"\n')).toBe(DEFAULT_SHELL_THEME)
+    // 缺省不是「跟随系统」：本壳里 CEF 的 prefers-color-scheme 报 dark 而产品渲染浅色，
+    // 跟系统走会把弹窗变成深色贴在浅色应用上（真机反馈）。
+    expect(DEFAULT_SHELL_THEME).toBe('light')
   })
 
   test('别把别的层的 preference 捡过来', () => {
@@ -68,7 +71,7 @@ describe('shellThemeFromPatchYaml：主题偏好是 DSH 的，不另发明一套
   config:
     preference: dark
 `
-    expect(shellThemeFromPatchYaml(text)).toBe('system')
+    expect(shellThemeFromPatchYaml(text)).toBe(DEFAULT_SHELL_THEME)
   })
 })
 
@@ -95,8 +98,8 @@ describe('readShellTheme：壳读 profile 目录里那份补丁层', () => {
     expect(readShellTheme(home, profile)).toBe('dark')
   })
 
-  test('profile 还没初始化（目录都没有）⇒ 跟随系统，不抛', () => {
+  test('profile 还没初始化（目录都没有）⇒ 缺省浅色，不抛', () => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-theme-'))
-    expect(readShellTheme(home, 'desktop')).toBe('system')
+    expect(readShellTheme(home, 'desktop')).toBe(DEFAULT_SHELL_THEME)
   })
 })

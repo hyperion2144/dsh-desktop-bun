@@ -196,8 +196,9 @@ export function bootPreloadScript(locale: string, platform: CarrierPlatform, sel
     externalLinksScript(selfOrigin),
     // 右键菜单：CEF 不弹菜单，页面把上下文报给主进程，由它弹原生菜单。
     contextMenuScript(),
-    // 视图 token 暴露给页面脚本（#50）：remote lane（mobile-access 中继）与 /__shell__/profile-op
-    // （#129）还要用。页面侧的壳 RPC 兜底已于 #128 收敛到官方通道，不再依赖它。
+    // 视图 token 暴露给页面脚本（#50）：remote lane（mobile-access 中继）还要用。
+    // 页面侧的壳 RPC 兜底已于 #128 收敛到官方通道；Profile 操作弹窗也已改走原生桥（#129），
+    // 两者都不再依赖它。
     `globalThis.__DSH_SHELL_VIEW_TOKEN__ = ${JSON.stringify(viewToken)}`,
     // 文件选择对话框 accept 归一化（#58）：win 原生层把 MIME token 当扩展名拼 pattern，
     // 这里在页面侧把 accept 改写成扩展名形式（win32 追加 *.* 补 All files），浏览器零影响。

@@ -252,7 +252,8 @@ describe('updateNoticeHtml：内嵌页面', () => {
     expect(updateNoticeHtml(payload({ theme: 'light' }))).toContain('<html lang="zh-CN" data-theme="light">')
     expect(updateNoticeHtml(payload({ theme: 'dark' }))).toContain('<html lang="zh-CN" data-theme="dark">')
     expect(updateNoticeHtml(payload({ theme: 'system' }))).toContain('<html lang="zh-CN">')
-    expect(updateNoticeHtml(payload())).toContain('<html lang="zh-CN">')
+    // 缺省（载荷没带 theme）跟产品的缺省一致：浅色。
+    expect(updateNoticeHtml(payload())).toContain('<html lang="zh-CN" data-theme="light">')
   })
 
   test('样式表与主题块都在，标签配平（丢一个 </style> 整页就白屏，只靠眼睛看不出来）', () => {

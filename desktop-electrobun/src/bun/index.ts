@@ -49,6 +49,7 @@ import {
 } from './update-notice-window.ts'
 import type { UpdateNoticePayload } from './update-notice-dialog.ts'
 import { attachUpdateNoticeRpc } from './update-notice-rpc.ts'
+import { attachProfileOpRpc } from './profile-op-rpc.ts'
 import type { UpdateNoticeCheckResult } from './update-notice-check.ts'
 import { confirmModalScript } from './input-modal.ts'
 import { navRulesFor } from '../shared/nav-rules.ts'
@@ -924,6 +925,10 @@ async function openProfileWindow(profile: string): Promise<void> {
   console.log(`[shell] 打开 profile 窗口：${profile}`)
   try {
     const svc = await ensureService(profile)
+    // #129：startService 只把壳的面立起来（#117），DSH 得显式拉。冷启动那条路上是
+    // ensureService 之后紧跟一句 ensureRunning()——这里以前漏了，于是新开一扇窗永远是
+    // 「页面 origin 起着、上游 127.0.0.1:端口上没人听」，页面卡在 Loading plugins。
+    await svc.ensureRunning()
     await createProfileWindow(profile, svc)
     refreshTray()
   } catch (error) {
@@ -1313,16 +1318,29 @@ async function stopProfileFromTray(profile: string): Promise<void> {
   }
 }
 
-/** F9：托盘「新建 / 迁移 Profile…」——弹一张小表单窗，提交给服务面的 /profile-op */
+/** F9：托盘「新建 / 迁移 Profile…」——弹一张小表单窗，动作经官方原生桥交给服务面（#129） */
 function openProfileOpDialog(kind: ProfileOpDialogKind): void {
-  const dialog = new BrowserWindow({
-    title: kind === 'create' ? '新建 Profile' : '迁移 Profile',
-    html: profileDialogHtml(kind, listProfiles(dshHome(), instanceProfile)),
-    renderer,
-    titleBarStyle: 'hiddenInset',
-    frame: { width: 460, height: kind === 'create' ? 240 : 330 },
-  })
-  dialog.on('closed', () => void refreshTray())
+  // 每扇窗一份 rpc：壳里其余窗（createProfileWindow）也是这么挂的。共用一份会让多开的
+  // 两张窗按请求 id 串回包。
+  attachProfileOpRpc({ run: (request) => uiService().profileOp(request) })
+    .catch((error: unknown) => {
+      // 通道挂不上时**仍然开窗**：页面会把「壳桥不可用」显示成红字，比「点了没反应」强——
+      // 那正是本票要根治的失败形态。
+      console.log(`[shell] profile 操作通道挂不上，弹窗降级：${String(error)}`)
+      return null
+    })
+    .then((rpc) => {
+      const dialog = new BrowserWindow({
+        title: kind === 'create' ? '新建 Profile' : '迁移 Profile',
+        html: profileDialogHtml(kind, listProfiles(dshHome(), instanceProfile), readShellTheme(dshHome(), instanceProfile)),
+        renderer,
+        titleBarStyle: 'hiddenInset',
+        // 高度按内容排：标题居中后没有大片空白，也不留下滚动。
+        frame: { width: 460, height: kind === 'create' ? 210 : 290 },
+        ...(rpc === null ? {} : { rpc }),
+      })
+      dialog.on('closed', () => void refreshTray())
+    })
 }
 
 /**
