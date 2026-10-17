@@ -22,7 +22,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -57,6 +57,85 @@ function newestApp() {
   return apps[0]?.path ?? null
 }
 
+/** 归属断言：Contents/MacOS 下每个 Mach-O 的签名 Identifier 必须认领 bundle id（#132）。
+ * `codesign --verify --deep --strict` 只验 seal 完整性、不验归属——#115/#132 实机：首启自解压
+ * 把 bun 打回 Apple 开发者签名（Identifier=bun）时复核照样通过，UN 授权归属静默失效。
+ */
+function assertMacosAttribution(appPath, expectedBundleId) {
+  const macosDir = join(appPath, 'Contents', 'MacOS')
+  if (!existsSync(macosDir)) return
+  for (const entry of readdirSync(macosDir)) {
+    const full = join(macosDir, entry)
+    if (!statSync(full).isFile()) continue
+    const probe = spawnSync('codesign', ['-dv', full], { encoding: 'utf8' })
+    const found = /Identifier=(\S+)/.exec(`${probe.stdout ?? ''}${probe.stderr ?? ''}`)?.[1] ?? null
+    if (found !== expectedBundleId) {
+      console.error(`[sign-app] 归属断言失败：${entry} 的签名 Identifier=${found ?? '（无签名）'} ≠ ${expectedBundleId}；UN 通知授权归属会静默失效（#132）`)
+      process.exit(1)
+    }
+  }
+  console.log(`[sign-app] 归属断言通过：Contents/MacOS 全部 Mach-O 认领 ${expectedBundleId}`)
+}
+
+/** #132：bootstrap 产物（hutch electrobun build 的直接产物）本身只有 launcher+payload+metadata，
+ * 完整 app 藏在 Contents/Resources/<hash>.tar.zst（metadata.json 的 hash 字段=文件名引用，实测
+ * 不校验内容）里；首装/首启自解压会覆盖整棵树。所以要把 payload 解出来→对完整树做层①②③→
+ * 归属断言→用签名后的树重打回去，首启解压出来的即已签名字节。完整 app 形态（已解压/已安装）
+ * 没有 payload，跳过。zstd 缺失时明示跳过（退回 #115 的「装好后重签」手工流程）。 */
+function signInsideBootstrapPayload(appPath, bundleId) {
+  const resourcesDir = join(appPath, 'Contents', 'Resources')
+  const payloads = existsSync(resourcesDir)
+    ? readdirSync(resourcesDir).filter((name) => name.endsWith('.tar.zst'))
+    : []
+  if (payloads.length === 0) {
+    console.log('[sign-app] Resources 没有 .tar.zst payload（完整 app 形态），跳过 payload 内层处理')
+    return
+  }
+  if (payloads.length > 1) {
+    console.error(`[sign-app] Resources 下出现多个 payload（${payloads.join('、')}），契约不明，拒绝处理（#132）`)
+    process.exit(1)
+  }
+  const zstd = ['/opt/homebrew/bin/zstd', '/usr/local/bin/zstd', 'zstd'].find((candidate) => spawnSync(candidate, ['--version'], { encoding: 'utf8' }).status === 0)
+  if (zstd === undefined) {
+    console.warn('[sign-app] 找不到 zstd（brew install zstd），跳过 payload 重打：首启自解压仍会用未签名树覆盖（#132）')
+    return
+  }
+  const payloadName = payloads[0]
+  const payloadPath = join(resourcesDir, payloadName)
+  const work = mkdtempSync(join(tmpdir(), 'dsh-payload-'))
+  try {
+    console.log(`[sign-app] 处理首启 payload：${payloadName}（解出完整树 → 三层签名 → 归属断言 → 重打回）`)
+    const stageTar = join(work, 'stage.tar')
+    const extractRoot = join(work, 'tree')
+    mkdirSync(extractRoot, { recursive: true })
+    execFileSync(zstd, ['-dc', payloadPath, '-o', stageTar])
+    execFileSync('/usr/bin/tar', ['-xpf', stageTar, '-C', extractRoot])
+    rmSync(stageTar, { force: true })
+    const innerApp = join(extractRoot, basename(appPath))
+    if (!existsSync(innerApp)) {
+      console.error(`[sign-app] payload 里没有 ${basename(appPath)}（打包契约变化？），拒绝处理（#132）`)
+      process.exit(1)
+    }
+    signAppLayers(innerApp)
+    execFileSync('codesign', [...outerSignArgs, innerApp], { stdio: 'inherit' })
+    assertMacosAttribution(innerApp, bundleId)
+    const packedTar = join(work, 'repacked.tar')
+    // tar 结构与 hutch 打包一致：条目以「<name>.app/」为根，无 ./ 前缀；解压端只认 zstd 流，压缩级别无关。
+    // 不带 xattr/PAX 扩展：zig 解包器不认 PAX 扩展头，会把每条记录物化成 ._AppleDouble 文件，
+    // 破坏已签 bundle 的 seal（实测 #132）。COPYFILE_DISABLE 双保险。
+    execFileSync('/usr/bin/tar', ['--no-xattrs', '-cf', packedTar, '-C', extractRoot, basename(appPath)], { env: { ...process.env, COPYFILE_DISABLE: '1' } })
+    execFileSync(zstd, ['-q', '-f', packedTar, '-o', join(work, payloadName)])
+    try {
+      renameSync(join(work, payloadName), payloadPath)
+    } catch {
+      copyFileSync(join(work, payloadName), payloadPath)
+    }
+    console.log(`[sign-app] payload 已重打（新 ${statSync(payloadPath).size} 字节）：首启解压即已签名树（#132）`)
+  } finally {
+    rmSync(work, { recursive: true, force: true })
+  }
+}
+
 const entTempFiles = []
 
 /** 提取既有 entitlements 到临时文件：构建期签名的可执行体可能带 CEF/V8 豁免，重签必须原样保留。 */
@@ -80,34 +159,41 @@ if (process.platform !== 'darwin') {
   process.exit(0)
 }
 
-console.log(`[sign-app] ad-hoc 重签（MacOS 执行体 → Frameworks → 外层）：${target}`)
+console.log(`[sign-app] ad-hoc 重签（MacOS 执行体 → Frameworks → payload 内层完整树 → 外层）：${target}`)
 // P10：带上旧壳同款 entitlements（CEF/V8 初始化需要 JIT 豁免，缺了会 Fatal OOM）——挂外层主执行文件。
 const entitlements = join(projectRoot, 'resources', 'entitlements.plist')
 const outerSignArgs = ['--force', '--sign', '-']
 if (existsSync(entitlements)) outerSignArgs.push('--entitlements', entitlements)
 const bundleId = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIdentifier', join(target, 'Contents', 'Info.plist')], { encoding: 'utf8' }).trim()
-// ① Contents/MacOS 下的每个 Mach-O 自己认领 bundle id（#115 实机：真正的 JS 主进程是 bun，
-// 构建期签名 Identifier=bun，归属永远失败；--identifier 是 Electron helper 同款约定）。
-// 每个文件原样保留既有 entitlements（bun 比仓库 plist 多 disable-executable-page-protection）。
-const macosDir = join(target, 'Contents', 'MacOS')
-if (existsSync(macosDir)) {
-  for (const entry of readdirSync(macosDir)) {
-    const full = join(macosDir, entry)
-    if (!statSync(full).isFile()) continue
-    const preserved = preservedEntitlements(full)
-    const args = ['--force', '--sign', '-', '--identifier', bundleId]
-    if (preserved !== null) args.push('--entitlements', preserved)
-    execFileSync('codesign', [...args, full], { stdio: 'inherit' })
+// 层①②：MacOS 执行体认领 bundle id + Frameworks。对 bootstrap 自身与 payload 解出的完整树复用（#132）。
+function signAppLayers(appPath) {
+  // ① Contents/MacOS 下的每个 Mach-O 自己认领 bundle id（#115 实机：真正的 JS 主进程是 bun，
+  // 构建期签名 Identifier=bun，归属永远失败；--identifier 是 Electron helper 同款约定）。
+  // 每个文件原样保留既有 entitlements（bun 比仓库 plist 多 disable-executable-page-protection）。
+  const macosDir = join(appPath, 'Contents', 'MacOS')
+  if (existsSync(macosDir)) {
+    for (const entry of readdirSync(macosDir)) {
+      const full = join(macosDir, entry)
+      if (!statSync(full).isFile()) continue
+      const preserved = preservedEntitlements(full)
+      const args = ['--force', '--sign', '-', '--identifier', bundleId]
+      if (preserved !== null) args.push('--entitlements', preserved)
+      execFileSync('codesign', [...args, full], { stdio: 'inherit' })
+    }
+  }
+  // ② 嵌套 bundle / framework / dylib。
+  const frameworksDir = join(appPath, 'Contents', 'Frameworks')
+  if (existsSync(frameworksDir)) {
+    for (const entry of readdirSync(frameworksDir)) {
+      if (!entry.endsWith('.framework') && !entry.endsWith('.app') && !entry.endsWith('.dylib')) continue
+      execFileSync('codesign', ['--force', '--sign', '-', join(frameworksDir, entry)], { stdio: 'inherit' })
+    }
   }
 }
-// ② 嵌套 bundle / framework / dylib。
-const frameworksDir = join(target, 'Contents', 'Frameworks')
-if (existsSync(frameworksDir)) {
-  for (const entry of readdirSync(frameworksDir)) {
-    if (!entry.endsWith('.framework') && !entry.endsWith('.app') && !entry.endsWith('.dylib')) continue
-    execFileSync('codesign', ['--force', '--sign', '-', join(frameworksDir, entry)], { stdio: 'inherit' })
-  }
-}
+
+// ②⑤ payload 在外层签名【前】处理：payload 是外层 seal 覆盖的资源，改完必须重签外层（#132）。
+signAppLayers(target)
+signInsideBootstrapPayload(target, bundleId)
 // ③ 外层最后签：这一步才把 Info.plist 绑进 CFBundleExecutable 的签名。
 execFileSync('codesign', [...outerSignArgs, target], { stdio: 'inherit' })
 for (const file of entTempFiles) rmSync(file, { force: true })
@@ -122,6 +208,8 @@ if (plistEntries === '0') {
   console.error('[sign-app] Info.plist 没被绑进签名（通知授权仍会失败）；检查 .app 结构')
   process.exit(1)
 }
+// 同样的断言跑在构建树上：首启覆盖的源头就是这棵树没被签对（#132）。
+assertMacosAttribution(target, bundleId)
 
 // ── DMG 重建（交付面修复）：`hutch electrobun build` 是「先打 DMG、后由本脚本重签 .app」──
 // 它打包时用的是未重签的 .app（linker-signed，Info.plist=not bound，bundle 无 _CodeSignature），
@@ -165,8 +253,8 @@ function repackDmg(dmgPath, appPath) {
   try {
     execFileSync('hdiutil', ['attach', '-nobrowse', '-readonly', '-mountpoint', mountPoint, outDmg], { stdio: 'inherit' })
     try {
-      execFileSync('codesign', ['--verify', '--deep', '--strict', '--verbose=2', join(mountPoint, appName)], { stdio: 'inherit' })
-      console.log(`[sign-app] DMG 复核通过（签名合法）：${appName}`)
+      assertMacosAttribution(join(mountPoint, appName), bundleId)
+      console.log(`[sign-app] DMG 复核通过（签名合法 + 归属认领）：${appName}`)
     } finally {
       execFileSync('hdiutil', ['detach', mountPoint], { stdio: 'inherit' })
     }

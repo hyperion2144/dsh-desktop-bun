@@ -41,6 +41,7 @@
 - 运行时下载 / 切换与 profile 操作此前从不发系统通知（runtime.download / runtime.switch / profile.op / profile.error 四个场景零调用点，config.info 也只在动端口键时提示），现已全部接上：下载完成 / 失败（取消不扰）、切换结果、新建与迁移成败；托盘下载失败也从「启动受阻」场景挪回「运行时下载」（#115）。
 - 通知设置面板「被拒绝」横幅里的 tccutil 重置命令写死旧壳 bundle id（Tauri 时代残留 com.arcreel.dsh-desktop-tauriapp）：壳经 get_notifications_state 下发当前应用 id（构建期口径），面板按平台拼提示——Windows/Linux 没有 tccutil，不再出 mac 专属建议（#115）。
 - 面板的通知授权状态读的是启动时的缓存，系统设置里开关后要重启应用才可见：原生桥新增只刷状态不申请的 dsh_un_refresh，status() 读前踢一次异步刷新，面板打开后补拉一次（#115）。
+- 打包产物首启自解压会整树覆盖、把三层 ad-hoc 签名打回原形（UN 通知授权静默失效，#115 第十一轮实机）：payload 改为「解出完整树 → 三层签名 → 归属断言 → 重打回」（tar 不带 PAX/xattr，zig 解包器会把扩展头物化成 ._ 文件破坏 seal），DMG 复核新增 MacOS 内层归属断言（#132）。
 - macOS 打包 app 的通知授权此前永远弹不出系统授权窗（UNUserNotificationCenter 归属进程看的是【发起请求的进程自己的签名】是否认领 bundle id，而真正的 JS 主进程 `Contents/MacOS/bun` 构建期是 Apple 开发者签名——归属永远失败，requestAuthorization 恒 not_determined 且不弹窗；自首个包起就坏，一直靠系统设置手动开关兑底）。sign-app.mjs 改为三层 ad-hoc 重签：MacOS/ 下每个 Mach-O 以 `--identifier <CFBundleIdentifier>` 认领 bundle id（原样保留既有 entitlements）→ Frameworks 嵌套代码 → 外层（把 Info.plist 绑进 CFBundleExecutable 签名），弃用 `codesign --deep`（#115）。
 - Windows/Linux 右侧边栏经会话链接触发打开时间隔未生效（#112）：标题栏带改走官方声明式适配并上收壳 preload——壳给 <html> 打 data-windows-titlebar + --dsh-windows-titlebar-height（40px，对齐官方常量），host AppFrame CSS 结构性压下整帧并给右栏 panel 留出间隔（不再依赖插件 JS 观察器补 inline top，链接触发的首次挂载不再落盲区）；标题栏拖拽带与窗口三键随之上收壳 preload 注入（POST /__shell__/window 动作、GET 查最大化态，不依赖 dsh 页面与插件状态），插件退役 win32/linux 顶部 chrome（inline top 补丁、自绘三键及其样式与 RPC 面全部移除），darwin 系统红绿灯路径零变化。
 - Windows 系统通知改以应用名与应用图标显示（#107）：启动时 shell32 声明进程 AUMID 并注册 HKCU 通知身份（显示名 + 图标），失败降级不阻断启动。
