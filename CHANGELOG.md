@@ -24,6 +24,7 @@
 - loopback 数据面聚合档位开关（#128）：桌面设置新增三档单选（全开 / 只关缓冲 / 全关），控制 #54 的 GET 单飞合并与响应整条缓冲，切换立即生效、无需重启。
 
 ### Changed
+- 随包内置的 dsh 运行时由 0.2.1-alpha.2 升到 0.2.1-rc.1（#133）；壳侧对运行时的既有契约逐条核实无破坏性变更，代码不改，只动声明。
 - 托盘「重启 dsh 服务」升级为「重启应用」（#126）：整个应用退出并自动拉起（复用 #119 的接班式 relaunch），动作 id 同步改名为 `tray:restart-app`；面板的「重启 dsh 服务」仍是 DSH 侧重启，不变。
 - CI 触发策略分流（#7）：push/PR 只跑检查（typecheck + test，新增 Check workflow）；完整构建（三平台 + 断言 + 冒烟 + 上传）仅由 workflow_dispatch 与 tag push 触发。
 - dsh 宿主由随包 Node sidecar 改为 Bun 直跑；启动链对齐官方桌面（`loadProfileDirectory` + `resolvedProfile`，profile 由 dsh 自身逻辑初始化）。
