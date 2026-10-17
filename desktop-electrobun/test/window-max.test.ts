@@ -84,11 +84,12 @@ describe('isMaximizedPlacementDamaged（#80 heal 损坏判定）', () => {
 
   test('#80 第五轮实机回归钉：2K@125% 实测补偿帧 = 正常落位（heal 不得重摆）', () => {
     // 实机日志原值：物理帧 = 工作区四周 +9px（THICKFRAME 补偿），getFrame 按缩放 ÷1.25，
-    // 即 2062.4=(2560+18)/1.25。旧 4px 容差把这份帧判损坏，每次最大化白闪 3 下。
+    // 即 2062.4=(2560+18)/1.25。#73 起 heal 与状态判定同取 Screen 逻辑工作区
+    // （2048×1104），补偿读数 7.4 逻辑px；旧 4px 容差把它判损坏，每次最大化白闪 3 下。
     const measured: WindowFrame = { x: -7, y: -7, width: 2062.4, height: 1118.4 }
-    const realWork: WindowFrame = { x: 0, y: 0, width: 2560, height: 1380 }
-    expect(frameOvershoot(measured, realWork)).toBe(7)
-    expect(isMaximizedPlacementDamaged(measured, realWork)).toBe(false)
+    const logicalWork: WindowFrame = { x: 0, y: 0, width: 2048, height: 1104 }
+    expect(frameOvershoot(measured, logicalWork)).toBeCloseTo(7.4)
+    expect(isMaximizedPlacementDamaged(measured, logicalWork)).toBe(false)
   })
 })
 
@@ -102,9 +103,9 @@ describe('frameOvershoot（外扩单向度量）', () => {
     expect(frameOvershoot(expanded, WORK)).toBe(8)
   })
 
-  test('整体向内缩（坐标空间等比错位的形状）为负，不误报损坏', () => {
-    // deriveMaximized 注释担心的场景：若 getFrame 与工作区坐标空间真有等比错位，
-    // 窗读数只会整体偏小——overshoot ≤ 0，heal 不得误判（否则正常窗每轮 focus 闪三次）。
+  test('整体向内缩为负，不误报损坏', () => {
+    // 外扩判定只认向外越界：窗比工作区小（任何原因）时 overshoot ≤ 0，
+    // heal 不得误判（否则正常窗每轮 focus 闪三次）。
     const inset: WindowFrame = { x: 40, y: 40, width: WORK.width - 80, height: WORK.height - 80 }
     expect(frameOvershoot(inset, WORK)).toBeLessThanOrEqual(0)
     expect(isMaximizedPlacementDamaged(inset, WORK)).toBe(false)
@@ -125,5 +126,46 @@ describe('healVerdict（重摆计数状态机）', () => {
   test('损坏且已达上限 = exhausted（防重摆循环闪窗）', () => {
     expect(healVerdict(true, HEAL_MAX_REPLACES)).toBe('exhausted')
     expect(healVerdict(true, HEAL_MAX_REPLACES + 5)).toBe('exhausted')
+  })
+})
+
+describe('deriveMaximized（#73 启动最大化图标回归）', () => {
+  // 实机日志原值（#73 第五轮，2K@125%）：
+  //   getFrame = 逻辑 px：最大化帧 2062.4×1118.4 = (2560+18)/1.25
+  //   Screen 工作区 = 逻辑 px：2048×1104（getFrame 同一坐标空间）
+  //   user32 rcWork = 物理 px：2560×1380（旧实现直接拿它比，四边全差 20%）
+  const LOGICAL_WORK: WindowFrame = { x: 0, y: 0, width: 2048, height: 1104 }
+  const MEASURED: WindowFrame = { x: -7, y: -7, width: 2062.4, height: 1118.4 }
+
+  test('同一逻辑坐标空间：2K@125% 实测最大化帧判真（坐标空间错配是 #73 根因）', () => {
+    expect(deriveMaximized(MEASURED, LOGICAL_WORK, false)).toBe(true)
+  })
+
+  test('物理工作区不再参与判定：逻辑帧 vs 物理 rcWork 判假（防止回退到物理口径）', () => {
+    expect(deriveMaximized(MEASURED, { x: 0, y: 0, width: 2560, height: 1380 }, false)).toBe(false)
+  })
+
+  test('100% 缩放：THICKFRAME 补偿 9px/边仍判真（旧 8px 容差漏判）', () => {
+    const work: WindowFrame = { x: 0, y: 0, width: 1920, height: 1040 }
+    const compensated: WindowFrame = { x: -9, y: -9, width: 1938, height: 1058 }
+    expect(deriveMaximized(compensated, work, false)).toBe(true)
+  })
+
+  test('用户拖小的窗口不误判为最大化', () => {
+    expect(deriveMaximized({ x: 120, y: 90, width: 800, height: 600 }, LOGICAL_WORK, false)).toBe(false)
+  })
+
+  test('单边缩进超过容差即判假（不要求四边都缩）', () => {
+    expect(deriveMaximized({ x: -7, y: -7, width: 2062.4, height: 1000 }, LOGICAL_WORK, false)).toBe(false)
+  })
+
+  test('比工作区小一圈（40px/边）不误判为最大化（12px 容差上界）', () => {
+    const inset = { x: 40, y: 40, width: LOGICAL_WORK.width - 80, height: LOGICAL_WORK.height - 80 }
+    expect(deriveMaximized(inset, LOGICAL_WORK, false)).toBe(false)
+  })
+
+  test('工作区缺失退回原生旗标（Screen 不可用时行为不变）', () => {
+    expect(deriveMaximized(MEASURED, null, false)).toBe(false)
+    expect(deriveMaximized(MEASURED, null, true)).toBe(true)
   })
 })
