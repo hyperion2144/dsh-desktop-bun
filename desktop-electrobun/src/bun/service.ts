@@ -21,6 +21,14 @@ import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-s
 import type { ShellStage } from './stages.ts'
 import { dshHome, layout, resolveBuiltinRuntimeDir, type ShellLayout } from './runtime.ts'
 import { startShellServer, type BootPayload, type ShellServer, type ShellServerOptions } from './shell-server.ts'
+import type { UpdateNoticeOp, UpdateNoticePayload } from './update-notice-dialog.ts'
+import type { UpdateNoticeTarget } from '../shared/update-notice-policy.ts'
+import { evaluateRuntimeUpdates, DEFAULT_CATALOG_SOURCE } from '../shared/runtime-update.ts'
+import { installableVersions, runtimeInstallability } from '../shared/runtime-installability.ts'
+import { createUpdateNoticeStore } from './update-notice-store.ts'
+import { readShellTheme } from './theme-source.ts'
+import { runUpdateNoticeCheck, type UpdateNoticeCheckResult } from './update-notice-check.ts'
+import { createUpdateNoticeOpRunner, type UpdateNoticeOpResult } from './update-notice-ops.ts'
 import type { WindowControlAction, WindowMaxState } from './window-max.ts'
 import { readHostRecords, sweepStaleHosts, upsertHostRecord, writeHostRecords } from './host-registry.ts'
 import { createRestartLedger } from './supervisor.ts'
@@ -66,6 +74,7 @@ import {
   fetchRuntimeCatalog,
   listInstalledRuntimes,
   purgeRuntimeTrash,
+  purgeStagingDirs,
   readRuntimeVersion,
   recordInstalledRuntime,
   trashInstalledRuntime,
@@ -104,6 +113,11 @@ export interface ServiceOptions {
   onRestartApp?: () => Promise<{ ok: boolean; reason?: string; message?: string }>
   /** F9：托盘弹框的 profile 新建/迁移落地后（create → 开窗，migrate → 刷新托盘） */
   onProfileOpApplied?: (op: 'create' | 'migrate', profile: string) => void
+  /** #142：提醒卡的「不再提示」拉黑版本号（壳主进程持有 update-notice.json；没接上时如实报不可用） */
+  /** #142：启动检查的提醒窗由壳主进程开；没接上就一路不弹（只进日志） */
+  onOpenUpdateNotice?: (payload: UpdateNoticePayload) => boolean | Promise<boolean>
+  /** #142：提醒卡的「不再提示」拉黑版本号（带路：壳与运行时各算各的）；缺省写自己的 update-notice.json */
+  onIgnoreVersions?: (targets: UpdateNoticeTarget[]) => void
   /** F12：页面内确认弹窗的回填（壳主进程的 pending-input 单槽） */
   onInputConfirm?: (flow: string, value: string) => void
   /** 启动阶段变化（启动界面据此报进度；无窗口模式也会调） */
@@ -202,6 +216,13 @@ export interface ShellService {
   profileOp: (request: ProfileOpRequest) => Promise<ProfileOpResult>
   /** profileOp 落地后的回调（create → 开窗，migrate → 刷新托盘）；测试可注入 */
   onProfileOpApplied: (op: 'create' | 'migrate', profile: string) => void
+  /** #139：启动更新提醒卡的动作落地（壳与运行时两段，共用已有下载/切换/重启路径） */
+  updateNoticeOp: (op: UpdateNoticeOp) => Promise<UpdateNoticeOpResult>
+  /**
+   * #141：托盘「检查更新」显式触发一次（`manual`）——绕过总开关与「已提醒过」，但拉黑仍然认。
+   * 与启动那次共用同一份 store / 探针 / 提醒窗，不另长一套 UI。
+   */
+  checkUpdates: (trigger: 'startup' | 'manual') => Promise<UpdateNoticeCheckResult>
   /** 官方 RPC 的命令表（惰性；壳 RPC 漏斗派发用，见 rpc-bridge.ts #50） */
   rpcRouter: () => RpcRouter | null
   /**
@@ -274,6 +295,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 共享 hardlink 的 ctime，触发 dsh 插件 rebuilt → 白屏），所以只能在 spawn 之前清。
   const purgedTrash = purgeRuntimeTrash(paths.appSupport, log)
   if (purgedTrash > 0) log(`运行时回收站：清理 ${String(purgedTrash)} 项（上一次卸载的残留）`)
+  // 安装中断留下的临时目录（.staging-*）：扫描看不见但占磁盘，同样在 spawn 之前清
+  const purgedStaging = purgeStagingDirs(paths.appSupport, log)
+  if (purgedStaging > 0) log(`运行时安装残留：清理 ${String(purgedStaging)} 项（上次装到一半没装完的）`)
 
   // ---- 运行时下载安装：面板点「下载」→ 单飞装树（命令表只调 downloader，不自己 spawn）----
   // pnpm.cjs 随内置树分发（prepare:bundle 按 builtin-runtime.json 声明物化，#16）；包管理器跑在**我们的 Bun** 上。
@@ -1143,6 +1167,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       dshStatusCode = 2
       options.onStage?.('ready')
       setStatus('running')
+      // #142：服务面就绪后在**后台**查一次更新（fire-and-forget）：窗口与托盘不等人，查不到也静默。
+      void checkUpdates('startup')
       // 崩溃自愈/退避重启那条线跟服务面绑在一起，不跟某一次启动绑（#60 的语义原样保留）
       void supervise()
     })()
@@ -1158,6 +1184,109 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       starting = null
     }
   }
+  // #60：面板「重启 dsh 服务」= 壳级完整重启（退出级 teardown → 全新启动，壳本体/托盘不退出）；
+  // 无窗口/测试没有壳 teardown 回调，回落宿主级 restartHost（已树安全）。
+  // #126 起托盘那项已是「重启应用」（整应用重来），不再是本条的同语义兄弟。
+  // 具名是因为提醒卡的「切换后重启」也要走它（#139）——两条路径只能有一份。
+  const restartService = async (): Promise<void> => {
+    if (options.onFullRestart !== undefined) {
+      await options.onFullRestart()
+      return
+    }
+    await service.restartHost()
+  }
+  // ---- #142：启动后那次后台更新检查 ----
+  // 判定/去重/记账都在纯逻辑层（shared/update-notice-policy.ts + #138 的判定层），这里只接两路探针。
+  // app-support/update-notice.json 是服务面自己的落点——它不在 desktop-settings.json 里（键名是契约红线）。
+  const updateNoticeStore = createUpdateNoticeStore(paths.appSupport, log)
+
+  /**
+   * 未下载候选的「装得上吗」闸门（#139 两次实机修）：目录说有 ≠ 装得上。
+   *
+   * 第一次真实失败是 GitHub 上刚发、npm 上还没有；第二次更隐蔽——`dsh@0.2.1-rc.2` 已在 npm，
+   * 但它 pin 的第一方兄弟包 `dsh-tool-pwsh-persistent@0.2.1-rc.2` 还没发，`pnpm add` 直接炸
+   * ERR_PNPM_NO_MATCHING_VERSION。所以这里按 registry 包文档核验每个候选的依赖闭包
+   * （`shared/runtime-installability.ts`）：缺任何一个兄弟包就不提醒它。
+   *
+   * 无状态、每次真查：上游把缺的包补上之后，下一次检查自己就恢复（用户原话「拉黑你怎么知道有没有
+   * 恢复」——所以不拉黑）。安装源恒为 npm（runtime-install.ts 无条件 pnpm add），这道闸门跟设置里
+   * 的「运行时下载源」无关，GitHub 目录也一样要过。
+   *
+   * 返回 null = 压根没有未下载候选，不设闸；返回 [] = 一个都装不上（含「核验没查成」）。
+   */
+  const installableGate = async (candidates: readonly string[]): Promise<readonly string[] | null> => {
+    if (candidates.length === 0) return null
+    return installableVersions(await runtimeInstallability({ versions: candidates, log }))
+  }
+  // 启动那次与托盘手动那次共用这份依赖；差别只有 trigger（#141）。
+  const checkUpdates = async (trigger: 'startup' | 'manual'): Promise<UpdateNoticeCheckResult> => {
+    const open = options.onOpenUpdateNotice
+    // 启动那次：主进程没接开窗能力就压根不查（省掉两次网络，也没东西可提醒）；
+    // 托盘那次照查——用户亲手点的，结果要落到托盘那行灰字上。
+    if (open === undefined && trigger === 'startup') {
+      return { notify: false, reason: '提醒窗未接入', notified: [] }
+    }
+    return runUpdateNoticeCheck({
+      trigger,
+      store: updateNoticeStore,
+      // 壳这一路：框架 updater 拿不到更新源（dev 构建）时 view 里压根没有新版本 ⇒ 自然静默。
+      probeShell: async () => ({ view: (await updater.check()).view, fresh: true }),
+      probeRuntime: async () => {
+        const snapshot = runtimeSnapshot()
+        const source = liveSettings.runtimeSource ?? DEFAULT_CATALOG_SOURCE
+        const catalog = await fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log })
+        const base = {
+          running: snapshot.activeVersion,
+          builtin: snapshot.builtinVersion,
+          catalog: catalog.entries,
+          installed: snapshot.installed,
+          source,
+          ...(catalog.error === undefined ? {} : { catalogError: catalog.error }),
+        }
+        // 第一遍只为算出「比在跑的更高的未下载候选」；核验过它们的依赖闭包，第二遍才是最终判定。
+        const candidates = evaluateRuntimeUpdates(base).entries
+          .filter((entry) => entry.source === 'remote')
+          .map((entry) => entry.version)
+        const installable = await installableGate(candidates)
+        return {
+          report: evaluateRuntimeUpdates({
+            ...base,
+            ...(installable === null ? {} : { installable }),
+          }),
+          fresh: true,
+        }
+      },
+      context: () => ({
+        profile: paths.profile,
+        baseline: runtimeVersion,
+        preference: liveSettings.dshRuntime ?? '',
+        theme: readShellTheme(paths.home, paths.profile),
+      }),
+      open: open ?? (() => false),
+      log,
+    })
+  }
+  // #139：提醒卡动作的依赖全部指向**已有**能力——壳下载走 updater，运行时下载走同一个单飞下载器，
+  // 落设置走 saveSettings（#97：dsh_mode 必须一起写，否则「切回内置」会被当成没设置），重启走上面那份，
+  // 「不再提示」落到上面那份 update-notice.json（测试可经 options.onIgnoreVersions 注入假实现）。
+  const updateNoticeOp = createUpdateNoticeOpRunner({
+    downloadShell: async () => {
+      await updater.download()
+    },
+    // 端点是回环 HTTP，source 按普通外部输入对待：只认这两个，其余回落 github。
+    downloadRuntime: (version, source) => downloadRuntimeNotified(version, source === 'npm' ? 'npm' : 'github'),
+    switchRuntime: (version) => {
+      saveSettings({ dsh_runtime: version, dsh_mode: 'builtin' })
+    },
+    restartService,
+    ignoreVersions: (targets) => {
+      if (options.onIgnoreVersions !== undefined) {
+        options.onIgnoreVersions(targets)
+        return
+      }
+      updateNoticeStore.ignore(targets)
+    },
+  })
   const service: ShellService = {
     state,
     paths,
@@ -1176,6 +1305,10 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     download: downloadRuntimeNotified,
     // #97：托盘与面板共用同一个取消口，取消后两边都从轮询快照看到 cancelled 终态
     cancelRuntimeDownload: () => downloader.cancel(),
+    // #139：提醒卡动作复用同一条重启路径（面板切运行时也是它）
+    updateNoticeOp,
+    // #141：托盘「检查更新」显式触发（manual）——同一份 store/探针/提醒窗，只是绕过去重
+    checkUpdates,
     profileOp: async (request) => {
       if (request.op === 'create') {
         const name = request.target ?? ''
@@ -1296,16 +1429,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       log,
       settings: () => liveSettings,
       save: saveSettings,
-      restartService: async () => {
-        // #60：面板「重启 dsh 服务」= 壳级完整重启（退出级 teardown → 全新启动，壳本体/托盘不退出）；
-        // 无窗口/测试没有壳 teardown 回调，回落宿主级 restartHost（已树安全）。
-        // #126 起托盘那项已是「重启应用」（整应用重来），不再是本条的同语义兄弟。
-        if (options.onFullRestart !== undefined) {
-          await options.onFullRestart()
-          return
-        }
-        await service.restartHost()
-      },
+      restartService,
       // #119：整应用重启与「重启 dsh 服务」是两条路。壳没这个能力（无窗口模式/测试）时如实报不可用，
       // 不静默回落成 restartHost——那正是本票要修的那个「以为重启了其实没重跑」的假象。
       restartApp: async () => {
@@ -1446,6 +1570,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         read: () => readKeybindings(home),
         write: (raw) => writeKeybindings(home, raw),
       },
+      // #136：启动更新提醒的开关与拉黑列表（落 app-support/update-notice.json，不动设置键名）
+      updateNotice: updateNoticeStore,
       // 面板展示与真实注入同源：一样走 scutil / 注册表 / 环境变量三级检测。
       proxyEffective: () => resolveProxyEnv(liveSettings, detectSystemProxy({ platform: process.platform, env: childEnv, log })),
     }),

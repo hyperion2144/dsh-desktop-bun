@@ -29,11 +29,27 @@ import { loadNativeWebviewCore } from './native-webview.ts'
 import { GUEST_DEFAULT_URL, OFFSCREEN_GUEST_RECT } from '../shared/guest-policy.ts'
 import { resolveAppVersion } from './app-version.ts'
 import { SPLASH_HEIGHT, SPLASH_WIDTH, splashFailScript, splashHtml, splashStageScript } from './splash.ts'
+import { readShellTheme } from './theme-source.ts'
 import { stageLabel, stagePercent, type ShellStage } from './stages.ts'
 import { createTray, type TrayHandle } from './tray.ts'
-import { trayMenu, type TrayAction, type TrayCatalogItem, type TrayState } from './tray-menu.ts'
+import {
+  trayMenu,
+  type TrayAction,
+  type TrayCatalogItem,
+  type TrayState,
+  type TrayUpdateCheck,
+} from './tray-menu.ts'
 import { listProfiles } from './profiles.ts'
 import { profileDialogHtml, type ProfileOpDialogKind } from './profile-dialog.ts'
+import {
+  createUpdateNoticeWindow,
+  type NoticeWindowLike,
+  type NoticeWindowOptions,
+  type UpdateNoticeWindowHandle,
+} from './update-notice-window.ts'
+import type { UpdateNoticePayload } from './update-notice-dialog.ts'
+import { attachUpdateNoticeRpc } from './update-notice-rpc.ts'
+import type { UpdateNoticeCheckResult } from './update-notice-check.ts'
 import { confirmModalScript } from './input-modal.ts'
 import { navRulesFor } from '../shared/nav-rules.ts'
 import {
@@ -317,6 +333,14 @@ function performClosePolicy(win: BrowserWindow, profile: string): 'hidden' | 'qu
 }
 /** 版本目录缓存：托盘子菜单用它渲染「↓ 下载并切换」，但不该每刷一次托盘就打网络（旧壳也拿缓存）。 */
 const TRAY_CATALOG_TTL_MS = 10 * 60_000
+
+/**
+ * #141：托盘「检查更新」的进程态。**只在这两个时刻变**：点「检查更新」时置 checking，
+ * 出结果时换成 result。定时轮询不碰它（票面明令：事件驱动，禁止定时重建菜单）。
+ * 注意与 `catalogCache` 的区别：那个是「有哪些版本可下载」且带 10 分钟 TTL，
+ * 手动检查要绕过它强制真检，所以这里另存一份不带 TTL 的结果。
+ */
+let trayUpdateCheck: TrayUpdateCheck | null = null
 let catalogCache: { at: number; entries: TrayCatalogItem[] } | null = null
 let catalogPending = false
 
@@ -400,6 +424,9 @@ function trayState(): TrayState {
     remoteAddr: settings.remoteAddr ?? null,
     remoteList: settings.remoteList,
     registerLabel: registerTrayLabel(registerCli.cached()),
+    // #141：手动检查的进程态。壳主进程持有，不进设置/服务面——菜单只负责把它显示出来。
+    // 没查过就压根不摆这一行（与 registerLabel 同一套「缺省不扰民」的口径）
+    updateCheck: trayUpdateCheck ?? undefined,
   }
 }
 
@@ -598,6 +625,8 @@ function serviceOptionsFor(profile: string): ServiceOptions {
       console.log(`[shell] 启动阶段：${stageLabel(stage)}（${String(stagePercent(stage))}%）`)
       pushStage()
     },
+    // #142：服务面在后台判定完就把提醒窗开出来（没得提醒时它自己返回 false）
+    onOpenUpdateNotice: (payload) => openUpdateNotice(profile, payload),
     onActivate: () => {
       // 第二个壳点了一次图标：把当前窗口带到前台（恢复最小化、显示、抢焦点）
       console.log('[shell] 收到激活请求：窗口带到前台')
@@ -928,7 +957,7 @@ async function restartDsh(): Promise<void> {
     if (showSplash) {
       splash = new BrowserWindow({
         title: APP_NAME,
-        html: splashHtml(),
+        html: splashHtml(readShellTheme(dshHome(), instanceProfile)),
         renderer,
         titleBarStyle: 'hiddenInset',
         frame: { width: SPLASH_WIDTH, height: SPLASH_HEIGHT },
@@ -1169,6 +1198,46 @@ async function downloadRuntimeFromTray(version: string): Promise<void> {
   await switchRuntimeFromTray({ kind: 'switch-runtime', version })
 }
 
+/**
+ * #141：托盘「检查更新」——后台真检壳与运行时，任一路有新版本就开**启动那张提醒卡**
+ * （#140 的 `openUpdateNotice`）。托盘自己不长第二套 UI，票面明令。
+ *
+ * 三条口径：
+ * 1. **强制真检**：走 `service.checkUpdates('manual')`，它直接打 `fetchRuntimeCatalog`，
+ *    不经 `ensureCatalog()` 那个 10 分钟 TTL 的 `catalogCache`——用户点的是「现在查」，
+ *    拿缓存糊弄等于没点。查完顺手作废 `catalogCache`，让子菜单的「↓ 下载并切换」跟上。
+ * 2. **菜单只跳变两次**：开始检查、出结果，各 `refreshTray()` 一次；不新建菜单实例、不定时轮询。
+ * 3. **结果只落到那行灰字**：有更新时提醒窗已经开了，托盘不重复弹；查不成就把原因写灰字，
+ *    让用户知道「没弹窗」是因为没查到，而不是坏了。
+ */
+async function checkUpdatesFromTray(): Promise<void> {
+  if (trayUpdateCheck?.checking === true) return
+  trayUpdateCheck = { checking: true, result: trayUpdateCheck?.result ?? null }
+  refreshTray()
+  console.log('[shell] 托盘：检查更新')
+  let result: UpdateNoticeCheckResult
+  try {
+    result = await uiService().checkUpdates('manual')
+  } catch (error) {
+    // 检查本身理论上不抛（runUpdateNoticeCheck 全吐成 reason）；真抛了也得把理由摆到灰字上
+    result = {
+      notify: false,
+      reason: `检查失败：${error instanceof Error ? error.message : String(error)}`,
+      notified: [],
+    }
+  }
+  // 手动查完，目录缓存里的旧结果不再作数：作废它，下一次 refreshTray 会真拉一份
+  catalogCache = null
+  trayUpdateCheck = {
+    checking: false,
+    result: { notify: result.notify, reason: result.reason, updates: result.notified.length },
+  }
+  refreshTray()
+  console.log(
+    `[shell] 托盘检查更新：${result.notify ? `有 ${String(result.notified.length)} 项` : result.reason}`,
+  )
+}
+
 function onTrayAction(action: TrayAction): void {
   switch (action.kind) {
     case 'toggle-window':
@@ -1190,6 +1259,10 @@ function onTrayAction(action: TrayAction): void {
       return
     case 'download-runtime':
       void downloadRuntimeFromTray(action.version ?? '')
+      return
+    case 'check-updates':
+      // 点了就把菜单关掉（检查在后台跑，结果落到灰字与提醒窗）
+      void checkUpdatesFromTray()
       return
     case 'register-cli':
       void registerDshCliFromTray()
@@ -1228,6 +1301,8 @@ async function stopProfileFromTray(profile: string): Promise<void> {
     return
   }
   console.log(`[shell] 退出实例：停止 ${profile} 的 dsh 与服务面`)
+  // #142：服务面停了，它的提醒窗也别留着（否则会成为无主窗口）
+  updateNoticeWindows.get(profile)?.close()
   stoppingProfiles.add(profile)
   try {
     windows.get(profile)?.window.close()
@@ -1248,6 +1323,59 @@ function openProfileOpDialog(kind: ProfileOpDialogKind): void {
     frame: { width: 460, height: kind === 'create' ? 240 : 330 },
   })
   dialog.on('closed', () => void refreshTray())
+}
+
+/**
+ * #140/#142：更新提醒窗句柄（按 profile 一张：多 profile 各查各的，互不叠窗、互不记账）。
+ *
+ * 判定在服务面那边（#138 判定层 + 纯逻辑策略层），这里只把模型渲染出来开窗；
+ * 「没什么可提醒」返回 false，服务面据此不写 lastNotified，下次还能再弹。
+ */
+const updateNoticeWindows = new Map<string, UpdateNoticeWindowHandle>()
+/** 每 profile 一份的官方 RPC 实例（#139：动作走原生桥，html 文档发不出同源 fetch）。 */
+const updateNoticeRpcs = new Map<string, Promise<unknown>>()
+
+function updateNoticeRpcFor(profile: string): Promise<unknown> {
+  const cached = updateNoticeRpcs.get(profile)
+  if (cached !== undefined) return cached
+  const created = attachUpdateNoticeRpc({
+    run: (op) => uiService().updateNoticeOp(op),
+    // 页面只读的下载进度：同一个单飞下载器的状态，壳算好百分比再递给页面。
+    downloadStatus: () => uiService().downloadStatus(),
+  })
+  updateNoticeRpcs.set(profile, created)
+  return created
+}
+
+async function openUpdateNotice(profile: string, payload: UpdateNoticePayload): Promise<boolean> {
+  // rpc 实例得先挂上才有桥：它是懒的（动态 import electrobun），所以开窗这一步等它一下。
+  const rpc = await updateNoticeRpcFor(profile)
+  const existing = updateNoticeWindows.get(profile)
+  const handle =
+    existing ??
+    createUpdateNoticeWindow(
+      class NoticeWindow implements NoticeWindowLike {
+        private readonly win: BrowserWindow
+
+        constructor(options: NoticeWindowOptions) {
+          this.win = new BrowserWindow(options)
+        }
+
+        close(): void {
+          this.win.close()
+        }
+
+        on(event: 'closed', handler: () => void): void {
+          this.win.on('closed', handler)
+        }
+      },
+      { renderer, rpc },
+    )
+  updateNoticeWindows.set(profile, handle)
+  const win = handle.open(payload)
+  if (win === null) return false
+  win.on('closed', () => void refreshTray())
+  return true
 }
 /** F12：页面内确认弹窗（旧壳 register/confirm_modal 的等价物）：注入 JS，等 POST 回填，180s 超时。 */
 let pendingInput: { flow: string; resolve: (value: string) => void } | null = null
@@ -1442,7 +1570,7 @@ const startupSplash = (): BrowserWindow | null => {
   if (noWindow) return null
   const win = new BrowserWindow({
     title: APP_NAME,
-    html: splashHtml(),
+    html: splashHtml(readShellTheme(dshHome(), instanceProfile)),
     renderer,
     titleBarStyle: 'hiddenInset',
     frame: { width: SPLASH_WIDTH, height: SPLASH_HEIGHT },

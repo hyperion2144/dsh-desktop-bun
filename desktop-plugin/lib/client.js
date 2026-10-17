@@ -2990,6 +2990,48 @@ function SourceCard() {
 
 // src/client/desktop-settings/cards/update-card.tsx
 var import_react17 = require("react");
+
+// src/client/update-notice-settings.ts
+var KIND_LABELS = {
+  shell: "\u684C\u9762\u58F3",
+  runtime: "DSH \u8FD0\u884C\u65F6"
+};
+var isRecord2 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var versionOrNull = (value) => typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+function parseUpdateNoticeState(raw) {
+  if (!isRecord2(raw)) return null;
+  const ignored = Array.isArray(raw.ignored) ? [...new Set(raw.ignored.filter((v) => typeof v === "string" && v.trim() !== "").map((v) => v.trim()))] : [];
+  const last = isRecord2(raw.lastNotified) ? raw.lastNotified : {};
+  return {
+    enabled: raw.enabled !== false,
+    ignored,
+    lastNotified: { shell: versionOrNull(last.shell), runtime: versionOrNull(last.runtime) }
+  };
+}
+function parseIgnoredKey(key) {
+  const at = key.indexOf(":");
+  if (at <= 0) return { kind: null, version: key };
+  const prefix = key.slice(0, at);
+  const version = key.slice(at + 1).trim();
+  if (version === "") return { kind: null, version: key };
+  return prefix === "shell" || prefix === "runtime" ? { kind: prefix, version } : { kind: null, version: key };
+}
+function ignoredRows(ignored) {
+  const rows = [...new Set(ignored)].map((key) => {
+    const { kind, version } = parseIgnoredKey(key);
+    return { key, kind, version, label: kind === null ? key : `${KIND_LABELS[kind]} ${version}` };
+  });
+  const rank = (row) => row.kind === "shell" ? 0 : row.kind === "runtime" ? 1 : 2;
+  return rows.sort((a, b) => rank(a) - rank(b) || b.version.localeCompare(a.version, void 0, { numeric: true }));
+}
+function updateNoticeEnabledHint(enabled) {
+  return enabled ? "\u5E94\u7528\u542F\u52A8\u540E\u4F1A\u68C0\u67E5\u684C\u9762\u58F3\u4E0E DSH \u8FD0\u884C\u65F6\u7248\u672C\uFF0C\u6709\u65B0\u7248\u672C\u65F6\u5728\u5E94\u7528\u5185\u5F39\u7A97\u63D0\u9192\uFF08\u540C\u4E00\u7248\u672C\u53EA\u63D0\u9192\u4E00\u6B21\uFF0C\u51FA\u73B0\u66F4\u9AD8\u7248\u672C\u624D\u518D\u5F39\uFF09\u3002\u6258\u76D8\u91CC\u7684\u300C\u68C0\u67E5\u66F4\u65B0\u300D\u968F\u65F6\u53EF\u7528\u3002" : "\u5173\u6389\u540E\u542F\u52A8\u4E0D\u518D\u5F39\u63D0\u9192\u3002\u6258\u76D8\u91CC\u7684\u300C\u68C0\u67E5\u66F4\u65B0\u300D\u968F\u65F6\u53EF\u7528\u2014\u2014\u624B\u52A8\u68C0\u67E5\u4E0D\u53D7\u8FD9\u4E2A\u5F00\u5173\u7EA6\u675F\u3002";
+}
+function ignoredEmptyHint() {
+  return "\u6CA1\u6709\u88AB\u5FFD\u7565\u7684\u7248\u672C\u3002";
+}
+
+// src/client/desktop-settings/cards/update-card.tsx
 var import_jsx_runtime18 = require("react/jsx-runtime");
 function UpdateCard() {
   const [updateState, setUpdateState] = (0, import_react17.useState)(null);
@@ -3018,6 +3060,38 @@ function UpdateCard() {
     }, 1e3);
     return () => clearInterval(timer);
   }, [updateBusy]);
+  const [updateNotice, setUpdateNotice] = (0, import_react17.useState)(null);
+  const [updateNoticeError, setUpdateNoticeError] = (0, import_react17.useState)(null);
+  const refreshUpdateNotice = () => {
+    void invoke2("get_update_notice_state").then((raw) => {
+      setUpdateNotice(parseUpdateNoticeState(raw));
+      setUpdateNoticeError(null);
+    }).catch((e) => setUpdateNoticeError(String(e)));
+  };
+  (0, import_react17.useEffect)(() => {
+    refreshUpdateNotice();
+  }, []);
+  const afterUpdateNoticeWrite = (raw) => {
+    setUpdateNotice(parseUpdateNoticeState(raw));
+    setUpdateNoticeError(null);
+  };
+  const failUpdateNoticeWrite = (e) => setUpdateNoticeError(String(e));
+  const handleToggleUpdateNotice = (enabled) => {
+    setUpdateNotice((prev) => prev === null ? prev : { ...prev, enabled });
+    void invoke2("set_update_notice_enabled", { enabled }).then(afterUpdateNoticeWrite).catch((e) => {
+      failUpdateNoticeWrite(e);
+      refreshUpdateNotice();
+    });
+  };
+  const handleRestoreIgnored = (row) => {
+    if (row.kind === null) return;
+    void invoke2("restore_update_notice", {
+      targets: [{ kind: row.kind, version: row.version }]
+    }).then(afterUpdateNoticeWrite).catch(failUpdateNoticeWrite);
+  };
+  const handleClearIgnored = () => {
+    void invoke2("clear_update_notice_ignored").then(afterUpdateNoticeWrite).catch(failUpdateNoticeWrite);
+  };
   return /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(SectionBox, { title: "\u5E94\u7528\u66F4\u65B0", children: [
     /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: updateState === null ? "\u8BFB\u53D6\u4E2D\u2026" : `\u5F53\u524D\u7248\u672C ${updateState.view.current || "\u672A\u77E5"}${updateState.view.channel ? `\uFF08${updateState.view.channel}\uFF09` : ""} \xB7 ${updateState.view.label}` }),
     updateState !== null && updateState.view.message !== "" && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: updateState.view.message }),
@@ -3058,6 +3132,44 @@ function UpdateCard() {
           children: "\u91CD\u542F\u5E76\u5B89\u88C5"
         }
       )
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: { ...ROW_STYLE, marginTop: 16 }, children: /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
+        "input",
+        {
+          type: "checkbox",
+          "data-desktop-settings": "update-notice-enabled",
+          checked: updateNotice?.enabled ?? false,
+          disabled: updateNotice === null,
+          onChange: (e) => handleToggleUpdateNotice(e.target.checked)
+        }
+      ),
+      "\u542F\u52A8\u65F6\u6709\u65B0\u7248\u672C\u5C31\u63D0\u9192\uFF08\u7F3A\u7701\u5F00\uFF09"
+    ] }) }),
+    updateNoticeError !== null && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: DANGER_NOTE_STYLE, children: updateNoticeError }),
+    updateNotice !== null && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: updateNoticeEnabledHint(updateNotice.enabled) }),
+    updateNotice !== null && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { style: { marginTop: 8 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: { fontWeight: 600, marginBottom: 4 }, children: "\u5DF2\u5FFD\u7565\u7684\u7248\u672C" }),
+      (() => {
+        const rows = ignoredRows(updateNotice.ignored);
+        if (rows.length === 0) return /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: ignoredEmptyHint() });
+        return /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { children: [
+          rows.map((row) => /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { style: { ...ROW_STYLE, marginBottom: 4 }, children: [
+            /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { style: FLEX_1_STYLE, children: row.label }),
+            /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
+              PfBtn,
+              {
+                variant: "ghost",
+                disabled: row.kind === null,
+                onClick: () => handleRestoreIgnored(row),
+                children: "\u6062\u590D"
+              }
+            )
+          ] }, row.key)),
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: "\u6807\u300C\u672A\u77E5\u6765\u6E90\u300D\u7684\u6761\u76EE\u662F\u65E9\u671F\u683C\u5F0F\u5199\u7684\uFF0C\u6CA1\u6CD5\u5355\u72EC\u6062\u590D\uFF0C\u7528\u300C\u6E05\u7A7A\u5168\u90E8\u300D\u4E00\u5E76\u6E05\u6389\u3002" }),
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: { marginTop: 4 }, children: /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(PfBtn, { variant: "ghost", onClick: handleClearIgnored, children: "\u6E05\u7A7A\u5168\u90E8" }) })
+        ] });
+      })()
     ] })
   ] });
 }

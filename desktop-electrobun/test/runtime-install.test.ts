@@ -3,16 +3,18 @@
 // 装树流程用假 spawn 驱动（不真跑 pnpm）：假 spawn 负责「写出一棵合法的运行时树 + 打进度行 + 退出」，
 // 于是这条链上的每个判定（工作区文件内容、进度、失败清理、成功判据、超时）都能在毫秒级验到。
 
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { basename, delimiter, dirname, join } from 'node:path'
 import { afterEach, describe, expect, test } from 'bun:test'
+import { STAGING_PREFIX, purgeStagingDirs } from '../src/bun/runtime-store.ts'
 import {
   OUTPUT_TAIL_LINES,
   createRuntimeDownloader,
   ensureNodeShim,
   ensureShimDir,
   installRuntime,
+
   RuntimeInstallCancelledError,
   nodeShimScript,
   parsePnpmProgress,
@@ -308,7 +310,10 @@ describe('installRuntime', () => {
       '@deepseek-ai/dsh@9.9.9',
     ])
     const options = fake.calls[0]?.options ?? {}
-    expect(options.cwd).toBe(dir)
+    // cwd 是安装期的临时目录（.staging-<版本>-<uuid>），不是正式目录
+    expect(basename(String(options.cwd))).toStartWith(`${STAGING_PREFIX}9.9.9-`)
+    expect(dirname(String(options.cwd))).toBe(join(appSupport, 'runtimes'))
+    expect(existsSync(String(options.cwd))).toBe(false) // 成功后已 rename 掉
     const env = options.env as Record<string, string>
     // 垫片目录接在 PATH 最前，分隔符按平台（Windows 是 `;`）
     expect(env.PATH?.startsWith(`/shim${delimiter}`)).toBe(true)
@@ -379,6 +384,58 @@ describe('installRuntime', () => {
       installRuntime({ appSupport, version: '9.9.9', bunPath: '/bin/bun', pnpmCjs: '/p/pnpm.cjs', timeoutMs: 30, spawnImpl }),
     ).rejects.toThrow('安装超时')
     expect(killed).toBe(true)
+  })
+})
+
+describe('半成品不发布：装在 .staging-* 里，成功才 rename 成正式目录（#139 真机）', () => {
+  test('安装过程中正式目录不存在（面板不会把 89% 的半装树当成已下载）', async () => {
+    const appSupport = tempDir()
+    const finalDir = join(appSupport, 'runtimes', '9.9.9')
+    const duringInstall: boolean[] = []
+    const fake = fakeSpawn(({ dir }) => {
+      duringInstall.push(existsSync(finalDir))
+      writeRuntimeTree(dir)
+      return { code: 0 }
+    })
+    await installRuntime({ appSupport, version: '9.9.9', bunPath: '/bin/bun', pnpmCjs: '/p/pnpm.cjs', spawnImpl: fake.spawnImpl })
+    expect(duringInstall).toEqual([false])
+  })
+
+  test('成功后整棵发布到正式目录，临时目录不在了', async () => {
+    const appSupport = tempDir()
+    const finalDir = join(appSupport, 'runtimes', '9.9.9')
+    const fake = fakeSpawn(({ dir }) => {
+      writeRuntimeTree(dir)
+      return { code: 0 }
+    })
+    await installRuntime({ appSupport, version: '9.9.9', bunPath: '/bin/bun', pnpmCjs: '/p/pnpm.cjs', spawnImpl: fake.spawnImpl })
+    expect(existsSync(join(finalDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))).toBe(true)
+    expect(readdirSync(join(appSupport, 'runtimes')).filter((name) => name.startsWith(STAGING_PREFIX))).toEqual([])
+  })
+
+  test('失败：临时目录清干净，正式目录从头到尾不存在', async () => {
+    const appSupport = tempDir()
+    const fake = fakeSpawn(({ dir }) => {
+      writeRuntimeTree(dir)
+      return { code: 1, stderr: 'ERR_PNPM_NO_MATCHING_VERSION' }
+    })
+    await expect(
+      installRuntime({ appSupport, version: '9.9.9', bunPath: '/bin/bun', pnpmCjs: '/p/pnpm.cjs', spawnImpl: fake.spawnImpl }),
+    ).rejects.toThrow('安装失败（exit 1）')
+    expect(readdirSync(join(appSupport, 'runtimes')).filter((name) => name.startsWith(STAGING_PREFIX))).toEqual([])
+    expect(existsSync(join(appSupport, 'runtimes', '9.9.9'))).toBe(false)
+  })
+
+  test('purgeStagingDirs 只扫安装残留，正式版本与回收站不动', () => {
+    const appSupport = tempDir()
+    const runtimes = join(appSupport, 'runtimes')
+    writeRuntimeTree(join(runtimes, '0.2.1-alpha.2'))
+    mkdirSync(join(runtimes, `${STAGING_PREFIX}0.2.1-rc.2-abc`), { recursive: true })
+    mkdirSync(join(runtimes, `${STAGING_PREFIX}0.2.1-rc.1-def`), { recursive: true })
+    mkdirSync(join(runtimes, '.trash', 'x'), { recursive: true })
+    expect(purgeStagingDirs(appSupport)).toBe(2)
+    expect(readdirSync(runtimes).sort()).toEqual(['.trash', '0.2.1-alpha.2'])
+    expect(purgeStagingDirs(appSupport)).toBe(0)
   })
 })
 

@@ -27,6 +27,7 @@ import { FOLLOWER_WAIT_MS, GetCoalescer, aggregationPolicy, type SharedGet } fro
 import { isWindowControlAction, type WindowControlAction, type WindowMaxState } from './window-max.ts'
 import type { ProfileOpRequest, ProfileOpResult } from './profile-dialog.ts'
 
+
 /** 官方 web-document.ts 的同一行：index 会等异步的 Host 注入，先把 promise 挂上。 */
 export const BOOT_LINE = '<script>globalThis.__DSH_BOOT_READY__ = Promise.withResolvers()</script>'
 
