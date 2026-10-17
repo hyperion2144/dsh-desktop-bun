@@ -10,13 +10,21 @@
  * `x-dsh-shell-view`。壳侧查表得到视图种类，再按种类放行命令：
  *   - `shell`：壳自己的页面（主窗 / 各 profile 窗口）——全部命令；
  *   - `guest`：贴进来的不可信网页（侧边栏浏览器）——**任何**壳命令都不放行，只留「报日志」
-*     这一条；它仍然要能开外链、弹右键菜单（那两条端点只认 token，不认命令白名单）。
+ *     这一条。它今天连视图身份都没有：guest 子视图以 `sandbox: true` 建窗、只装 DOM 垫片
+ *     （acceptShimScript，无 RPC），加载的是远端 URL，也**从不签发 token**（全仓 `views.issue`
+ *     只有 shell 与 remote 两处）。它打 loopback 的请求到不了这里——admission 按
+ *     `Origin` / `Sec-Fetch-Site` 判 cross-site，直接 403。
  *   - `remote`（#47）：**配对**远程设备（mobile-access lane 桥）——对齐旧壳 `remote-desktop.json`
  *     的语义：受配对 cookie 门禁 + 命令白名单双重约束，只放行通知族等显式列出的命令；
  *     不可信 guest 不因 remote 的存在多放一条命令。
  *
  * 为什么要按种类白名单而不是「不给 guest 装桥」：装了桥的页面就是不可信页面，白名单是最后一道
  * 闸（旧壳对应的是「远程窗口不装 dshDesktop 载体」，见 docs/research/shell-capability-inventory.md:72）。
+ *
+ * 与 HTTP 自答面的关系（#130）：`/__shell__/*` 的第一道闸是**网络准入（同源）**，第二道才是这里
+ * 的视图授权——需要身份的端点各自叠 `authorize(request, null)`（任何已登记视图即放行，不按命令
+ * 白名单细分），不需要的（`health` 探活、跨进程 `activate`）在 ADR-0003 的权限附录里逐条写明。
+ * 注意同源闸门只约束浏览器：本机进程没有 `Origin` / `Sec-Fetch-Site`，它拦不住。
  */
 
 /** 视图种类：壳自己的页面 / 外来网页 / 配对远程设备（#47）。 */

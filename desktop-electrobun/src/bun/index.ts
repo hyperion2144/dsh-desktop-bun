@@ -1360,6 +1360,8 @@ function updateNoticeRpcFor(profile: string): Promise<unknown> {
     run: (op) => uiService().updateNoticeOp(op),
     // 页面只读的下载进度：同一个单飞下载器的状态，壳算好百分比再递给页面。
     downloadStatus: () => uiService().downloadStatus(),
+    // 页面量好的窗高（#130）：句柄按当前 x/y/宽度重设，只动高度；窗已关就安静跳过。
+    resize: (height) => updateNoticeWindows.get(profile)?.resize(height),
   })
   updateNoticeRpcs.set(profile, created)
   return created
@@ -1385,6 +1387,14 @@ async function openUpdateNotice(profile: string, payload: UpdateNoticePayload): 
 
         on(event: 'closed', handler: () => void): void {
           this.win.on('closed', handler)
+        }
+
+        getFrame(): { x: number; y: number; width: number; height: number } {
+          return this.win.getFrame()
+        }
+
+        setFrame(x: number, y: number, width: number, height: number): void {
+          this.win.setFrame(x, y, width, height)
         }
       },
       { renderer, rpc },

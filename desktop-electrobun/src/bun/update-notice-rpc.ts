@@ -16,7 +16,13 @@
  * 挂点与 `attachShellRpc` 同一个路子：handlers 纯逻辑可单测，electrobun 运行时只在
  * 真开窗时才动态载入。
  */
-import { UPDATE_NOTICE_OP_METHOD, updateNoticeOp, type UpdateNoticeOp } from './update-notice-dialog.ts'
+import {
+  UPDATE_NOTICE_OP_METHOD,
+  UPDATE_NOTICE_RESIZE_METHOD,
+  updateNoticeOp,
+  updateNoticeResizeHeight,
+  type UpdateNoticeOp,
+} from './update-notice-dialog.ts'
 import { downloadPercent } from '../shared/runtime-download-progress.ts'
 
 /** 只读的下载状态查询方法名（与壳命令表同名，页面按名字叫）。 */
@@ -30,6 +36,8 @@ export interface UpdateNoticeRpcDeps {
   run: (op: UpdateNoticeOp) => Promise<unknown>
   /** 运行时下载器的当前状态（只读；壳算好百分比再递给页面）。 */
   downloadStatus: () => { active: boolean; version: string; resolved: number; downloaded: number }
+  /** 页面量好的窗高（#130）：壳按当前 x/y/宽度重新 setFrame，只动高度。 */
+  resize: (height: number) => void
 }
 
 /** handlers 表（纯逻辑，可单测）：形状不认就不猜，直接 throw 让页面显示失败。 */
@@ -47,6 +55,13 @@ export function updateNoticeRpcRequests(deps: UpdateNoticeRpcDeps): {
       [UPDATE_NOTICE_STATUS_METHOD]: async () => {
         const status = deps.downloadStatus()
         return { active: status.active, version: status.version, percent: downloadPercent(status) }
+      },
+      // 页面量完自己的内容高就叫一次：壳只动高度，位置与宽度保持（#130）。
+      [UPDATE_NOTICE_RESIZE_METHOD]: async (params: unknown) => {
+        const height = updateNoticeResizeHeight(params)
+        if (height === null) throw new Error('窗高不认这个负载')
+        deps.resize(height)
+        return {}
       },
     },
   }

@@ -140,6 +140,9 @@ describe('每视图授权：壳端点', () => {
         return Promise.resolve({ status: 200, body: { ok: true, value: { echo: parsed.cmd } } })
       },
       onOpenExternal: (url) => calls.push(`external:${url}`),
+      onContextMenu: (request) => calls.push(`context-menu:${request.linkUrl ?? ''}`),
+      onWindowControl: (action) => calls.push(`window:${action}`),
+      onInputConfirm: (flow, value) => calls.push(`confirm:${flow}:${value}`),
     })
     return {
       origin: server.origin,
@@ -279,6 +282,59 @@ describe('每视图授权：壳端点', () => {
       expect((await rpc(h.origin, grant.token, 'get_desktop_settings_data')).status).toBe(200)
       h.views.revokeLabel('profile-desktop')
       expect((await rpc(h.origin, grant.token, 'get_desktop_settings_data')).status).toBe(403)
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  // #130：壳自答端点里会**改变状态**的那几条（右键菜单 / 窗口控制 / 确认回填 / 批量转发）
+  // 以前只过网络准入（同源），不查视图 token。同源闸门只约束浏览器——本机进程直接打就能弹菜单、
+  // 关窗、代答确认弹窗，所以这一组守「未登记视图一律 403，且根本没落到回调」。
+  const MUTATING_ENDPOINTS: { name: string; path: string; body: string }[] = [
+    { name: 'context-menu', path: '/__shell__/context-menu', body: JSON.stringify({ linkUrl: 'https://example.com/x' }) },
+    { name: 'window', path: '/__shell__/window', body: JSON.stringify({ action: 'minimize' }) },
+    { name: 'input-confirm', path: '/__shell__/input-confirm', body: JSON.stringify({ flow: 'f1', value: 'v' }) },
+    { name: 'batch', path: '/__shell__/batch', body: JSON.stringify({ requests: [{ method: 'GET', path: '/api/x' }] }) },
+  ]
+
+  for (const endpoint of MUTATING_ENDPOINTS) {
+    test(`${endpoint.name}：不带 token 被拒，且没有落到回调`, async () => {
+      const h = await harness()
+      try {
+        const denied = await fetch(`${h.origin}${endpoint.path}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: endpoint.body,
+        })
+        expect(denied.status).toBe(403)
+        expect(await denied.text()).toContain('shell view token required')
+        expect(h.calls).toEqual([])
+      } finally {
+        h.cleanup()
+      }
+    })
+  }
+
+  test('context-menu：已登记视图能弹（与 open-external 同级，不按命令白名单细分）', async () => {
+    const h = await harness()
+    try {
+      const shell = h.views.issue('shell', 'desktop', 'profile-desktop')
+      const ok = await fetch(`${h.origin}/__shell__/context-menu`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', [VIEW_TOKEN_HEADER]: shell.token },
+        body: JSON.stringify({ linkUrl: 'https://example.com/x' }),
+      })
+      expect(ok.status).toBe(204)
+      expect(h.calls).toEqual(['context-menu:https://example.com/x'])
+      // guest 是有 token 的视图就放行——这一层只管「是不是壳的页面」，不管命令白名单
+      const guest = h.views.issue('guest', 'desktop', 'browser-guest-1')
+      const viaGuest = await fetch(`${h.origin}/__shell__/context-menu`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', [VIEW_TOKEN_HEADER]: guest.token },
+        body: JSON.stringify({}),
+      })
+      expect(viaGuest.status).toBe(204)
+      expect(h.calls).toHaveLength(2)
     } finally {
       h.cleanup()
     }

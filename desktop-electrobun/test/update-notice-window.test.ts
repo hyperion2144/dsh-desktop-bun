@@ -124,4 +124,59 @@ describe('createUpdateNoticeWindow', () => {
     expect(win.closed).toBe(true)
     expect(handle.isOpen()).toBe(false)
   })
+
+  // #130：窗是固定 560×300 开的，内容一多就把页脚裁掉。页量完高度叫 resize，
+  // 这里只动高度——位置一变用户会以为窗在跳。
+  test('resize 只改高度，位置与宽度照旧', () => {
+    const { ctor, made } = fakeCtor()
+    const handle = createUpdateNoticeWindow(ctor)
+    const win = handle.open(payload()) as FakeWindow & {
+      getFrame(): { x: number; y: number; width: number; height: number }
+      setFrame(x: number, y: number, width: number, height: number): void
+    }
+    const frames: { x: number; y: number; width: number; height: number }[] = []
+    let frame = { x: 120, y: 80, width: UPDATE_NOTICE_WIDTH, height: UPDATE_NOTICE_HEIGHT }
+    win.getFrame = () => frame
+    win.setFrame = (x, y, width, height) => {
+      frame = { x, y, width, height }
+      frames.push(frame)
+    }
+    handle.resize(438)
+    expect(frames).toEqual([{ x: 120, y: 80, width: UPDATE_NOTICE_WIDTH, height: 438 }])
+    // 同一个高度再报一次（页面轮询/抖动）不重复 setFrame。
+    handle.resize(438)
+    expect(frames).toHaveLength(1)
+    expect(win.closed).toBe(false)
+    expect(made).toHaveLength(1)
+  })
+
+  test('假窗不实现 setFrame 时安静跳过，不弄挂开窗', () => {
+    const { ctor } = fakeCtor()
+    const handle = createUpdateNoticeWindow(ctor)
+    handle.open(payload())
+    expect(() => handle.resize(438)).not.toThrow()
+  })
+
+  test('窗没开/已关时 resize 什么都不做', () => {
+    const { ctor } = fakeCtor()
+    const handle = createUpdateNoticeWindow(ctor)
+    expect(() => handle.resize(438)).not.toThrow()
+    handle.open(payload())
+    handle.close()
+    expect(() => handle.resize(438)).not.toThrow()
+  })
+
+  test('原生 setFrame 抛错也不外溢：窗高只是附带舒适修，不能把提醒弄挂', () => {
+    const { ctor } = fakeCtor()
+    const handle = createUpdateNoticeWindow(ctor)
+    const win = handle.open(payload()) as FakeWindow & {
+      getFrame(): { x: number; y: number; width: number; height: number }
+      setFrame(x: number, y: number, width: number, height: number): void
+    }
+    win.getFrame = () => ({ x: 0, y: 0, width: UPDATE_NOTICE_WIDTH, height: UPDATE_NOTICE_HEIGHT })
+    win.setFrame = () => {
+      throw new Error('window gone')
+    }
+    expect(() => handle.resize(438)).not.toThrow()
+  })
 })

@@ -56,4 +56,24 @@
 - 已知残留（本票记录，未修）：
   - `rpc-bridge.ts` 的 `notifyWindowState` 仍向页面推 `window_state_changed`，但新的 dispatcher 只处理 `type:'response'`，这条推送现在结构性无接收方。它在本票之前就没有生产订阅者（插件侧 `onMessage` 零订阅），不是本票引入的回归，但「要么接上订阅方、要么删掉推送」是一张待开的票。
   - stream 聚合档位下，跟随者仍 `await joined.buffered` 等领头整条读完，没有超时也没有取消——与 #54 同源的问题，本票未动。
-  - `context-menu` 的请求解析在 `commands.ts` 与保留的 `shell-server.ts` 路由里各有一份且已经漂移（取值写法不同、语义相同）。抽取共享解析器的收益不大、风险不小，留作独立票。
+  - ~~`context-menu` 的请求解析在 `commands.ts` 与保留的 `shell-server.ts` 路由里各有一份且已经漂移~~ —— **已解决（#144-2）**：两边共用 `context-menu.ts` 的 `parseContextMenuRequest`，只剩一份。
+
+## 权限附录：`/__shell__/*` 各端点的鉴权口径（#130 追加）
+
+「保留哪条路由」看决策 4；「那条路由要不要验身份」看这里。两层闸：**第一道网络准入**（`shared/admission.ts` 的 `decide`，同源才放行，跨站一律 403）→ **第二道视图授权**（`authorize()`，查 `x-dsh-shell-view`）。
+
+补第二道之前的事故面：只有 `boot` / `rpc` / `open-external` 验了视图，`context-menu` / `window` / `input-confirm` / `batch` 没有。同源闸门只约束浏览器——本机进程没有 `Origin` / `Sec-Fetch-Site`，`isCrossSite()` 会把它当同源放行，于是「任意本机进程」能弹原生菜单（菜单里的「打开 / 打开文件夹」最终落到 `Utils.openPath(绝对路径)`，而命令表里根本没有 `open_path`，这条菜单是它唯一入口）、能关窗/最小化、能用一个伪造值代答挂起的确认弹窗。
+
+| 端点 | 视图授权 | 理由 / 谁在调 |
+| --- | --- | --- |
+| `GET /__shell__/health` | 无 | 只读探活，远程监测与启动探针用；不带任何变更能力 |
+| `GET /__shell__/boot` | `authorize(null)` | 注入包；页面拿不到就等于黑屏 |
+| `POST /__shell__/rpc` | `authorize(cmd)` + `isCommandAllowed` | 命令漏斗；远程页面由 mobile-access 插件带 remote token 中继 |
+| `POST /__shell__/open-external` | `authorize(null)` | 任何已登记视图都能开外链；先过 `isExternalUrl` |
+| `POST /__shell__/context-menu` | `authorize(null)`（#130 补） | 兼容面，壳内已无生产者（#128 起走 RPC `show_context_menu`） |
+| `POST /__shell__/window` | POST `authorize(null)`（#130 补）；GET 不验 | 变更态才需要身份；GET 只读 window state，与 RPC 的 `window_get_state` 同级 |
+| `POST /__shell__/input-confirm` | `authorize(null)`（#130 补） | 能解答挂起的确认弹窗，不验身份等于任何人可代答 |
+| `POST /__shell__/batch` | `authorize(null)`（#130 补） | 会替调用方打上游；手机端本来就到不了（lane 是纯 TCP 转发，跨站早被第一道闸拦） |
+| `POST /__shell__/activate` | 无 | 第二个实例 → 既有实例的跨进程调用；它没有视图，也**不可能**有 token |
+
+两条口径不在表里就会各自拍：①`authorize(null)` = 「任何**已登记**视图都行」，不按命令白名单细分（与 `open-external` 同级）；②`views === undefined`（只建壳不接视图注册表，多见于单测）时 `authorize()` 直接放行，所以新增鉴权不会弄挂这类测试。

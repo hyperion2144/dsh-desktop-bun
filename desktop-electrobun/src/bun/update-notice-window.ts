@@ -22,6 +22,9 @@ import {
 export interface NoticeWindowLike {
   close(): void
   on(event: 'closed', handler: () => void): void
+  /** 改窗高（#130）：页面量完内容高后叫。假窗可不实现，句柄会安静跳过。 */
+  getFrame?(): { x: number; y: number; width: number; height: number }
+  setFrame?(x: number, y: number, width: number, height: number): void
 }
 
 export interface NoticeWindowOptions {
@@ -45,6 +48,8 @@ export interface UpdateNoticeWindowHandle {
   open(payload: UpdateNoticePayload): NoticeWindowLike | null
   /** 关掉并清句柄；本来就关着也不报错。 */
   close(): void
+  /** 按页面量好的高度重设窗高，位置与宽度保持；窗没开/假窗不支持时什么都不做。 */
+  resize(height: number): void
   isOpen(): boolean
 }
 
@@ -84,6 +89,22 @@ export function createUpdateNoticeWindow(
       if (win === null) return
       win.close()
       forget()
+    },
+    resize(height: number): void {
+      if (win === null) return
+      const setFrame = win.setFrame
+      const getFrame = win.getFrame
+      // 假窗（单测）不实现这两个可选项：安静跳过，不报错也不弄挂开窗流程。
+      if (setFrame === undefined || getFrame === undefined) return
+      // 原生调用一律包一层：量窗高是附带的舒适修（#130），它失败不该把提醒本身弄挂。
+      try {
+        const frame = getFrame.call(win)
+        if (frame.height === height) return
+        // 只动高度：页脚在底部，位置一变用户会以为窗在跳。
+        setFrame.call(win, frame.x, frame.y, frame.width, height)
+      } catch {
+        // 窗已经被关掉/系统拒绝 setFrame：保持原尺寸，不做第二手补偿。
+      }
     },
   }
 }
