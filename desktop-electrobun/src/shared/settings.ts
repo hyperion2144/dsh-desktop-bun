@@ -176,7 +176,7 @@ export const NOTIFICATION_GROUPS: ReadonlyArray<readonly [string, string]> = [
 export const NOTIFICATION_SCENARIOS: readonly ScenarioMeta[] = [
   { id: 'startup.error', group: 'g-run', name: '启动受阻', desc: 'spawn 失败 · 自愈封顶', defaultOn: true },
   { id: 'runtime.switch', group: 'g-run', name: '运行时切换', desc: '内置 / 已下载版本切换结果', defaultOn: true },
-  { id: 'runtime.download', group: 'g-run', name: '运行时下载', desc: '运行时下载开始 / 失败', defaultOn: true },
+  { id: 'runtime.download', group: 'g-run', name: '运行时下载', desc: '运行时下载完成 / 失败', defaultOn: true },
   { id: 'service.health', group: 'g-run', name: '服务健康', desc: '不可达 · 自动重启', defaultOn: true },
   { id: 'window.lifecycle', group: 'g-win', name: '窗口生命周期', desc: '窗口恢复 / 异常', defaultOn: false },
   { id: 'instance.lifecycle', group: 'g-win', name: '实例生命周期', desc: '端口认领冲突 / 归属提示', defaultOn: false },
@@ -389,6 +389,29 @@ export function defaultPortForProfile(profile: string): number {
   if (profile === 'web') return 3080
   if (profile === 'desktop') return 3081
   return PORT_BASE_OTHER + Number(fnv1a64(profile) % 512n)
+}
+
+/** 默认 lane 端口（旧壳 default_lane_port_for_profile：web 3092 / desktop 3093 / 其余 3094+散列%512）。 */
+/** 保存前后哪些端口键变了（config.info「端口保存等低危信息」的事实源；表键按 JSON 序列化比对）。 */
+export function changedPortKeys(before: DesktopSettings, after: DesktopSettings): string[] {
+  const changed: string[] = []
+  const simple: Array<[keyof DesktopSettings, string]> = [
+    ['port', '上游端口'],
+    ['lanePort', 'lane 端口'],
+    ['laneForwarderPort', 'lane 转发端口'],
+  ]
+  for (const [key, label] of simple) {
+    if (before[key] !== after[key]) changed.push(label)
+  }
+  const maps: Array<[keyof DesktopSettings, string]> = [
+    ['profilePorts', 'profile 端口表'],
+    ['profileLanePorts', 'profile lane 端口表'],
+    ['profilePagePorts', 'profile 页面端口表'],
+  ]
+  for (const [key, label] of maps) {
+    if (JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null)) changed.push(label)
+  }
+  return changed
 }
 
 /** 默认 lane 端口（旧壳 default_lane_port_for_profile：web 3092 / desktop 3093 / 其余 3094+散列%512）。 */

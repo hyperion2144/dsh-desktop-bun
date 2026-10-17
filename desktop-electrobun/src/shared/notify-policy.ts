@@ -113,6 +113,7 @@ export function soundChoice(raw: string): SoundChoice {
 /**
  * 投递决策（纯函数，旧壳 `decide()` 逐条对齐）：
  *   · 总开关关 / 场景关            → 不投递
+ *   · 窗口在前台聚焦（#115）        → 不投递（UI 就在眼前，通知是噪音）
  *   · 免打扰开且命中时段，或全屏静默开且正在全屏 → 投递但静默
  *   · 声音：静默命中 → silent；否则按场景档位
  */
@@ -121,12 +122,18 @@ export function decide(
   scenarioId: string,
   now: { hour: number; minute: number },
   fullscreen: boolean,
+  focused: boolean,
 ): NotifyDecision {
   if (!config.enabled) {
     return { deliver: false, silent: false, sound: { kind: 'silent' } }
   }
   const scenario = config.scenarios[scenarioId] ?? defaultScenarioConfig(scenarioId)
   if (!scenario.enabled) {
+    return { deliver: false, silent: false, sound: { kind: 'silent' } }
+  }
+  // #115：窗口在前台聚焦 → 整条不投递（不只是静默）：UI 就在眼前，通知中心里也不该留记录。
+  // 判定放在总开关 / 场景开关之后：开关关掉本来就什么都不投，先判更省事。
+  if (focused) {
     return { deliver: false, silent: false, sound: { kind: 'silent' } }
   }
   const dnd = config.dnd

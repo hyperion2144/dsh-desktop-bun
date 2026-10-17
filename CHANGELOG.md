@@ -9,7 +9,7 @@
 - 桌面壳本体：Electrobun（Bun 主进程）+ CEF 渲染，随包内置 dsh 运行时，三平台安装包（macOS DMG / Windows NSIS 安装器 / Linux 安装包）。
 - 多 profile 多窗口：每 profile 独立窗口、端口与服务进程；托盘聚焦/停止实例、新建与迁移 profile；每窗独立几何记忆。
 - 托盘：显示/隐藏窗口、profile 窗口分组、运行时版本切换（内置/已下载/下载并切换）、dsh 服务地址（本地/远程）、注册 dsh 系统命令、重启与退出。
-- 通知：14 场景策略（独立开关与音效）、免打扰时段、全屏静默、系统事件音（macOS/Windows/Linux）。
+- 通知：15 场景策略（独立开关与音效）、免打扰时段、全屏静默、系统事件音（macOS/Windows/Linux）。
 - 防休眠：会话运行期间阻止系统空闲休眠（等待审批不算运行）。
 - 设置：27 项与旧版配置同源（旧设置文件自动迁移），设置面板数据面齐备。
 - 手机访问：遗留 lane 端口 TCP 转发器 + 每 profile 端口分配（固定公式、冲突顺延）。
@@ -37,6 +37,11 @@
 ### Fixed
 - Windows 侧栏顶部拖拽区吃掉官方折叠按钮，点击失灵（#121）：拖窗改回官方声明式机制——WebView2 直接把 `[data-windows-titlebar] .frame::before`（`-webkit-app-region: drag`）当真标题栏（拖窗 + 系统菜单 + 双击最大化），壳不再注入拖拽热区；壳三键显式 `-webkit-app-region: no-drag`（Electrobun 无 windowControlsOverlay，Electron 那层保护不存在），Linux（CEF）因无 app-region 仍保留注入的两段热区。顺带退役插件 #44 的 darwin 单行化 CSS，侧栏头回到官方两行几何。
 - 冷启动时托盘排在最后，DSH 起不来（运行时版本问题等）就彻底没有自救入口（#117）：服务面改为**先于 DSH 存在**——`startService` 只把壳自己的面立起来（托盘/设置/profile/退出都不依赖 DSH），DSH 改由新的 `ShellService.ensureRunning()` 拉起，并新增 `state.status`（`stopped`/`starting`/`running`/`failed`/`blocked`）与 `state.error` 作为壳内唯一事实源。`layout()` 不再因找不到运行时而抛，原因改走新的 `ShellLayout.unresolved`（探针 `DSH_SHELL_RESOLVE_ONLY=1` 的非零退出契约保留）。冷启动编排改为「服务面 → 托盘 → 启动界面 → DSH → 桌面窗口」：托盘状态行按 `serviceStatus` 讲清「运行中 / 启动中 / 未运行（托盘已就绪）/ 未起来（原因）/ 已阻塞（原因）」，DSH 拉不起来时不再「报错→30 秒→自己退掉」，而是留着托盘与启动界面，用户换一个运行时版本就能再试。托盘「切换运行时」不再依赖 DSH 就绪（写 `desktop-settings.json` 是纯文件 IO），按当前状态分流：已在跑走树级全重启（#79 Q2 语义不变），未起来走 `ensureRunning()` 直接拉；切「内置」也写版本号而不是 `null`（与设置面板写法一致，#97 裁决）。
+- 应用窗口在前台聚焦时不再投递通知（#115）：通知决策层新增「窗口在前台聚焦」输入，聚焦即整条不投递（不是仅静默），失焦 / 隐藏 / 关窗后行为不变。
+- 运行时下载 / 切换与 profile 操作此前从不发系统通知（runtime.download / runtime.switch / profile.op / profile.error 四个场景零调用点，config.info 也只在动端口键时提示），现已全部接上：下载完成 / 失败（取消不扰）、切换结果、新建与迁移成败；托盘下载失败也从「启动受阻」场景挪回「运行时下载」（#115）。
+- 通知设置面板「被拒绝」横幅里的 tccutil 重置命令写死旧壳 bundle id（Tauri 时代残留 com.arcreel.dsh-desktop-tauriapp）：壳经 get_notifications_state 下发当前应用 id（构建期口径），面板按平台拼提示——Windows/Linux 没有 tccutil，不再出 mac 专属建议（#115）。
+- 面板的通知授权状态读的是启动时的缓存，系统设置里开关后要重启应用才可见：原生桥新增只刷状态不申请的 dsh_un_refresh，status() 读前踢一次异步刷新，面板打开后补拉一次（#115）。
+- macOS 打包 app 的通知授权此前永远弹不出系统授权窗（UNUserNotificationCenter 归属进程看的是【发起请求的进程自己的签名】是否认领 bundle id，而真正的 JS 主进程 `Contents/MacOS/bun` 构建期是 Apple 开发者签名——归属永远失败，requestAuthorization 恒 not_determined 且不弹窗；自首个包起就坏，一直靠系统设置手动开关兑底）。sign-app.mjs 改为三层 ad-hoc 重签：MacOS/ 下每个 Mach-O 以 `--identifier <CFBundleIdentifier>` 认领 bundle id（原样保留既有 entitlements）→ Frameworks 嵌套代码 → 外层（把 Info.plist 绑进 CFBundleExecutable 签名），弃用 `codesign --deep`（#115）。
 - Windows/Linux 右侧边栏经会话链接触发打开时间隔未生效（#112）：标题栏带改走官方声明式适配并上收壳 preload——壳给 <html> 打 data-windows-titlebar + --dsh-windows-titlebar-height（40px，对齐官方常量），host AppFrame CSS 结构性压下整帧并给右栏 panel 留出间隔（不再依赖插件 JS 观察器补 inline top，链接触发的首次挂载不再落盲区）；标题栏拖拽带与窗口三键随之上收壳 preload 注入（POST /__shell__/window 动作、GET 查最大化态，不依赖 dsh 页面与插件状态），插件退役 win32/linux 顶部 chrome（inline top 补丁、自绘三键及其样式与 RPC 面全部移除），darwin 系统红绿灯路径零变化。
 - Windows 系统通知改以应用名与应用图标显示（#107）：启动时 shell32 声明进程 AUMID 并注册 HKCU 通知身份（显示名 + 图标），失败降级不阻断启动。
 - 插件更新后不重启刷新页面不再卡「Loading plugins」：boot 载荷随宿主插件图变化即时刷新，boot 失败给出可重试的失败界面（#101）。

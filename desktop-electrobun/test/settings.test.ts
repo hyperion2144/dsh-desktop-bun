@@ -9,6 +9,7 @@ import {
   DEFAULT_PROFILE,
   NOTIFICATION_SCENARIOS,
   activeProfile,
+  changedPortKeys,
   defaultSettings,
   expandHome,
   normalizeSettings,
@@ -351,5 +352,23 @@ describe('layout > 解析失败不抛（#117）', () => {
     expect(result.home).toBe(home)
     expect(result.profileDir).toBe(join(home, 'profiles', 'web'))
     expect(result.runtimeDir).toBe(brokenTree)
+  })
+})
+
+describe('changedPortKeys：config.info 端口提示的事实源（#115）', () => {
+  test('没动端口键 = 空表（普通保存不打扰）', () => {
+    expect(changedPortKeys(normalizeSettings({}), normalizeSettings({ active_profile: 'web' }))).toEqual([])
+  })
+
+  test('动了标量端口键：按数组顺序报出对应中文键名', () => {
+    expect(
+      changedPortKeys(normalizeSettings({}), normalizeSettings({ port: 3080, lane_forwarder_port: 3099 })),
+    ).toEqual(['上游端口', 'lane 转发端口'])
+  })
+
+  test('动了 profile 端口表：按表名报', () => {
+    expect(changedPortKeys(normalizeSettings({}), normalizeSettings({ profile_lane_ports: { web: 3092 } }))).toEqual([
+      'profile lane 端口表',
+    ])
   })
 })

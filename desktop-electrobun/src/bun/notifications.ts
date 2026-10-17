@@ -14,6 +14,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSyn
 import { basename, join } from 'node:path'
 import {
   decide,
+  defaultScenarioConfig,
   hasAllowedSoundExtension,
   isValidSoundName,
   localHm,
@@ -61,6 +62,8 @@ export interface NotifierOptions {
   soundCapability?: SoundCapability
   /** 当前是否全屏（免打扰的「全屏静默」用）；缺省 false。 */
   isFullscreen?: () => boolean
+  /** 窗口是否在前台聚焦（#115：聚焦就整条不投递）；缺省 false（无窗口/测试保持既有行为）。 */
+  isFocused?: () => boolean
   /** 当前本地时刻；缺省 `new Date()`。 */
   now?: () => Date
   platform?: NodeJS.Platform
@@ -260,15 +263,29 @@ export function createNotifier(options: NotifierOptions): Notifier {
     return path
   }
 
-  const decideFor = (scenarioId: string): NotifyDecision =>
-    decide(options.notifications, scenarioId, localHm(now()), options.isFullscreen?.() ?? false)
+  /** 窗口是否在前台聚焦（#115）。没有焦点信息（无窗口模式 / 测试）时视为不聚焦。 */
+  const focusNow = (): boolean => options.isFocused?.() ?? false
+
+  const decideFor = (scenarioId: string, focused: boolean = focusNow()): NotifyDecision =>
+    decide(options.notifications, scenarioId, localHm(now()), options.isFullscreen?.() ?? false, focused)
+
+  /**
+   * 不投递的原因（只给日志用）：总开关 / 场景开关在先、聚焦在后，与 decide 的早退顺序一致——
+   * 关着总开关的人不该在日志里看到「窗口在前台聚焦」而去查错方向。
+   */
+  const suppressLabel = (scenarioId: string, focused: boolean): string => {
+    const scenario = options.notifications.scenarios[scenarioId] ?? defaultScenarioConfig(scenarioId)
+    if (focused && options.notifications.enabled && scenario.enabled) return '窗口在前台聚焦'
+    return '总开关或场景关闭'
+  }
 
   return {
     decide: decideFor,
     notify: (scenarioId: string, body: string, title?: string): NotifyDecision => {
-      const decision = decideFor(scenarioId)
+      const focused = focusNow()
+      const decision = decideFor(scenarioId, focused)
       if (!decision.deliver) {
-        log(`[notify] ${scenarioId} 未投递（总开关或场景关闭）`)
+        log(`[notify] ${scenarioId} 未投递（${suppressLabel(scenarioId, focused)}）`)
         return decision
       }
       const heading = title ?? appName

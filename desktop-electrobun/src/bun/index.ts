@@ -12,6 +12,7 @@ import { shellLogLine } from './shell-log.ts'
 import { bootPreloadScript } from './preload.ts'
 import { attachShellRpc } from './rpc-bridge.ts'
 import { startService, type ServiceOptions, type ShellService } from './service.ts'
+import { createWindowFocusTracker } from './window-focus.ts'
 import { createNativeNotify } from './notify-un.ts'
 import type { RuntimeSnapshot } from './commands.ts'
 import { ensureWindowsNotifyIdentity } from './win-notify-identity.ts'
@@ -117,6 +118,31 @@ const stoppingProfiles = new Set<string>()
 const trayHintShown = new Set<string>()
 /** 最近聚焦的窗口 profile；托盘「显示/隐藏窗口」作用在它身上（旧壳 focused_window_label）。 */
 let focusedProfile: string | null = null
+/** #115：此刻真正在前台的窗口（失焦 / 隐藏 / 关窗即清空）——通知的「聚焦不打扰」看它。 */
+const windowFocus = createWindowFocusTracker()
+
+/**
+ * #115：这个 profile 的窗口此刻是否真的挡在用户眼前——焦点记账 + 可见 / 最小化兜底。
+ * 焦点是事件记的账；隐藏回托盘、最小化到 Dock 这类路径平台不一定补 blur，所以再兜一道：
+ * 宁可多投一次通知，也不要对着眼前的窗口不响。
+ */
+function windowInFront(profile: string): boolean {
+  if (!windowFocus.isFocused(profile)) return false
+  const entry = windows.get(profile)
+  if (entry === undefined) return false
+  try {
+    return entry.window.isVisible() && !entry.window.isMinimized()
+  } catch {
+    // 窗口正在销毁时原生查询可能抛：当作不在前台（宁可多投一次）
+    return false
+  }
+}
+
+/** #115：壳级通知（启动失败 / 服务健康 / 托盘提示）没有 profile 归属——最近聚焦的窗口在前台就不打扰。 */
+function anyWindowInFront(): boolean {
+  const profile = windowFocus.current()
+  return profile !== null && windowInFront(profile)
+}
 let mainWindow: BrowserWindow | null = null
 /** 主窗的 CEF 浏览器就绪（dom-ready）之前，`loadURL` 与 `executeJavascript` 都会打到空 ref 上 */
 let mainWindowReady = false
@@ -282,6 +308,7 @@ function performClosePolicy(win: BrowserWindow, profile: string): 'hidden' | 'qu
     hiddenWhileMaximized = win.isMaximized()
     win.hide()
     windowVisible = false
+    windowFocus.release(profile)
     refreshTray()
     return 'hidden'
   }
@@ -495,6 +522,7 @@ function hideMainWindow(): void {
   hiddenWhileMaximized = win.isMaximized()
   win.hide()
   windowVisible = false
+  windowFocus.release(focusedProfile ?? instanceProfile)
   refreshTray()
 }
 
@@ -534,6 +562,8 @@ function serviceOptionsFor(profile: string): ServiceOptions {
   const home = dshHome()
   return {
     profile,
+    // #115：通知的「聚焦不打扰」按 profile 判——该 profile 的窗口真的在前台才不投（兜底见 windowInFront）。
+    isWindowFocused: (target) => windowInFront(target),
     clientVersion: CLIENT_VERSION,
     noWindow,
     // 一个 profile 一份状态文件（诊断脚本按 profile 找）；启动 profile 保留旧路径
@@ -760,6 +790,9 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
   })
   win.on('focus', () => {
     focusedProfile = profile
+    // #115：焦点记账——通知的「聚焦不打扰」靠它；这条日志也是实机自证（聚焦时不弹）
+    windowFocus.focus(profile)
+    console.log(`[shell] 窗口聚焦：${profile}`)
     // lane 稳定接入点跟随焦点（旧壳 forwarder.rs：新连接落焦点实例，存量不动）。
     // #73：启动恢复最大化断言（唯一断言点）——Windows 上从未显示的窗 maximize 可能不落
     // 旗标（建窗时试过不稳），首次获得焦点时窗口必然已可见，再补一次并推送图标重查；
@@ -784,6 +817,11 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
     // 转发器挂在先起的那份服务面上，这里找到它再指目标。
     focusedLaneForwarder()?.setTarget(services.get(profile)?.state.lanePort ?? 0)
     refreshTray()
+  })
+  win.on('blur', () => {
+    // #115：失焦就不再算「在前台」——通知恢复照常投递（少打扰只限窗口在眼前时）
+    windowFocus.blur(profile)
+    console.log(`[shell] 窗口失焦：${profile}`)
   })
   // 关窗策略三处共用 performClosePolicy；原生层会先问 `will-close`，回 response.allow=false 就不关（旧 Tauri 壳同行为）
   win.on('will-close', (event) => {
@@ -827,6 +865,8 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
     // 窗口里的 guest 子 webview 跟着窗口一起回收（否则会留在窗口之外无法关闭）
     const released = guests.releaseHost(windowKey(profile))
     if (released > 0) console.log(`[shell] 随窗口回收 guest：${released} 个（${profile}）`)
+    // #115：窗口没了就不再算「在前台」（关闭不一定补 blur）
+    windowFocus.release(profile)
     if (focusedProfile === profile) {
       focusedProfile = null
       focusedLaneForwarder()?.setTarget(0)
@@ -1070,9 +1110,17 @@ async function switchRuntimeFromTray(action: TrayAction): Promise<void> {
     } else {
       await svc.ensureRunning()
     }
+    // RUNTIME_SWITCH（切换结果）：成败都让托盘外的人知道；「下载并切换」的托盘流会与下载完成
+    // 通知连发两条，嫌吵可以在设置里单独关「运行时切换」。
+    notifier.notify(
+      SCENARIO.RUNTIME_SWITCH,
+      action.version === undefined ? '已切换到内置运行时' : `已切换到 dsh ${action.version}`,
+    )
   } catch (error) {
     // 拉不起来不是死局：托盘还在，状态行会显示原因，用户可以再换一版再试。
-    console.error(`[shell] 切换运行时后仍未起来：${String(error)}`)
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(`[shell] 切换运行时后仍未起来：${message}`)
+    notifier.notify(SCENARIO.RUNTIME_SWITCH, `切换运行时失败：${message}`)
   }
   refreshTray()
 }
@@ -1111,7 +1159,8 @@ async function downloadRuntimeFromTray(version: string): Promise<void> {
     await uiService().download(version, uiService().settings().runtimeSource ?? 'github')
   } catch (error) {
     console.error(`[shell] 下载运行时 ${version} 失败：${String(error)}`)
-    notifier.notify(SCENARIO.STARTUP_ERROR, `下载运行时 ${version} 失败`)
+    // 失败通知由服务层统一发（SCENARIO.RUNTIME_DOWNLOAD，见 service.ts 的 downloadRuntimeNotified）；
+    // 托盘不再用 STARTUP_ERROR 重复报一遍。
     refreshTray()
     return
   }
@@ -1449,6 +1498,8 @@ const notifier: Notifier = createNotifier({
     showWindowsBalloon({ title: options.title, body: options.body ?? '' })
   },
   isFullscreen: () => mainWindow?.isFullScreen() ?? false,
+  // #115：壳级通知（启动失败 / 服务健康 / 托盘提示）没有 profile 归属，任一 DSH 窗口在前台就不打扰
+  isFocused: () => anyWindowInFront(),
   onLog: (line) => console.log(line),
 })
 let service: ShellService

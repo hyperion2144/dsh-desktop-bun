@@ -135,19 +135,19 @@ describe('notify-policy：声音档位', () => {
 
 describe('notify-policy：投递决策矩阵', () => {
   test('总开关关 → 不投递（场景再开也不投）', () => {
-    const decision = decide(config({ enabled: false }), SCENARIO.TASK_COMPLETE, NOON, false)
+    const decision = decide(config({ enabled: false }), SCENARIO.TASK_COMPLETE, NOON, false, false)
     expect(decision).toEqual({ deliver: false, silent: false, sound: { kind: 'silent' } })
   })
 
   test('场景关 → 不投递', () => {
     const cfg = config()
     cfg.scenarios[SCENARIO.TASK_COMPLETE] = { enabled: false, sound: 'default' }
-    expect(decide(cfg, SCENARIO.TASK_COMPLETE, NOON, false).deliver).toBe(false)
-    expect(decide(cfg, SCENARIO.DSH_APPROVAL, NOON, false).deliver).toBe(true)
+    expect(decide(cfg, SCENARIO.TASK_COMPLETE, NOON, false, false).deliver).toBe(false)
+    expect(decide(cfg, SCENARIO.DSH_APPROVAL, NOON, false, false).deliver).toBe(true)
   })
 
   test('默认全开、不静默、走系统默认音', () => {
-    expect(decide(config(), SCENARIO.TASK_COMPLETE, NOON, false)).toEqual({
+    expect(decide(config(), SCENARIO.TASK_COMPLETE, NOON, false, false)).toEqual({
       deliver: true,
       silent: false,
       sound: { kind: 'os-default' },
@@ -156,25 +156,42 @@ describe('notify-policy：投递决策矩阵', () => {
 
   test('免打扰命中 → 投递但静默', () => {
     const cfg = config({ dnd: { on: true, from: '22:00', to: '08:00', suppressFullscreen: false } })
-    expect(decide(cfg, SCENARIO.TASK_COMPLETE, { hour: 23, minute: 0 }, false).silent).toBe(true)
-    expect(decide(cfg, SCENARIO.TASK_COMPLETE, NOON, false).silent).toBe(false)
+    expect(decide(cfg, SCENARIO.TASK_COMPLETE, { hour: 23, minute: 0 }, false, false).silent).toBe(true)
+    expect(decide(cfg, SCENARIO.TASK_COMPLETE, NOON, false, false).silent).toBe(false)
   })
 
   test('免打扰关掉时窗内也照常响', () => {
     const cfg = config({ dnd: { on: false, from: '22:00', to: '08:00', suppressFullscreen: false } })
-    expect(decide(cfg, SCENARIO.TASK_COMPLETE, { hour: 23, minute: 0 }, false).silent).toBe(false)
+    expect(decide(cfg, SCENARIO.TASK_COMPLETE, { hour: 23, minute: 0 }, false, false).silent).toBe(false)
   })
 
   test('全屏静默（免打扰没开也生效）', () => {
     const cfg = config({ dnd: { on: false, from: '22:00', to: '08:00', suppressFullscreen: true } })
-    expect(decide(cfg, SCENARIO.TASK_COMPLETE, NOON, true).silent).toBe(true)
-    expect(decide(cfg, SCENARIO.TASK_COMPLETE, NOON, false).silent).toBe(false)
+    expect(decide(cfg, SCENARIO.TASK_COMPLETE, NOON, true, false).silent).toBe(true)
+    expect(decide(cfg, SCENARIO.TASK_COMPLETE, NOON, false, false).silent).toBe(false)
+  })
+
+  test('窗口在前台聚焦 → 不投递（UI 就在眼前，通知中心里也不该有）', () => {
+    const decision = decide(config(), SCENARIO.TASK_COMPLETE, NOON, false, true)
+    expect(decision).toEqual({ deliver: false, silent: false, sound: { kind: 'silent' } })
+  })
+
+  test('聚焦压过免打扰：不是「静默投递」而是整条不投', () => {
+    const cfg = config({ dnd: { on: true, from: '22:00', to: '08:00', suppressFullscreen: false } })
+    const decision = decide(cfg, SCENARIO.TASK_COMPLETE, NOON, false, true)
+    expect(decision.deliver).toBe(false)
+    expect(decision.silent).toBe(false)
+  })
+
+  test('故障类场景也一视同仁（聚焦时不投）', () => {
+    expect(decide(config(), SCENARIO.STARTUP_ERROR, NOON, false, true).deliver).toBe(false)
+    expect(decide(config(), SCENARIO.STARTUP_ERROR, NOON, false, false).deliver).toBe(true)
   })
 
   test('静默命中时把自定义音也压成 silent（不当场响）', () => {
     const cfg = config({ dnd: { on: true, from: '09:00', to: '17:00', suppressFullscreen: true } })
     cfg.scenarios[SCENARIO.TASK_COMPLETE] = { enabled: true, sound: 'custom:叮.wav' }
-    const decision = decide(cfg, SCENARIO.TASK_COMPLETE, NOON, false)
+    const decision = decide(cfg, SCENARIO.TASK_COMPLETE, NOON, false, false)
     expect(decision.deliver).toBe(true)
     expect(decision.silent).toBe(true)
     expect(decision.sound).toEqual({ kind: 'silent' })
@@ -183,7 +200,7 @@ describe('notify-policy：投递决策矩阵', () => {
   test('场景自定义音照常带出来', () => {
     const cfg = config()
     cfg.scenarios[SCENARIO.DOWNLOAD_COMPLETE] = { enabled: true, sound: 'custom:done.mp3' }
-    expect(decide(cfg, SCENARIO.DOWNLOAD_COMPLETE, NOON, false).sound).toEqual({
+    expect(decide(cfg, SCENARIO.DOWNLOAD_COMPLETE, NOON, false, false).sound).toEqual({
       kind: 'custom',
       name: 'done.mp3',
     })
@@ -229,6 +246,73 @@ describe('notifications：投递层', () => {
 
     notifier.notify(SCENARIO.TASK_COMPLETE, '会话跑完了', '自定义标题')
     expect(shown[1]?.title).toBe('自定义标题')
+  })
+
+  test('窗口在前台聚焦 → 整条不投（连通知中心都不进）', () => {
+    const shown: ShowNotificationOptions[] = []
+    const lines: string[] = []
+    let focused = true
+    const notifier = createNotifier({
+      notifications: config(),
+      home: '/tmp/none',
+      show: (options) => shown.push(options),
+      isFocused: () => focused,
+      // 只验聚焦逻辑：回包的 silent 随平台（Win/Linux 的「系统默认音」由壳自己放 → 原生通知要闭嘴，见 #74），
+      // 这里钉死 darwin 让回包确定；平台差异由 notifications.test.ts 的音档用例覆盖。
+      platform: 'darwin',
+      onLog: (line) => lines.push(line),
+    })
+    const blocked = notifier.notify(SCENARIO.TASK_COMPLETE, '会话跑完了')
+    expect(blocked).toEqual({ deliver: false, silent: false, sound: { kind: 'silent' } })
+    expect(shown).toEqual([])
+    expect(lines.some((line) => line.includes('未投递（窗口在前台聚焦）'))).toBe(true)
+    // 失焦（切到别的应用）→ 立刻恢复投递；少打扰只限窗口在眼前时
+    focused = false
+    expect(notifier.notify(SCENARIO.TASK_COMPLETE, '会话跑完了').deliver).toBe(true)
+    expect(shown).toEqual([{ title: 'DSH', body: '会话跑完了', silent: false }])
+  })
+
+  test('聚焦但总开关关着：日志说总开关，不把锅甩给焦点', () => {
+    const lines: string[] = []
+    const notifier = createNotifier({
+      notifications: config({ enabled: false }),
+      home: '/tmp/none',
+      show: () => {},
+      isFocused: () => true,
+      onLog: (line) => lines.push(line),
+    })
+    notifier.notify(SCENARIO.TASK_COMPLETE, '会话跑完了')
+    expect(lines.some((line) => line.includes('未投递（总开关或场景关闭）'))).toBe(true)
+    expect(lines.some((line) => line.includes('窗口在前台聚焦'))).toBe(false)
+  })
+
+  test('聚焦但场景关着：日志同样说开关', () => {
+    const lines: string[] = []
+    const cfg = config()
+    cfg.scenarios[SCENARIO.TASK_COMPLETE] = { enabled: false, sound: 'default' }
+    const notifier = createNotifier({
+      notifications: cfg,
+      home: '/tmp/none',
+      show: () => {},
+      isFocused: () => true,
+      onLog: (line) => lines.push(line),
+    })
+    notifier.notify(SCENARIO.TASK_COMPLETE, '会话跑完了')
+    expect(lines.some((line) => line.includes('未投递（总开关或场景关闭）'))).toBe(true)
+  })
+
+  test('面板预览（decide）在聚焦时也如实回「不会投」', () => {
+    const notifier = createNotifier({
+      notifications: config(),
+      home: '/tmp/none',
+      isFocused: () => true,
+      show: () => {},
+    })
+    expect(notifier.decide(SCENARIO.TASK_COMPLETE)).toEqual({
+      deliver: false,
+      silent: false,
+      sound: { kind: 'silent' },
+    })
   })
 
   test('静默决策传 silent=true 给原生层', () => {

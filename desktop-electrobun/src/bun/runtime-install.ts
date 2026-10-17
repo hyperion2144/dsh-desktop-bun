@@ -14,6 +14,8 @@ import { delimiter, join } from 'node:path'
 import { NPM_PACKAGE, isRuntimeVersion } from '../shared/runtime-catalog.ts'
 import { runtimeNpmrc, runtimeWorkspaceYaml } from '../shared/profile-template.ts'
 import { isRuntimeTreeValid, runtimeDirOf, runtimesDir } from './runtime-store.ts'
+import { SCENARIO } from '../shared/notify-policy.ts'
+import type { RuntimeSource } from '../shared/settings.ts'
 import { createPlatformProbe, stopProcessTree } from './process-tree.ts'
 
 
@@ -442,5 +444,36 @@ export function createRuntimeDownloader(deps: DownloaderDeps): RuntimeDownloader
       // 回报「取消已受理」——官方通道 120s 上限会把长回包丢掉，面板不能等这个 Promise 收尾。
       return { cancelled: true, version: task.version }
     },
+  }
+}
+
+/**
+ * 下载入口的通知包装（#115 收全通知面）：托盘（service.download）与面板（download_runtime 命令）
+ * 都汇到 service 的同一个 downloader.start，这里在成功/失败终态统一发 SCENARIO.RUNTIME_DOWNLOAD；
+ * 取消是用户主动动作（面板/托盘都看得到 cancelled 终态），不发通知。调用方不要再各自发一遍。
+ */
+export interface RuntimeDownloadNotifyDeps {
+  /** 投递口（Notifier.notify 同形）；缺省＝只透传不通知。 */
+  notify?: (scenarioId: string, body: string) => void
+  /** 刚结束的这把是否被用户取消（失败通知在取消时不出）。 */
+  cancelled: () => boolean
+}
+
+export function withRuntimeDownloadNotify(
+  start: (version: string, source: RuntimeSource) => Promise<{ ok: true; version: string }>,
+  deps: RuntimeDownloadNotifyDeps,
+): (version: string, source: RuntimeSource) => Promise<{ ok: true; version: string }> {
+  return async (version, source) => {
+    try {
+      const result = await start(version, source)
+      deps.notify?.(SCENARIO.RUNTIME_DOWNLOAD, `运行时安装完成：dsh ${result.version}`)
+      return result
+    } catch (error) {
+      if (!deps.cancelled()) {
+        const message = error instanceof Error ? error.message : String(error)
+        deps.notify?.(SCENARIO.RUNTIME_DOWNLOAD, `运行时安装失败：dsh ${version} —— ${message}`)
+      }
+      throw error
+    }
   }
 }
