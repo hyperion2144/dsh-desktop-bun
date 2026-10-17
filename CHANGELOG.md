@@ -36,6 +36,10 @@
 - 壳 preload 注入脚本全面改走官方 Electrobun Typed RPC（#128）：boot 载荷、标题栏三键、开外链、右键菜单、输入确认弹窗不再打壳自答 HTTP 端点；通道边界与保留 HTTP 清单见 ADR-0003。
 - Windows 渲染后端由 CEF 切换为系统 WebView2（#84）：Electrobun 上游 win CEF 走 OSR 离屏渲染（`windowless_rendering_enabled`，未设 `windowless_frame_rate` 即 30fps 上限；`OnPaint` 全帧 memcpy + `UpdateLayeredWindow` GDI 提交，`OnAcceleratedPaint` 零拷贝路径未实现），是滚动/动画卡顿的结构性根因；WebView2 同为 Chromium 内核（窗口直绘，引擎层与 Electron 无性能差异）。三处渲染开关平台条件化：config `win: bundleCEF:false + defaultRenderer:'native'`、`src/bun/index.ts` 建窗 renderer 改随 `availableRenderers` 推导、启动断言平台化（win 不允许 CEF、mac/linux 必须有 CEF）、dev_tools 的 CEF CDP 桥在无 CEF 构建暂缺 win 载体（后经 #106 以 WebView2 CDP 补齐）。mac/linux 保持 CEF 不变；win 包体预计 -150MB（CEF 不再打包）。
 - CI 产物断言平台条件化（#84）：`scripts/assert-artifact.mjs` 的渲染器载荷口径改按平台双向核验——mac/linux 仍正断言 CEF 运行时必须存在（缺了即失败），win 改为反向断言（应用树/归档出现 `libcef.dll`、`chrome_elf.dll` 即策略回归/包体回胖）；build.yml 的产物断言行名与注释同步平台化。
+- 桌面设置面板按职责拆分（#144）：原先 2341 行的单体（类型 + 样式 + RPC 通道 + 外壳件 + 15 张卡 + 一个 1790 行的面板函数）拆成「入口只做编排 + `desktop-settings/` 下的 types/rpc/styles/chrome/cards」，卡片层复用 `SectionBox`/`PfBtn` 不再反向 import 入口；面板首次加载合并成一次取数（原先二十来次 setState 扇出）。对外行为与卡片顺序零变化。
+- 数据面档位判别收进穷尽策略表（#144）：loopback 转发原本同时维护「档位字符串」「派生的是否合并布尔」「在飞表里有没有领头」三个量、散在五处；改为一张 `Record<LoopbackAggregation, AggregationPolicy>` 映射（给档位加值即编译报错）与一个在飞登记表，右键菜单请求的字段归一化也收成唯一一份实现（官方 RPC 与 `/__shell__/context-menu` 两条入口共用，改一处就够）。
+- loopback 数据面聚合默认档改为「只关缓冲」（#144）：原先缺省是 `full`（合并并发 GET 且整条缓冲 ≤256KB 后才下发，首字节要等整条读完），现缺省改为 `stream`——合并照旧，响应边到边下发。两者对跟随者都保证「同一份字节」，差别只在没有跟随者的单请求要不要白等一次整条传输。已显式选过档的用户不受影响（盘上写死了值）。
+- 移除无消费者的窗口状态推送（#144）：壳侧的 `window_state_changed` 推送没有任何接收方，删除其构造器、发送面与断言；窗口态一律走已有的 `window_get_state` 查询。
 
 ### Fixed
 - Windows 侧栏顶部拖拽区吃掉官方折叠按钮，点击失灵（#121）：拖窗改回官方声明式机制——WebView2 直接把 `[data-windows-titlebar] .frame::before`（`-webkit-app-region: drag`）当真标题栏（拖窗 + 系统菜单 + 双击最大化），壳不再注入拖拽热区；壳三键显式 `-webkit-app-region: no-drag`（Electrobun 无 windowControlsOverlay，Electron 那层保护不存在），Linux（CEF）因无 app-region 仍保留注入的两段热区。顺带退役插件 #44 的 darwin 单行化 CSS，侧栏头回到官方两行几何。
@@ -48,6 +52,7 @@
 - macOS 打包 app 的通知授权此前永远弹不出系统授权窗（UNUserNotificationCenter 归属进程看的是【发起请求的进程自己的签名】是否认领 bundle id，而真正的 JS 主进程 `Contents/MacOS/bun` 构建期是 Apple 开发者签名——归属永远失败，requestAuthorization 恒 not_determined 且不弹窗；自首个包起就坏，一直靠系统设置手动开关兑底）。sign-app.mjs 改为三层 ad-hoc 重签：MacOS/ 下每个 Mach-O 以 `--identifier <CFBundleIdentifier>` 认领 bundle id（原样保留既有 entitlements）→ Frameworks 嵌套代码 → 外层（把 Info.plist 绑进 CFBundleExecutable 签名），弃用 `codesign --deep`（#115）。
 - Windows/Linux 右侧边栏经会话链接触发打开时间隔未生效（#112）：标题栏带改走官方声明式适配并上收壳 preload——壳给 <html> 打 data-windows-titlebar + --dsh-windows-titlebar-height（40px，对齐官方常量），host AppFrame CSS 结构性压下整帧并给右栏 panel 留出间隔（不再依赖插件 JS 观察器补 inline top，链接触发的首次挂载不再落盲区）；标题栏拖拽带与窗口三键随之上收壳 preload 注入（POST /__shell__/window 动作、GET 查最大化态，不依赖 dsh 页面与插件状态），插件退役 win32/linux 顶部 chrome（inline top 补丁、自绘三键及其样式与 RPC 面全部移除），darwin 系统红绿灯路径零变化。
 - 桌面设置「手机端改用桌面布局」开关没有卡片框（#128）：该块并回「手机访问」卡内成第二段，复用现有 SectionBox 样式。
+- loopback 单飞跟随者可能无限期挂住（#144）：领头请求一旦卡住不落地（上游 hang、body 读不完），所有搭车的并发 GET 就一直等下去——页面永远转圈、壳的在飞计数与连接不释放、客户端断开也不摘表，只能重启壳才恢复。跟随者等待加 10s 上限（超时即自行打一次上游；该请求从头到尾没发出去过，重发无副作用），并接上页面 abort（客户端断开即放弃，不替它打上游）；`/__shell__/health` 新增 `followerDropouts`/`followerWaitMs` 两个观测字段（阈值仍是常量，尚未暴露成设置）。仍**不给任何已发出的请求加自动重试**——壳侧 handler 无取消语义，重发会让副作用翻倍。
 - 面板边框线在浅色主题下看不见（#128）：写的是宿主从未定义的 `--dsw-alias-border-l`（无数字），永远回退白色 `#ffffff1f`；改为实际存在的 `--dsw-alias-border-l2`（浅色值与原回退值逐字相同，深色下拿到 `#0000001a`）。
 - 桌面设置开关的保存方式不一致（#128）：「手机端改用桌面布局」原本勾选只改本地 state、要另点保存，而同形态的防休眠/开发者工具/聚合档位都是勾选即存；改为勾选即存（失败回拨），面板口径统一为「开关即存、文本输入才带保存按钮」。
 - 桌面设置「代理设置」的保存按钮与脚注跑到卡片框外（#128）：`</SectionBox>` 提前闭合，按钮漂在卡外（面板里唯一的例外，其余卡都是「按钮在卡内」）；按钮收回卡内，末尾那条覆盖四节的面板级脚注加分隔线与上边距。

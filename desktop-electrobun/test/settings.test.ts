@@ -68,8 +68,14 @@ describe('normalizeSettings', () => {
   })
 
   // #128：loopback 聚合三档。老设置文件没这个键、或用户手改成不认识的值，都必须静默回
-  // 全开——默认值就等于升级前的行为，回错了会让老用户凭空掉一层响应合并。
-  test('loopback_aggregation：缺键与坏值回全开，落盘走下划线键', () => {
+  // #128：loopback 聚合三档。老设置文件没这个键、或用户手改成不认识的值，都必须静默回
+  // 默认档——回错了会让没选过档的用户凭空换一种数据面行为。
+  // #144 起默认档是 stream（只关缓冲）：合并照旧，但首字节不等整条读完。
+  // 下面第一条断言是**写死字面量**的，不是拿常量比自己——否则把默认值改回去也照样绿。
+  test('loopback_aggregation：缺键与坏值回默认档 stream，落盘走下划线键', () => {
+    expect(DEFAULT_LOOPBACK_AGGREGATION).toBe('stream')
+    expect(normalizeSettings({}).loopbackAggregation).toBe('stream')
+    expect(normalizeSettings({ loopback_aggregation: 'full' }).loopbackAggregation).toBe('full')
     expect(normalizeSettings({}).loopbackAggregation).toBe(DEFAULT_LOOPBACK_AGGREGATION)
     expect(normalizeSettings({ loopback_aggregation: 'stream' }).loopbackAggregation).toBe('stream')
     expect(normalizeSettings({ loopbackAggregation: 'none' }).loopbackAggregation).toBe('none')

@@ -761,7 +761,7 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
   // D3 反馈：上次是最大化收场的，这次直接最大化（几何记忆只当还原帧用）。
   // Windows 实测：从未显示过的窗上 maximize() 不落 WS_MAXIMIZE 旗标（#73）。
   // 收敛口径（收 hack 轮）：建窗时尽力而为，唯一断言点=首次 focus（届时必然可见）；
-  // dom-ready 二次补齐与定时补推两层已删——竞态由「focus 断言 + 客户端首查/onMessage」闭环。
+  // dom-ready 二次补齐与定时补推两层已删——竞态由「focus 断言 + 客户端首查 window_get_state」闭环。
   const startMaximized = readWindowMaximized(windowStateFileOf(profile))
   if (startMaximized) {
     ensureNativeMaximizeStyles()
@@ -784,8 +784,8 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
       mainWindowReady = true
     }
     windowVisible = true
-    // 启动最大化不在 dom-ready 补齐/补推（收 hack 轮已删）：旗标由建窗时或首次 focus
-    // 断言立起；客户端首查晚于两者则直接查到真值，早于则收 window_state_changed 再查。
+    // 启动最大化不在 dom-ready 补齐（收 hack 轮已删）：旗标由建窗时立起、或首次 focus 断言立起；
+    // 标题栏随后主动查 window_get_state 即拿到真值（#144：状态推送整条已删，此处无补推可做）。
     refreshTray()
   })
   win.on('focus', () => {
@@ -795,20 +795,19 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
     console.log(`[shell] 窗口聚焦：${profile}`)
     // lane 稳定接入点跟随焦点（旧壳 forwarder.rs：新连接落焦点实例，存量不动）。
     // #73：启动恢复最大化断言（唯一断言点）——Windows 上从未显示的窗 maximize 可能不落
-    // 旗标（建窗时试过不稳），首次获得焦点时窗口必然已可见，再补一次并推送图标重查；
+    // 旗标（建窗时试过不稳），首次获得焦点时窗口必然已可见，再补一次；
     // 断言成功即清 pending，之后不再干预。
+    // #144：原先断言成功后紧跟着一次 notifyWindowState（推标题栏重查图标）——推送端整条已删，
+    // 标题栏改成自己查 window_get_state，所以这里只剩「立住旗标」这一步。
+    // delete 必须留着：flag 一旦不清，用户把窗还原后每次 focus 都会被重新拉最大化。
     if (pendingStartMaximized.has(profile)) {
       if (!win.isMaximized()) {
         ensureNativeMaximizeStyles()
         win.maximize()
       }
-      if (win.isMaximized()) {
-        // 旗标已立也要推：客户端首查可能发生在旗标立起之前（实机「偶发才对」的竞态源）
-        pendingStartMaximized.delete(profile)
-        shellRpcHandle.notifyWindowState()
-      }
+      if (win.isMaximized()) pendingStartMaximized.delete(profile)
     }
-    // #80 自检排在启动补 maximize 之后：去抖 250ms/复查 350ms 都落在补推完成后，
+    // #80 自检排在启动补 maximize 之后：去抖 250ms/复查 350ms 都落在补断言完成后，
     // 不会量到启动最大化动画中途的还原帧（与 #73 收敛方向一致）。
     scheduleHealCheck(win, profile, 'focus')
     // 实机证据：落位外扩在恢复动画完成后才定格，focus 当拍检查常早于损坏成形，

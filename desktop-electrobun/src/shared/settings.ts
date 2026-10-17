@@ -24,13 +24,18 @@ export type ProxyMode = (typeof PROXY_MODES)[number]
 
 /**
  * loopback 数据面聚合档位（#128）——收敛 #54 的 GET 单飞合并带来的两条延迟：
- *   full（默认，= #54 原行为）：合并并发 GET + 把 ≤256KB 的响应整条缓冲后才下发（TTFB 等整条读完）；
- *   stream：仍合并，但领头响应边到边下发（首字节不等整条），旁路累积一份给跟随者；
+ *   full：合并并发 GET + 把 ≤256KB 的响应整条缓冲后才下发（TTFB 等整条读完）；
+ *   stream（默认）：仍合并，但领头响应边到边下发（首字节不等整条），旁路累积一份给跟随者；
  *   none：不合并，每个 GET 各自打上游（health 的 coalesced 恒为 0）。
+ *
+ * 默认档从 full 改成 stream（维护者裁决）：合并能力两档都有，差别只在「首字节要不要等整条读完」。
+ * 等整条读完换来的唯一好处是「同一个响应对所有跟随者是同一份字节」，而 stream 的旁路缓冲同样保证这点，
+ * 代价却是每个请求都白等一次整条传输。桌面端与手机端都是「小 JSON + 长连接」为主，
+ * 让没有跟随者的单请求不必等缓冲，是净收益。已显式选过档的用户不受影响（盘上写死了值）。
  */
 export const LOOPBACK_AGGREGATION_MODES = ['full', 'stream', 'none'] as const
 export type LoopbackAggregation = (typeof LOOPBACK_AGGREGATION_MODES)[number]
-export const DEFAULT_LOOPBACK_AGGREGATION: LoopbackAggregation = 'full'
+export const DEFAULT_LOOPBACK_AGGREGATION: LoopbackAggregation = 'stream'
 
 /** dsh 来源只认 builtin；残留 external 由 oneOf 白名单静默回退（键保留，向前兼容旧配置文件）。 */
 export const DSH_MODES = ['builtin'] as const

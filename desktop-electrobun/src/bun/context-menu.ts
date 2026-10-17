@@ -57,6 +57,32 @@ export function isOpenablePath(path: string): boolean {
 }
 
 /**
+ * 右键菜单请求的归一化解析（#144-2）——代码库里的**唯一一份**实现。
+ *
+ * 两条入口共用它：commands.ts 的 `show_context_menu`（官方 RPC，args 是 Record<string, unknown>）
+ * 与 shell-server.ts 的 `/__shell__/context-menu`（壳自答 HTTP 端点，body 是解析后的 JSON）。
+ * 之前两份解析逐字段相同（triage 已核验），但分处两个文件，改一边忘另一边就会漂移。
+ *
+ * 归一化口径（对外行为零变化）：空串归 null；布尔只认严格 `=== true`；
+ * `filesEntry` 走 `file | directory | other` 白名单；`filesPath` 走 isOpenablePath（只认绝对路径，
+ * 防相对路径与 URL 形态混入）。非对象输入（null / 数组 / 数字 / 字符串）一律当空请求。
+ */
+export function parseContextMenuRequest(body: unknown): ContextMenuRequest {
+  const raw: Record<string, unknown> =
+    typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : {}
+  const link = raw['linkUrl']
+  const path = raw['filesPath']
+  const entry = raw['filesEntry']
+  return {
+    linkUrl: typeof link === 'string' && link !== '' ? link : null,
+    hasSelection: raw['hasSelection'] === true,
+    editable: raw['editable'] === true,
+    filesEntry: entry === 'file' || entry === 'directory' || entry === 'other' ? entry : null,
+    filesPath: typeof path === 'string' && isOpenablePath(path) ? path : null,
+  }
+}
+
+/**
  * 原生菜单结构。`externalLink` 判定由调用方给（壳知道自己的 origin），
  * 返回的项里 `data` 带上执行时需要的参数；`options.devTools` 控制 DevTools 入口（dev=CEF inspector；win=合成 F12）。
  */

@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { createRpcRouter, type RpcHandler } from '../src/bun/rpc.ts'
-import { createShellRpcFunnel, createWindowStateNotifier, type ShellRpcDeps } from '../src/bun/rpc-bridge.ts'
+import { createShellRpcFunnel, type ShellRpcDeps } from '../src/bun/rpc-bridge.ts'
 import { deriveMaximized, type WindowFrame } from '../src/bun/window-max.ts'
 import { createViewRegistry } from '../src/shared/view-grant.ts'
 function makeDeps(overrides: Partial<ShellRpcDeps> = {}): ShellRpcDeps {
@@ -200,19 +200,4 @@ describe('壳 RPC 漏斗（官方 Typed RPC → 命令表）', () => {
     expect(seen).toEqual({})
   })
 
-describe('window_state_changed 推送（#73）', () => {
-  test('触发器语义：载荷恒空对象，状态真值由客户端重查 window_get_state', () => {
-    const sent: unknown[] = []
-    const notify = createWindowStateNotifier((payload) => sent.push(payload))
-    notify()
-    expect(sent).toEqual([{}])
-  })
-
-  test('发送失败只记日志不抛（推送是尽力而为，图标同步另有 resize/focus 兜底）', () => {
-    const notify = createWindowStateNotifier(() => {
-      throw new Error('桥断了')
-    })
-    expect(() => notify()).not.toThrow()
-  })
-})
 })

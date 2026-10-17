@@ -21,7 +21,7 @@ import type { ProxyEnv } from '../shared/proxy-env.ts'
 import type { KeepAwakeCapability } from './keep-awake.ts'
 import type { BootPayload } from './shell-server.ts'
 import type { ContextMenuRequest } from './context-menu.ts'
-import { isOpenablePath } from './context-menu.ts'
+import { parseContextMenuRequest } from './context-menu.ts'
 import { isOpenableUrl } from './external.ts'
 
 export interface CommandDeps {
@@ -649,20 +649,11 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
     },
     show_context_menu: (args: Record<string, unknown>) => {
       if (deps.showContextMenu === undefined) throw new Error('没有窗口宿主（右键菜单不可用）')
-      // 字段解析口径与 shell-server.ts 的 `/__shell__/context-menu` 同款：entry 白名单化、
-      // 路径只认绝对路径（isOpenablePath，防相对路径/URL 混入）。
+      // 字段归一化只有一份实现（#144-2）：与 shell-server.ts 的 `/__shell__/context-menu`
+      // 共用 parseContextMenuRequest——entry 白名单化、路径只认绝对路径，改一处就够。
       // 这里**不**再叠第二层鉴权：请求已经过 createShellRpcFunnel 的 view 授权
       // （isCommandAllowed），叠一层只会把 remote lane 的调用也挡掉。
-      const entry = args['filesEntry']
-      const path = args['filesPath']
-      const link = args['linkUrl']
-      deps.showContextMenu({
-        linkUrl: typeof link === 'string' && link !== '' ? link : null,
-        hasSelection: args['hasSelection'] === true,
-        editable: args['editable'] === true,
-        filesEntry: entry === 'file' || entry === 'directory' || entry === 'other' ? entry : null,
-        filesPath: typeof path === 'string' && isOpenablePath(path) ? path : null,
-      })
+      deps.showContextMenu(parseContextMenuRequest(args))
       return {}
     },
     open_external: (args) => {

@@ -163,8 +163,8 @@ export function titlebarScript(platform: CarrierPlatform): string {
     '    })',
     '    band.append(...dragParts, controls)',
     '    document.body.appendChild(band)',
-    // 最大化/还原图标：window_state_changed 推送属官方 RPC 通道，壳层不订阅，',
-    // resize/focus/可见性兜底与插件时代同一套（改成查 window_get_state，不再 GET 端点）
+    // 最大化/还原图标：壳层不订阅状态推送（#144：推送端整条已删），只由页面主动查
+    // window_get_state；resize/focus/可见性兜底与插件时代同一套（不再 GET 端点）
     '    queryState = () => {',
     '      void call(STATE_METHOD, {})',
     '        .then((state) => { if (state !== null && state !== undefined && typeof state.maximized === "boolean") setIcon(state.maximized) })',
