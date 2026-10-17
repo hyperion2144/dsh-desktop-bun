@@ -261,6 +261,232 @@ jobs:
           if ($left) { $left | ForEach-Object { Stop-Process -Id $_.Id -Force }; throw 'AUTO_QUIT 后仍有残留服务进程' }
           Write-Host 'Windows 冒烟通过：静默安装 + 无窗口启动（SHELL-READY）+ 自动退出无残留'
 
+      # #109：win 打包态 DevTools CDP 冒烟——dev_tools 开/关两态各起一次窗口态壳，断言
+      # WebView2 远程调试口（默认 9333）在开关开时可探活、开关关时连接拒绝。窗口模式是必须的：
+      # --no-window 不建 WebView2 环境，调试口永远不会开；这里复用上一段静默安装的产物与 DSH_HOME。
+      #
+      # 提权 runner 的补偿（CI-only）：GitHub Windows runner 以管理员运行；WebView2 150+ 对提权
+      # 宿主按设计忽略 WEBVIEW2_* 环境变量（WebView2Feedback #5640），壳内 SetEnvironmentVariableA
+      # 写的 --remote-debugging-port 不会生效。ON 态写 machine-wide HKLM 策略
+      # SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments 的 "*" 值补上参数，
+      # OFF 态删除；这只证明 CDP 端点在 runner 上可用，不等价于覆盖壳的 env 写入路径。
+      - name: DevTools CDP 冒烟（dev_tools 开/关两态）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 让 curl 的非零退出码走 $LASTEXITCODE，而不是被 $ErrorActionPreference 变成异常
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $cdpUrl = 'http://127.0.0.1:9333/json/version'
+          $smokeHome = Join-Path $env:RUNNER_TEMP 'dsh-smoke-home'
+          $settingsPath = Join-Path $smokeHome 'desktop-settings.json'
+          $webView2PolicyKey = 'SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+
+          # 复用上面无窗口冒烟的安装树（App\Resources\main.js + 包内 bun.exe）。
+          $appRoot = Get-ChildItem 'C:\dsh-smoke' -Directory | Where-Object { $_.Name -eq 'App' -and (Test-Path (Join-Path $_.FullName 'Resources\main.js')) } | Select-Object -First 1
+          if ($null -eq $appRoot) { $appRoot = Get-ChildItem 'C:\dsh-smoke' -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'Resources\main.js') } | Select-Object -First 1 }
+          if ($null -eq $appRoot) { $appRoot = Get-ChildItem 'C:\dsh-smoke' -Directory | Select-Object -First 1 }
+          if ($null -eq $appRoot) { throw '安装树里找不到应用根目录' }
+          $payloadRes = Join-Path $appRoot.FullName 'Resources'
+          $mainJs = Join-Path $payloadRes 'main.js'
+          if (-not (Test-Path $mainJs)) { throw "安装树里没有 main.js：$mainJs" }
+          $bunExe = Get-ChildItem $appRoot.FullName -Recurse -Filter bun.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\.installer' } | Select-Object -First 1
+          if ($null -eq $bunExe) { throw '载荷里找不到 bun.exe' }
+          Write-Host ("CDP 冒烟：bun = {0}" -f $bunExe.FullName)
+
+          function Set-DevTools([bool]$enabled) {
+            if (-not (Test-Path $smokeHome)) { New-Item -ItemType Directory -Path $smokeHome -Force | Out-Null }
+            $settings = @{}
+            if (Test-Path $settingsPath) {
+              try { $settings = Get-Content -Raw -Path $settingsPath | ConvertFrom-Json -AsHashtable } catch { $settings = @{} }
+            }
+            if ($null -eq $settings) { $settings = @{} }
+            $settings['dev_tools'] = $enabled
+            $json = $settings | ConvertTo-Json -Depth 20
+            [System.IO.File]::WriteAllText($settingsPath, $json + "`n", [System.Text.UTF8Encoding]::new($false))
+            Write-Host ("CDP 冒烟：dev_tools={0}（{1}）" -f $enabled, $settingsPath)
+          }
+
+          function Set-WebView2CdpPolicy([bool]$enabled) {
+            $hklm = [Microsoft.Win32.Registry]::LocalMachine
+            if ($enabled) {
+              $key = $hklm.CreateSubKey($webView2PolicyKey)
+              if ($null -eq $key) { throw 'CDP 冒烟：创建 HKLM WebView2 策略键失败' }
+              try {
+                $key.SetValue('*', '--remote-debugging-port=9333', [Microsoft.Win32.RegistryValueKind]::String)
+                $key.SetValue('', '--remote-debugging-port=9333', [Microsoft.Win32.RegistryValueKind]::String)
+              } finally {
+                $key.Close()
+              }
+              Write-Host 'CDP 冒烟：已写 HKLM WebView2 AdditionalBrowserArguments（* + 默认值）'
+            } elseif (Test-Path "HKLM:\$webView2PolicyKey") {
+              $hklm.DeleteSubKeyTree($webView2PolicyKey, $false)
+              Write-Host 'CDP 冒烟：已清理 HKLM WebView2 策略'
+            }
+          }
+
+          function Assert-WebView2PolicyCleared {
+            if (Test-Path "HKLM:\$webView2PolicyKey") { throw 'CDP 冒烟：HKLM WebView2 策略清理失败（9333 可能被全局打开）' }
+          }
+
+          function Get-CdpProbe {
+            $raw = & curl.exe -s --noproxy '*' --connect-timeout 1 -o NUL -w '%{http_code}' --max-time 3 $cdpUrl 2>$null
+            $exit = $LASTEXITCODE
+            return [pscustomobject]@{ ExitCode = $exit; HttpCode = ("$raw").Trim() }
+          }
+
+          function Start-SmokeApp([string]$tag) {
+            $stdout = Join-Path $env:RUNNER_TEMP "cdp-smoke-$tag.log"
+            $stderr = "$stdout.err"
+            Remove-Item -Force -ErrorAction SilentlyContinue $stdout, $stderr
+            $env:DSH_HOME = $smokeHome
+            $env:DSH_SHELL_PROFILE_MODE = 'existing'
+            $env:DSH_SHELL_DEVTOOLS_PORT = '9333'
+            $env:DSH_SHELL_PAGE_PORT = '6451'
+            $env:DSH_DESKTOP_PORT = '6452'
+            $env:DSH_MOBILE_LANE_PORT = '6453'
+            $env:DSH_DESKTOP_AUTO_QUIT = '30000'
+            $env:DSH_DESKTOP_NO_SINGLETON = '1'
+            Remove-Item Env:DSH_SHELL_NO_WINDOW -ErrorAction SilentlyContinue
+            $proc = Start-Process -FilePath $bunExe.FullName -ArgumentList "`"$mainJs`"" -WorkingDirectory $payloadRes -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+            Write-Host ("CDP 冒烟[{0}]：启动窗口态壳 pid={1}" -f $tag, $proc.Id)
+            return [pscustomobject]@{ Proc = $proc; Stdout = $stdout; Stderr = $stderr; Tag = $tag }
+          }
+
+          function Wait-ShellReady($app, [int]$seconds = 600) {
+            $deadline = (Get-Date).AddSeconds($seconds)
+            while ((Get-Date) -lt $deadline) {
+              if ($app.Proc.HasExited) { return $false }
+              if (Test-Path $app.Stdout) {
+                if (Select-String -Path $app.Stdout -Pattern 'SHELL-READY' -SimpleMatch -Quiet -ErrorAction SilentlyContinue) { return $true }
+              }
+              Start-Sleep -Milliseconds 500
+            }
+            return $false
+          }
+
+          function Show-AppLogs($app) {
+            Write-Host ("--- {0} stdout（末 80 行）---" -f $app.Tag)
+            Get-Content $app.Stdout -Tail 80 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+            Write-Host ("--- {0} stderr（末 80 行）---" -f $app.Tag)
+            Get-Content $app.Stderr -Tail 80 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+          }
+
+          function Stop-SmokeApp($app) {
+            if (-not $app.Proc.HasExited) {
+              if (-not $app.Proc.WaitForExit(60000)) {
+                Write-Warning "CDP 冒烟[$($app.Tag)]：自动退出超时，终止进程树"
+                & taskkill.exe /PID $app.Proc.Id /T /F 2>$null | Out-Null
+                $app.Proc.WaitForExit(20000) | Out-Null
+              }
+            }
+            # 给 WebView2 子进程 5s 优雅退出；再清掉仍带 9333 调试参数的浏览器进程。
+            # 浏览器进程可能在关掉调试口后仍存活，被下一阶段复用并把 9333 重新打开。
+            Start-Sleep -Seconds 5
+            $victims = @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue |
+              Where-Object { $_.CommandLine -and $_.CommandLine -like '*--remote-debugging-port=9333*' })
+            foreach ($victim in $victims) {
+              Write-Warning ("CDP 冒烟[{0}]：清理带 9333 参数的 WebView2 进程 (pid={1})" -f $app.Tag, $victim.ProcessId)
+              Stop-Process -Id $victim.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+            # 等 9333 真正没有监听（10s）；仍有监听就按 PID 清掉。
+            $closed = $false
+            foreach ($i in 1..10) {
+              $listeners = @(Get-NetTCPConnection -LocalPort 9333 -State Listen -ErrorAction SilentlyContinue)
+              if ($listeners.Count -eq 0) { $closed = $true; break }
+              foreach ($listener in $listeners) {
+                $owner = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+                if ($owner) {
+                  Write-Warning ("CDP 冒烟[{0}]：9333 被 {1} (pid={2}) 占用，强制结束" -f $app.Tag, $owner.ProcessName, $owner.Id)
+                  Stop-Process -Id $owner.Id -Force -ErrorAction SilentlyContinue
+                }
+              }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $closed) { Write-Warning "CDP 冒烟[$($app.Tag)]：退出后 9333 仍有监听（可能残留 WebView2 子进程）" }
+            $left = Get-Process -Name 'bun','launcher' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'C:\dsh-smoke*' }
+            if ($left) {
+              $left | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+              Write-Warning "CDP 冒烟[$($app.Tag)]：退出后仍有残留服务进程，已强制结束"
+            }
+          }
+
+          function Invoke-Phase([string]$tag, [bool]$enabled, [scriptblock]$assert) {
+            Write-Host ("==== DevTools CDP 冒烟：dev_tools={0} ====" -f $enabled)
+            $app = $null
+            try {
+              Set-WebView2CdpPolicy $enabled
+              Set-DevTools $enabled
+              $app = Start-SmokeApp $tag
+              if (-not (Wait-ShellReady $app)) {
+                Show-AppLogs $app
+                throw "CDP 冒烟[$tag]：600 秒内未拿到 SHELL-READY"
+              }
+              $readyLine = (Get-Content $app.Stdout -Raw | Select-String -Pattern 'SHELL-READY.*').Matches.Value
+              Write-Host $readyLine
+              & $assert $app
+              Write-Host ("CDP 冒烟[{0}]：通过" -f $tag)
+            } catch {
+              Show-AppLogs $app
+              throw
+            } finally {
+              if ($null -ne $app) { Stop-SmokeApp $app }
+              Set-WebView2CdpPolicy $false
+            }
+          }
+          try {
+            Set-WebView2CdpPolicy $false
+
+          Invoke-Phase 'on' $true {
+            param($app)
+            $deadline = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $deadline) {
+              $probe = Get-CdpProbe
+              if ($probe.ExitCode -eq 0 -and $probe.HttpCode -eq '200') { break }
+              Start-Sleep -Seconds 1
+            }
+            $probe = Get-CdpProbe
+            if ($probe.ExitCode -ne 0 -or $probe.HttpCode -ne '200') {
+              throw "CDP 冒烟[on]：/json/version 不是 200（curl exit=$($probe.ExitCode)，http=$($probe.HttpCode)）"
+            }
+            $version = & curl.exe -s --noproxy '*' --max-time 5 $cdpUrl
+            if ($LASTEXITCODE -ne 0) { throw "CDP 冒烟[on]：读取 /json/version 失败（curl exit=$LASTEXITCODE）" }
+            $body = ($version -join "`n")
+            Write-Host $body
+            if ($body -notmatch '"webSocketDebuggerUrl"') { throw 'CDP 冒烟[on]：/json/version 缺少 webSocketDebuggerUrl' }
+            if (-not (Select-String -Path $app.Stdout -Pattern 'WebView2.*127\.0\.0\.1:9333' -Quiet -ErrorAction SilentlyContinue)) {
+              throw 'CDP 冒烟[on]：壳日志里没有「WebView2 远程调试口 127.0.0.1:9333」——设置没有驱动 env 写入'
+            }
+          }
+
+          Invoke-Phase 'off' $false {
+            param($app)
+            if (Select-String -Path $app.Stdout -Pattern 'WebView2.*127\.0\.0\.1:9333' -Quiet -ErrorAction SilentlyContinue) {
+              throw 'CDP 冒烟[off]：dev_tools=false 但壳日志仍打印 WebView2 调试口'
+            }
+            $deadline = (Get-Date).AddSeconds(20)
+            $probes = 0
+            while ((Get-Date) -lt $deadline) {
+              if ($app.Proc.HasExited) { throw 'CDP 冒烟[off]：探测期间壳已退出' }
+              $listeners = @(Get-NetTCPConnection -LocalPort 9333 -State Listen -ErrorAction SilentlyContinue)
+              if ($listeners.Count -gt 0) {
+                $pids = ($listeners | ForEach-Object { $_.OwningProcess }) -join ','
+                throw "CDP 冒烟[off]：dev_tools=false 时 9333 有监听进程（pid=$pids）"
+              }
+              $probes += 1
+              Start-Sleep -Seconds 1
+            }
+            if ($probes -lt 3) { throw "CDP 冒烟[off]：有效探测次数不足（$probes）" }
+            Write-Host "CDP 冒烟[off]：9333 无监听（$probes 次探测）"
+          }
+          } finally {
+            Set-WebView2CdpPolicy $false
+          }
+          Assert-WebView2PolicyCleared
+
+          Write-Host 'DevTools CDP 冒烟通过：dev_tools 开 = WebView2 调试口可探活（提权 runner 由 HKLM 策略补偿）；dev_tools 关 = 连接拒绝'
+
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
