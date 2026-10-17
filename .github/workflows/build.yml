@@ -15,6 +15,15 @@ name: Build
 #   3. Windows 产物「无 CEF」反向核验口径与 Linux 产物里 CEF 标志名、payload 布局（按 Electrobun 源码推断，未实机验证）。
 on:
   workflow_dispatch:
+    # mode=shots-only：只跑「安装器 UI 真机出图」（stub 载荷，分钟级），三平台矩阵全跳过——
+    # #103 样式验收快车道（GitHub 只注册默认分支上的 workflow，PR 合入前
+    # installer-ui.yml 无法直接 dispatch，故由本文件转发；合入后可直接 dispatch 它）
+    inputs:
+      mode:
+        description: 'shots-only = 只出安装器 UI 截图，跳过全量构建'
+        required: false
+        default: ''
+        type: string
   push:
     tags:
       # 全部 tag 都触发（AC 原文「tag push 触发全量流水线」，未限定前缀；'**' 连含斜杠的 tag 名也匹配）
@@ -38,6 +47,8 @@ permissions:
 jobs:
   build:
     name: 构建 + 产物断言（${{ matrix.label }}）
+    # mode=shots-only 时只跑安装器 UI 出图（转发 job），全量构建跳过
+    if: inputs.mode != 'shots-only'
     runs-on: ${{ matrix.os }}
     # hutch 首次构建要下载 cottontail/Electrobun/CEF/bun 四件套，下载器无超时（run 38493719636 实证挂 85 分钟）；
     # 全量正常 ~15 分钟，40 分钟兜底防挂死占 runner
@@ -144,6 +155,10 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) { choco install nsis -y --no-progress }
+          # 品牌图不入库（.gitignore）：安装器构建前先按 resources/app-icon.ico 生成（#92 的生成器 / #91 消费）
+          bun run prepare:installer-assets
+          pwsh -File scripts/build-window-frame.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }   # DLL 编译失败必须拦住构建（C2374 事故：曾静默打出无 DLL 的安装器）
           bun run build:installer
 
       - name: 产物断言（渲染器运行时 + version.json）
@@ -258,3 +273,10 @@ jobs:
             desktop-electrobun/artifacts/*.dmg
             desktop-electrobun/artifacts/linux-*.tar.gz
           if-no-files-found: error
+
+  # #103 安装器 UI 真机出图入口：mode=shots-only 时转发到同提交的 installer-ui.yml
+  # （stub 载荷，分钟级，不打真实桌面、不跑产品测试）
+  installer-ui-shots:
+    name: 安装器 UI 真机出图（stub 载荷）
+    if: inputs.mode == 'shots-only'
+    uses: ./.github/workflows/installer-ui.yml

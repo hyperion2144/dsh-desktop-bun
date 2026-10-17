@@ -12,5 +12,5 @@
     "allowImportingTsExtensions": true,
     "noUncheckedIndexedAccess": true
   },
-  "include": ["src", "test", "electrobun.config.ts"]
+  "include": ["src", "test", "installer", "electrobun.config.ts"]
 }
