@@ -216,6 +216,30 @@ function prepatchBuiltinRuntime() {
       '运行时会在签名后改写它，TCC 授权会因此失配（#143）')
     process.exit(1)
   }
+
+  const inspectorClient = join(
+    builtinTarget,
+    'node_modules',
+    '@deepseek-ai',
+    'dsh-experimental-inspector',
+    'lib',
+    'client.js',
+  )
+  if (existsSync(inspectorClient)) {
+    let inspectorPatched = false
+    try {
+      inspectorPatched = readFileSync(inspectorClient, 'utf8').includes('bun-preload: bootstrap 有界退避重试')
+    } catch {
+      inspectorPatched = false
+    }
+    if (!inspectorPatched) {
+      console.error(
+        '[prepare-bundle] 内置树的 inspector Client 没有预打 Patch 16（bootstrap 退避重试 / F7 日志）——',
+        '上游 client.js 形状可能变了，检查 resources/dsh/bun-preload.mjs 的锚点',
+      )
+      process.exit(1)
+    }
+  }
   console.log('[prepare-bundle] 内置运行时已预打兼容层补丁（rev 已就位，运行时不会再写这棵树）')
 }
 
