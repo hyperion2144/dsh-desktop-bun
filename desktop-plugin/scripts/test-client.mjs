@@ -542,61 +542,65 @@ const { createShellRpc } = await import(pathToFileURL(join(tmp, 'shell-rpc.mjs')
   assert.deepEqual(globals.__electrobunPendingHostMessages, [], '接管后积压已排空')
 }
 
-// 壳→页面主动推送（#73）：{type:'message', id:消息名, payload} 分发给监听器
-{
-  const globals = {
-    __electrobunHostBridge: { postMessage: () => {} },
-    __electrobun: {},
+// #128：壳 preload 装的官方 RPC 分发器（与 preload.ts 同形）。桩里造一个同构的：
+// 自己发 id、自己占接收面、自己排 pending——插件在场时官方通道**整体**委托给它。
+const withPreloadDispatcher = () => {
+  const sent = []
+  const pending = new Map()
+  let nextId = 0
+  const globals = { __electrobunHostBridge: { postMessage: (raw) => sent.push(JSON.parse(raw)) }, __electrobun: {} }
+  const invoke = (method, params) =>
+    new Promise((resolve, reject) => {
+      nextId += 1
+      pending.set(nextId, { resolve, reject })
+      globals.__electrobunHostBridge.postMessage(JSON.stringify({ type: 'request', id: nextId, method, params }))
+    })
+  globals.__DSH_SHELL_RPC__ = { invoke, request: invoke }
+  globals.__electrobun.receiveMessageFromHost = (packet) => {
+    const waiter = pending.get(packet.id)
+    if (waiter === undefined) return
+    pending.delete(packet.id)
+    if (packet.success === true) waiter.resolve(packet.payload)
+    else waiter.reject(new Error(String(packet.error)))
   }
-  const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
-  const seen = []
-  const off = rpc.onMessage((name, payload) => seen.push([name, payload]))
-  void rpc.invoke('ping').catch(() => {}) // 接管接收面（真页面上 handlePacket 也只在接管后可达）
-  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: { maximized: true } })
-  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 1, success: true, payload: 'x' })
-  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: { maximized: false } })
-  assert.deepEqual(seen, [['window_state_changed', { maximized: true }], ['window_state_changed', { maximized: false }]], 'message 包分发到监听器，response 不串台')
-  off()
-  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: {} })
-  assert.equal(seen.length, 2, '退订后不再分发')
-  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 7, payload: {} })
-  assert.equal(seen.length, 2, 'id 非字符串的 message 包丢弃')
+  return { globals, sent }
 }
 
-// 接管前抵达的推送：preload 攒在 __electrobunPendingHostMessages，首查（ensureReceive）时排空分发
+// 插件把整条官方通道委托给 preload 分发器，且不碰 receiveMessageFromHost
 {
-  const globals = {
-    __electrobunHostBridge: { postMessage: () => {} },
-    __electrobun: {},
-    __electrobunPendingHostMessages: [{ type: 'message', id: 'window_state_changed', payload: {} }],
-  }
+  const { globals, sent } = withPreloadDispatcher()
+  const before = globals.__electrobun.receiveMessageFromHost
   const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
-  let pushed = 0
-  rpc.onMessage((name) => {
-    if (name === 'window_state_changed') pushed += 1
-  })
-  void rpc.invoke('x').catch(() => {})
-  assert.equal(pushed, 1, '积压的推送在首次 invoke 排空时分发（#73 启动竞态）')
-  assert.deepEqual(globals.__electrobunPendingHostMessages, [], '积压已排空')
+  const p = rpc.invoke('get_desktop_client_environment', { a: 1 })
+  assert.equal(sent.length, 1, '只发一个请求（插件没另起一套）')
+  assert.equal(sent[0].method, 'get_desktop_client_environment', '方法名原样上送')
+  assert.deepEqual(sent[0].params, { a: 1 }, '参数原样上送')
+  assert.equal(rpc.available(), true, '有 preload 分发器时 available()')
+  assert.equal(globals.__electrobun.receiveMessageFromHost, before, '插件不覆盖 receiveMessageFromHost（覆盖了 preload 的在途回包就没人接）')
+  assert.equal(rpc.onMessage, undefined, 'onMessage 已随 #128 删除（页面侧无生产订阅者）')
+  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: sent[0].id, success: true, payload: 'env' })
+  assert.equal(await p, 'env', '回包经 preload 分发器归位，resolve value')
 }
 
-// 多监听器隔离：一个抛错不影响其余
+// 注入脚本与插件同时在飞：共用一个 id 空间，回包乱序抵达也不串台
 {
-  const globals = {
-    __electrobunHostBridge: { postMessage: () => {} },
-    __electrobun: {},
-  }
+  const { globals, sent } = withPreloadDispatcher()
   const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
-  let second = 0
-  rpc.onMessage(() => {
-    throw new Error('第一个监听器炸了')
-  })
-  void rpc.invoke('ping').catch(() => {}) // 接管接收面（真页面上 handlePacket 也只在接管后可达）
-  rpc.onMessage((name) => {
-    if (name === 'window_state_changed') second += 1
-  })
-  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: {} })
-  assert.equal(second, 1, '一个监听器抛错不阻断其余监听器')
+  const fromPlugin = rpc.invoke('plugin_cmd')
+  const fromInjected = globals.__DSH_SHELL_RPC__.invoke('shell_cmd')
+  assert.deepEqual(
+    sent.map((packet) => [packet.id, packet.method]),
+    [
+      [1, 'plugin_cmd'],
+      [2, 'shell_cmd'],
+    ],
+    '两条共用一个 id 空间（各发一个 id=1 的话壳侧按 id 存表会丢一份回包）',
+  )
+  // 回包倒序抵达：谁等 id 谁拿自己的
+  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 2, success: true, payload: 'shell' })
+  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 1, success: true, payload: 'plugin' })
+  assert.equal(await fromPlugin, 'plugin', '插件那条拿到自己的回包')
+  assert.equal(await fromInjected, 'shell', '注入脚本那条拿到自己的回包')
 }
 
 // 中继通道（mobile-access 远程页）
@@ -606,22 +610,24 @@ const { createShellRpc } = await import(pathToFileURL(join(tmp, 'shell-rpc.mjs')
   assert.deepEqual(await rpc.invoke('get_notifications_state', { x: 1 }), { cmd: 'get_notifications_state', args: { x: 1 } }, '有中继无桥时走中继')
 }
 
-// 同源 fetch 兑底：带 token 头 + 请求体字形
+// #128：同源 fetch 兑底整条删除——只剩每视图 token 不再算「可用通道」，而且一个 fetch 都不打
 {
-  const calls = []
-  const fetchImpl = async (url, init) => { calls.push({ url, init }); return { ok: true, json: async () => ({ ok: true, value: { status: 2 } }) } }
-  const globals = { __DSH_SHELL_VIEW_TOKEN__: 'tok-1' }
-  const rpc = createShellRpc({ readGlobals: () => globals, fetchImpl })
-  assert.deepEqual(await rpc.invoke('get_dsh_status'), { status: 2 }, 'fetch 兑底解析 value')
-  assert.equal(calls[0].url, '/__shell__/rpc', '端点正确')
-  assert.equal(calls[0].init.headers['x-dsh-shell-view'], 'tok-1', '带每视图 token 头')
-  assert.deepEqual(JSON.parse(calls[0].init.body), { cmd: 'get_dsh_status', args: {} }, 'body 对齐旧 shim 协议')
-
-  const fetchErr = async () => ({ ok: true, json: async () => ({ ok: false, error: 'unsupported command: nope' }) })
-  const rpcE = createShellRpc({ readGlobals: () => globals, fetchImpl: fetchErr })
-  await assert.rejects(rpcE.invoke('nope'), /unsupported command/, 'fetch 业务失败可见')
+  let fetchCalls = 0
+  const realFetch = globalThis.fetch
+  globalThis.fetch = () => {
+    fetchCalls += 1
+    return Promise.resolve(new Response('{}'))
+  }
+  try {
+    const globals = { __DSH_SHELL_VIEW_TOKEN__: 'tok-1' }
+    const rpc = createShellRpc({ readGlobals: () => globals })
+    assert.equal(rpc.available(), false, '只有视图 token 时 available() 为 false（fetch 兑底已删）')
+    await assert.rejects(rpc.invoke('get_dsh_status'), /shell rpc unavailable/, '不再有第三条通道可走')
+    assert.equal(fetchCalls, 0, '同源 fetch 兑底分支已删（不再 POST /__shell__/rpc）')
+  } finally {
+    globalThis.fetch = realFetch
+  }
 }
-
 // 无任何通道：available false + invoke reject
 {
   const rpc = createShellRpc({ readGlobals: () => ({}) })
@@ -629,14 +635,29 @@ const { createShellRpc } = await import(pathToFileURL(join(tmp, 'shell-rpc.mjs')
   await assert.rejects(rpc.invoke('x'), /shell rpc unavailable/)
 }
 
-// 官方通道失败不回退 fetch（命令可能已生效，toggle 二次执行会翻转两次）
+// 官方通道失败不重试、也不打 fetch（命令可能已生效，toggle 二次执行会翻转两次）
 {
   let fetchCalls = 0
-  const fetchImpl = async () => { fetchCalls += 1; return { ok: true, json: async () => ({ ok: true, value: 1 }) } }
-  const globals = { __electrobunHostBridge: { postMessage: () => {} }, __electrobun: {}, __DSH_SHELL_VIEW_TOKEN__: 't3' }
-  const rpc = createShellRpc({ readGlobals: () => globals, fetchImpl, setTimeoutImpl: (fn) => { fn(); return 1 }, clearTimeoutImpl: () => {} })
-  await assert.rejects(rpc.invoke('x'), /timed out/)
-  assert.equal(fetchCalls, 0, '官方通道超时后不打 fetch 兑底')
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (...args) => {
+    fetchCalls += 1
+    return realFetch(...args)
+  }
+  try {
+    const globals = { __electrobunHostBridge: { postMessage: () => {} }, __electrobun: {} }
+    const rpc = createShellRpc({
+      readGlobals: () => globals,
+      setTimeoutImpl: (fn) => {
+        fn()
+        return 1
+      },
+      clearTimeoutImpl: () => {},
+    })
+    await assert.rejects(rpc.invoke('x'), /timed out/)
+    assert.equal(fetchCalls, 0, '官方通道超时后不打 fetch')
+  } finally {
+    globalThis.fetch = realFetch
+  }
 }
 
 
@@ -1003,7 +1024,6 @@ for (const token of ['macOS', 'Windows', 'Linux']) {
 }
 
 
-
 // ── notification-focus-hint（#115）：窗口在前台聚焦时不投递通知的说明文案 ──
 await build({
   entryPoints: [join(root, 'src/client/notification-focus-hint.ts')],
@@ -1034,5 +1054,85 @@ assert.equal(focusHint.focusSuppressHint(), focusText, '纯函数：同输入同
 // 源码级接线门禁：文案必须真的画进通知页（#115）
 const focusTabSource = readFileSync(join(root, 'src/client/notifications-tab.tsx'), 'utf8')
 assert.ok(focusTabSource.includes('{focusSuppressHint()}'), '说明文案画进通知页（#115 接线）')
+
+// ── 桌面设置面板（#128）：结构性断言，不是快照 ──
+// 面板是 .tsx，跑不了纯函数断言；但两处改动都是「有没有卡框 / 档位键名对不对」，
+// 用源码文本锁死最省事，也最贴近真实回归形态（谁都可能顺手把它挪出 SectionBox）。
+const panelSource = readFileSync(join(root, 'src/client/desktop-settings.tsx'), 'utf8')
+
+// ① 聚合档位：面板写出去的键必须与壳 serializeSettings 写的下划线键逐字一致，
+// 值域三档也与壳 LOOPBACK_AGGREGATION_MODES 一致——任一边改名，这里当场红。
+assert.ok(panelSource.includes('loopback_aggregation'), '面板写 loopback_aggregation（与壳落盘键同名）')
+for (const mode of ['full', 'stream', 'none']) {
+  assert.ok(
+    new RegExp(`value: '${mode}'`).test(panelSource),
+    `聚合档位表含 ${mode}（与壳白名单同值）`,
+  )
+}
+// 聚合卡自己的文案不许出现「重启」：切档即时生效，写了重启就是骗用户。
+{
+  const aggStart = panelSource.indexOf('<SectionBox title="loopback 数据面聚合">')
+  const aggEnd = panelSource.indexOf('</SectionBox>', aggStart)
+  assert.ok(aggStart !== -1 && aggEnd !== -1, '聚合卡在面板里')
+  const aggCard = panelSource.slice(aggStart, aggEnd)
+  assert.ok(aggCard.includes('立即生效'), '聚合卡写明「立即生效」')
+  assert.ok(!aggCard.includes('重启 dsh 生效'), '聚合卡不写「重启 dsh 生效」（切档即时生效）')
+}
+
+// ② 手机端桌面布局开关：必须在「手机访问（远程连接）」这张卡的 </SectionBox> 之前。
+// #128 的原症状就是它掉在 </SectionBox> 之后裸奔（没有卡片框），所以直接卡位置。
+// 先剥 JSX 注释再定位：注释里出现 `</SectionBox>` 字样会让「找第一个闭合标签」误判到注释上。
+{
+  const panel = panelSource.replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
+  const cardStart = panel.indexOf('<SectionBox title="手机访问（远程连接）">')
+  const cardEnd = panel.indexOf('</SectionBox>', cardStart)
+  assert.ok(cardStart !== -1 && cardEnd !== -1, '「手机访问（远程连接）」卡还在')
+  const card = panel.slice(cardStart, cardEnd)
+  assert.ok(card.includes('移动端布局'), '手机端桌面布局开关在「手机访问」卡内（有卡片框）')
+  assert.ok(card.includes('desktopLayoutOnPhones'), '卡内绑着布局开关自己的状态')
+}
+
+// ③ 手机布局开关：与同面板其它 checkbox（#69 开发者工具 / #186 防休眠 / #128 聚合档位）口径一致——勾选即存。
+// 原症状是它只 setState、旁边挂一个「保存」按钮，而同形态的防休眠是勾选即存，形态相同行为不同。
+{
+  const panel = panelSource.replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
+  const at = panel.indexOf('data-desktop-settings="desktop-layout-on-phones"')
+  assert.ok(at !== -1, '布局开关还在')
+  const row = panel.slice(at, panel.indexOf('</div>', at))
+  assert.ok(
+    row.includes('onChange={(e) => handleToggleMobileLayout(e.target.checked)}'),
+    '布局开关勾选直接落盘（不再只改本地 state 等点保存）',
+  )
+  assert.ok(!row.includes('保存</PfBtn>'), '布局开关那一行不再挂「保存」按钮')
+  assert.ok(
+    panelSource.includes('const handleToggleMobileLayout = (next: boolean)'),
+    'handler 收 next 参数而不是读 state（否则连点两下会存反）',
+  )
+}
+
+// ④ 边框 token：dsh 宿主只定义 --dsw-alias-border-l1..l4 四档（每档各有浅色/深色两套值），
+// 写成不带数字的 -l 永远取不到变量、只能落回白色 #ffffff1f ⇒ 浅色主题白底白线看不见（#128）。
+// 任一文件写回 `-l,` 即红。
+{
+  for (const f of ['desktop-settings.tsx', 'notifications-tab.tsx', 'downloads-tab.tsx']) {
+    const src = readFileSync(join(root, 'src/client', f), 'utf8')
+    assert.ok(
+      !src.includes('--dsw-alias-border-l,'),
+      `${f}：不再用宿主未定义的 --dsw-alias-border-l（会永远回退白色，浅色主题看不见边框）`,
+    )
+  }
+}
+
+// ⑤ 代理设置卡：保存按钮必须落在 </SectionBox> 之内。
+// 回归形态是「保存按钮和说明跑到框外」——SectionBox 提前闭合，按钮漂在卡外；面板里其余卡都是「按钮在卡内」。
+{
+  const panel = panelSource.replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
+  const cardStart = panel.indexOf('<SectionBox title="代理设置">')
+  const cardEnd = panel.indexOf('</SectionBox>', cardStart)
+  assert.ok(cardStart !== -1 && cardEnd !== -1, '「代理设置」卡还在')
+  const card = panel.slice(cardStart, cardEnd)
+  assert.ok(card.includes('onClick={handleSaveProxy}'), '保存按钮在「代理设置」卡内（没漂到框外）')
+  assert.ok(card.includes('保存代理设置'), '卡内就是那个保存按钮（不是别的同名文案）')
+}
 rmSync(tmp, { recursive: true, force: true })
 console.log('client 纯函数测试：全部通过 ✓')

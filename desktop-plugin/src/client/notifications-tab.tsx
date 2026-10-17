@@ -62,34 +62,34 @@ const SYS_PREFS = 'x-apple.systempreferences:com.apple.Preference.Notifications'
 // ── 主题 token：真实 dsh 变量名 + 回退值（独立打开时生效）──
 const PANEL_CSS = `
 [data-notification-settings] { font-size: 13px; }
-[data-notification-settings] .n-card { border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-radius:12px; padding:12px 16px; margin-bottom:10px; }
-[data-notification-settings] .n-banner { display:flex; gap:10px; align-items:center; border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-left:3px solid var(--dsw-alias-state-warn,#e8a33d); background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); border-radius:8px; padding:9px 12px; font-size:12.5px; margin-bottom:10px; }
+[data-notification-settings] .n-card { border:1px solid var(--dsw-alias-border-l2,#ffffff1f); border-radius:12px; padding:12px 16px; margin-bottom:10px; }
+[data-notification-settings] .n-banner { display:flex; gap:10px; align-items:center; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); border-left:3px solid var(--dsw-alias-state-warn,#e8a33d); background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); border-radius:8px; padding:9px 12px; font-size:12.5px; margin-bottom:10px; }
 [data-notification-settings] .n-banner.granted { border-left-color:var(--dsw-alias-state-success,#2fbf71); }
 [data-notification-settings] .n-banner.denied { border-left-color:var(--dsw-alias-state-danger,#e5534b); }
-[data-notification-settings] .n-banner.neutral { border-left-color:var(--dsw-alias-border-l,#ffffff1f); }
+[data-notification-settings] .n-banner.neutral { border-left-color:var(--dsw-alias-border-l2,#ffffff1f); }
 [data-notification-settings] .n-banner .grow { flex:1; min-width:0; }
-[data-notification-settings] .n-chip { display:inline-block; font-size:11px; border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-radius:6px; padding:1px 7px; color:var(--dsw-alias-label-secondary,#9aa4b2); white-space:nowrap; }
+[data-notification-settings] .n-chip { display:inline-block; font-size:11px; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); border-radius:6px; padding:1px 7px; color:var(--dsw-alias-label-secondary,#9aa4b2); white-space:nowrap; }
 [data-notification-settings] .n-chip.ok { color:var(--dsw-alias-state-success,#2fbf71); border-color:var(--dsw-alias-state-success,#2fbf71); }
 [data-notification-settings] .n-chip.warn { color:var(--dsw-alias-state-warn,#e8a33d); border-color:var(--dsw-alias-state-warn,#e8a33d); }
 [data-notification-settings] .n-chip.danger { color:var(--dsw-alias-state-danger,#e5534b); border-color:var(--dsw-alias-state-danger,#e5534b); }
 [data-notification-settings] .n-btn { background:var(--dsw-alias-brand-primary-new-color,#4176e6); border:none; color:#fff; border-radius:8px; padding:5px 12px; font-size:12px; cursor:pointer; }
 [data-notification-settings] .n-btn:hover { filter:brightness(1.12); }
-[data-notification-settings] .n-btn.ghost { background:transparent; border:1px solid var(--dsw-alias-border-l,#ffffff1f); color:var(--dsw-alias-label-primary,#e7eaf0); }
+[data-notification-settings] .n-btn.ghost { background:transparent; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); color:var(--dsw-alias-label-primary,#e7eaf0); }
 [data-notification-settings] .n-btn.ghost:hover { background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); filter:none; }
 [data-notification-settings] .n-btn.mini { padding:2px 9px; font-size:11px; }
 [data-notification-settings] .n-btn:disabled { opacity:.45; cursor:default; filter:none; }
-[data-notification-settings] .n-switch { position:relative; width:34px; height:19px; border-radius:999px; background:var(--dsw-alias-border-l,#ffffff1f); cursor:pointer; flex:none; transition:background .15s; display:inline-block; vertical-align:middle; }
+[data-notification-settings] .n-switch { position:relative; width:34px; height:19px; border-radius:999px; background:var(--dsw-alias-border-l2,#ffffff1f); cursor:pointer; flex:none; transition:background .15s; display:inline-block; vertical-align:middle; }
 [data-notification-settings] .n-switch.on { background:var(--dsw-alias-state-success,#2fbf71); }
 [data-notification-settings] .n-switch::after { content:""; position:absolute; top:2px; left:2px; width:15px; height:15px; border-radius:50%; background:var(--dsw-alias-bg-base,#151517); transition:left .15s; }
 [data-notification-settings] .n-switch.on::after { left:17px; }
 [data-notification-settings] .n-setrow { display:flex; justify-content:space-between; align-items:center; gap:10px; font-size:12.5px; }
-[data-notification-settings] .n-srow { display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid var(--dsw-alias-border-l,#ffffff1f); }
+[data-notification-settings] .n-srow { display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid var(--dsw-alias-border-l2,#ffffff1f); }
 [data-notification-settings] .n-grp:last-child .n-srow:last-child { border-bottom:none; }
 [data-notification-settings] .n-sinfo { flex:1; min-width:0; }
 [data-notification-settings] .n-sinfo b { font-size:12.5px; font-weight:600; }
 [data-notification-settings] .n-mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:10.5px; color:var(--dsw-alias-label-secondary,#9aa4b2); }
 [data-notification-settings] .n-gname { font-size:11px; color:var(--dsw-alias-label-secondary,#9aa4b2); letter-spacing:.4px; margin:10px 0 2px; }
-[data-notification-settings] .n-select, [data-notification-settings] .n-time { font:inherit; font-size:12px; color:inherit; background:transparent; border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-radius:8px; padding:3px 7px; }
+[data-notification-settings] .n-select, [data-notification-settings] .n-time { font:inherit; font-size:12px; color:inherit; background:transparent; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); border-radius:8px; padding:3px 7px; }
 [data-notification-settings] .n-note { font-size:11px; color:var(--dsw-alias-label-secondary,#9aa4b2); margin-top:8px; }
 [data-notification-settings] .n-mastoff .n-srow .n-switch, [data-notification-settings] .n-mastoff .n-srow select, [data-notification-settings] .n-mastoff .n-srow button { opacity:.4; pointer-events:none; }
 [data-notification-settings] input[type="time"] { color-scheme: inherit; }

@@ -21,7 +21,7 @@ import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-s
 import type { ShellStage } from './stages.ts'
 import { dshHome, layout, resolveBuiltinRuntimeDir, type ShellLayout } from './runtime.ts'
 import { startShellServer, type BootPayload, type ShellServer, type ShellServerOptions } from './shell-server.ts'
-import type { WindowMaxState } from './window-max.ts'
+import type { WindowControlAction, WindowMaxState } from './window-max.ts'
 import { readHostRecords, sweepStaleHosts, upsertHostRecord, writeHostRecords } from './host-registry.ts'
 import { createRestartLedger } from './supervisor.ts'
 import type { ContextMenuRequest } from './context-menu.ts'
@@ -45,7 +45,7 @@ import { createUpdater, type ShellUpdater } from './updater.ts'
 import { permissionHint, permissionLabel } from '../shared/notify-permission.ts'
 import { NOTIFY_TYPE_SCENARIOS, SCENARIO } from '../shared/notify-policy.ts'
 import { resolveBundleIdentifier } from '../shared/app-identity.ts'
-import { activeProfile, changedPortKeys, profileLanePort, profilePort, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
+import { DEFAULT_LOOPBACK_AGGREGATION, activeProfile, changedPortKeys, profileLanePort, profilePort, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
 import { createCommandTable, type RuntimeSnapshot } from './commands.ts'
 import { createRpcRouter, dispatchRpc, type RpcRouter } from './rpc.ts'
 import { updateSettings } from './settings-store.ts'
@@ -111,7 +111,7 @@ export interface ServiceOptions {
   /** 第二个实例请求把窗口带到前台（单实例激活） */
   onActivate?: () => void
   /** 自绘窗口控制（A5）：页面三键 → 主进程操作 BrowserWindow */
-  onWindowControl?: (action: 'minimize' | 'toggle-maximize' | 'close') => void
+  onWindowControl?: (action: WindowControlAction) => void
   /** 该 profile 的窗口是否在前台聚焦（#115：聚焦 → 通知整条不投递；无窗口/测试可不给） */
   isWindowFocused?: (profile: string) => boolean
   /** 最大化态读取（#112 壳层标题栏带）：GET /__shell__/window 回 { maximized }；缺省时 GET 仍 405 */
@@ -783,6 +783,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onProfileOp: (request) => service.profileOp(request),
     onInputConfirm: options.onInputConfirm,
     views: options.views,
+    // #128：聚合档位读内存单写者（saveSettings 每次重新赋值 liveSettings）——切档即时生效，热路径零磁盘 IO。
+    aggregation: () => liveSettings.loopbackAggregation ?? DEFAULT_LOOPBACK_AGGREGATION,
     onLog: log,
     onRpc: async (raw, grant) => {
       if (rpcRouter === null) return { status: 503, body: { ok: false, error: 'shell rpc not ready' } }
@@ -1319,6 +1321,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       portClaims: async () => pruneClaims(parseClaims(await readClaims()), isAlivePid),
       profiles: () => listProfiles(home, paths.profile),
       openExternal: options.onOpenExternal,
+      // 壳 preload 脚本迁官方 RPC（#128③）：boot 载荷与右键菜单改走命令表
+      bootPayload: () => bootPayload,
+      showContextMenu: options.onContextMenu,
       closeWindow: options.onCloseWindow,
       playSound: (name) => notifier.previewSound(name),
       playSystemSound: () => {

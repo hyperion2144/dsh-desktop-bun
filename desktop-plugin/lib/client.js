@@ -45,8 +45,6 @@ __export(index_exports, {
 module.exports = __toCommonJS(index_exports);
 
 // src/client/shell-rpc.ts
-var RPC_ENDPOINT = "/__shell__/rpc";
-var VIEW_TOKEN_HEADER = "x-dsh-shell-view";
 var DEFAULT_TIMEOUT_MS = 15e3;
 var MAX_ID = 1e10;
 function isRecord(value) {
@@ -54,11 +52,9 @@ function isRecord(value) {
 }
 function createShellRpc(deps) {
   const readGlobals = deps?.readGlobals ?? (() => globalThis);
-  const fetchImpl = deps?.fetchImpl ?? ((...a) => fetch(...a));
   const setTimeoutImpl = deps?.setTimeoutImpl ?? ((fn, ms) => setTimeout(fn, ms));
   const clearTimeoutImpl = deps?.clearTimeoutImpl ?? ((t) => clearTimeout(t));
   const pending = /* @__PURE__ */ new Map();
-  const messageListeners = /* @__PURE__ */ new Set();
   let nextId = 0;
   let receiveAttached = false;
   function officialBridge() {
@@ -67,18 +63,6 @@ function createShellRpc(deps) {
   }
   function handlePacket(packet) {
     if (!isRecord(packet)) return;
-    if (packet.type === "message") {
-      const name = typeof packet.id === "string" ? packet.id : "";
-      if (name === "") return;
-      for (const listener of messageListeners) {
-        try {
-          listener(name, packet.payload);
-        } catch (error) {
-          console.error("shell rpc message listener failed", error);
-        }
-      }
-      return;
-    }
     if (packet.type !== "response") return;
     const id = typeof packet.id === "number" ? packet.id : NaN;
     const waiter = pending.get(id);
@@ -89,6 +73,10 @@ function createShellRpc(deps) {
     else waiter.reject(new Error(typeof packet.error === "string" ? packet.error : "shell rpc failed"));
   }
   function ensureReceive() {
+    if (typeof readGlobals().__DSH_SHELL_RPC__?.invoke === "function") {
+      receiveAttached = true;
+      return;
+    }
     if (receiveAttached) return;
     const g = readGlobals();
     const eb = g.__electrobun;
@@ -102,6 +90,8 @@ function createShellRpc(deps) {
     }
   }
   function officialInvoke(cmd, args, options) {
+    const dispatcher = readGlobals().__DSH_SHELL_RPC__;
+    if (typeof dispatcher?.invoke === "function") return dispatcher.invoke(cmd, args, options);
     const post = officialBridge();
     if (post === void 0) return Promise.reject(new Error("official bridge unavailable"));
     ensureReceive();
@@ -132,40 +122,16 @@ function createShellRpc(deps) {
     if (typeof invoke4 !== "function") return Promise.reject(new Error("relay bridge unavailable"));
     return invoke4(cmd, args);
   }
-  async function fetchInvoke(cmd, args) {
-    const token = readGlobals().__DSH_SHELL_VIEW_TOKEN__;
-    let response;
-    try {
-      response = await fetchImpl(RPC_ENDPOINT, {
-        method: "POST",
-        headers: { "content-type": "application/json", ...typeof token === "string" && token !== "" ? { [VIEW_TOKEN_HEADER]: token } : {} },
-        body: JSON.stringify({ cmd, args })
-      });
-    } catch (error) {
-      throw new Error(`shell rpc failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    if (!response.ok) throw new Error(`shell rpc failed: ${String(response.status)}`);
-    const body = await response.json().catch(() => null);
-    if (body !== null && body.ok === true) return body.value;
-    throw new Error(typeof body?.error === "string" ? body.error : "shell rpc failed");
-  }
   return {
     invoke(cmd, args, options) {
       const rest = isRecord(args) ? args : {};
       if (officialBridge() !== void 0) return officialInvoke(cmd, rest, options);
       if (typeof readGlobals().__DSH_SHELL_RELAY__?.invoke === "function") return relayInvoke(cmd, rest);
-      if (typeof readGlobals().__DSH_SHELL_VIEW_TOKEN__ === "string") return fetchInvoke(cmd, rest);
       return Promise.reject(new Error("shell rpc unavailable"));
-    },
-    onMessage(listener) {
-      messageListeners.add(listener);
-      return () => {
-        messageListeners.delete(listener);
-      };
     },
     available() {
       const g = readGlobals();
-      return officialBridge() !== void 0 || typeof g.__DSH_SHELL_RELAY__?.invoke === "function" || typeof g.__DSH_SHELL_VIEW_TOKEN__ === "string";
+      return officialBridge() !== void 0 || typeof g.__DSH_SHELL_RELAY__?.invoke === "function" || typeof g.__DSH_SHELL_RPC__?.invoke === "function";
     }
   };
 }
@@ -593,7 +559,7 @@ function DownloadsPanel() {
   };
   const finishedCount = tasks.filter((t) => t.status === "completed" || t.status === "failed" || t.status === "cancelled").length;
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0, fontSize: 12 }, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderBottom: "1px solid var(--dsw-alias-border-l, rgba(255,255,255,.08))" }, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderBottom: "1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.08))" }, children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { style: { color: "var(--dsw-alias-label-secondary, #9aa3af)" }, children: [
         "\u5E76\u53D1 ",
         concurrency
@@ -605,12 +571,12 @@ function DownloadsPanel() {
           type: "button",
           disabled: busy || finishedCount === 0,
           onClick: () => void act("clear_finished_downloads", {}),
-          style: { padding: "2px 10px", borderRadius: 6, border: "1px solid var(--dsw-alias-border-l, rgba(255,255,255,.14))", background: "transparent", color: "inherit", cursor: "pointer" },
+          style: { padding: "2px 10px", borderRadius: 6, border: "1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))", background: "transparent", color: "inherit", cursor: "pointer" },
           children: "\u6E05\u7A7A\u5DF2\u5B8C\u6210"
         }
       )
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { flex: 1, minHeight: 0, overflowY: "auto", padding: "4px 0" }, children: tasks.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { padding: "28px 16px", textAlign: "center", color: "var(--dsw-alias-label-tertiary, #6b7280)" }, children: "\u6682\u65E0\u4E0B\u8F7D\u4EFB\u52A1\u3002\u9875\u9762\u91CC\u7684\u4E0B\u8F7D\uFF08session log\u3001\u6587\u4EF6\u7B49\uFF09\u4F1A\u51FA\u73B0\u5728\u8FD9\u91CC\u3002" }) : tasks.map((t) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { padding: "8px 10px", borderBottom: "1px solid var(--dsw-alias-border-l, rgba(255,255,255,.05))" }, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { flex: 1, minHeight: 0, overflowY: "auto", padding: "4px 0" }, children: tasks.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { padding: "28px 16px", textAlign: "center", color: "var(--dsw-alias-label-tertiary, #6b7280)" }, children: "\u6682\u65E0\u4E0B\u8F7D\u4EFB\u52A1\u3002\u9875\u9762\u91CC\u7684\u4E0B\u8F7D\uFF08session log\u3001\u6587\u4EF6\u7B49\uFF09\u4F1A\u51FA\u73B0\u5728\u8FD9\u91CC\u3002" }) : tasks.map((t) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { padding: "8px 10px", borderBottom: "1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.05))" }, children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--dsw-alias-label-primary, #e7eaf0)" }, title: t.filename, children: t.filename }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { style: { color: "var(--dsw-alias-label-tertiary, #6b7280)", fontSize: 11 }, children: STATUS_LABEL[t.status] })
@@ -656,7 +622,7 @@ function TextButton({ children, onClick }) {
         padding: "1px 8px",
         fontSize: 11,
         borderRadius: 6,
-        border: "1px solid var(--dsw-alias-border-l, rgba(255,255,255,.14))",
+        border: "1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))",
         background: "transparent",
         color: "inherit",
         cursor: "pointer"
@@ -1426,13 +1392,13 @@ var PANEL_CSS = `
 [data-desktop-settings] .pf-btn { background:var(--dsw-alias-brand-primary-new-color,#4176e6); border:none; color:#fff; border-radius:8px; padding:6px 13px; font-size:12px; cursor:pointer; transition:filter .12s, transform .06s; }
 [data-desktop-settings] .pf-btn:hover { filter:brightness(1.12); }
 [data-desktop-settings] .pf-btn:active { transform:translateY(1px); }
-[data-desktop-settings] .pf-btn.ghost { background:transparent; border:1px solid var(--dsw-alias-border-l,#ffffff1f); color:var(--dsw-alias-label-primary,#e7eaf0); }
+[data-desktop-settings] .pf-btn.ghost { background:transparent; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); color:var(--dsw-alias-label-primary,#e7eaf0); }
 [data-desktop-settings] .pf-btn.ghost:hover { background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); filter:none; }
 [data-desktop-settings] .pf-btn.ghost:active { background:var(--dsw-alias-interactive-bg-active,rgba(255,255,255,.12)); transform:translateY(1px); filter:none; }
 [data-desktop-settings] .pf-btn.danger { background:transparent; border:1px solid var(--dsw-alias-state-danger-primary,#e5534b); color:var(--dsw-alias-state-danger-primary,#e5534b); }
 [data-desktop-settings] .pf-btn.danger:hover { background:rgba(229,83,75,.12); filter:none; }
 [data-desktop-settings] .pf-btn:disabled { opacity:.5; cursor:not-allowed; }
-[data-desktop-settings] input, [data-desktop-settings] select { padding:6px 8px; border-radius:8px; border:1px solid var(--dsw-alias-border-l,#ffffff1f); background:var(--dsw-alias-bg-base,#151517); color:inherit; font-size:12px; }
+[data-desktop-settings] input, [data-desktop-settings] select { padding:6px 8px; border-radius:8px; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); background:var(--dsw-alias-bg-base,#151517); color:inherit; font-size:12px; }
 [data-desktop-settings] .pf-label { font-size:11px; color:var(--dsw-alias-label-secondary,#9aa4b2); margin-bottom:4px; }
 [data-desktop-settings] .pf-input { width:100%; box-sizing:border-box; }
 [data-desktop-settings] .pf-title { font-weight:600; font-size:13px; margin-bottom:10px; }
@@ -1456,7 +1422,7 @@ var ROOT_STYLE = {
   fontSize: 13
 };
 var SECTION_STYLE = {
-  border: "1px solid var(--dsw-alias-border-l,#ffffff1f)",
+  border: "1px solid var(--dsw-alias-border-l2,#ffffff1f)",
   borderRadius: 12,
   padding: "14px 16px"
 };
@@ -1479,13 +1445,15 @@ var NOTE_STYLE = {
 var INPUT_BASE_STYLE = {
   padding: "6px 8px",
   borderRadius: 8,
-  border: "1px solid var(--dsw-alias-border-l,#ffffff1f)",
+  border: "1px solid var(--dsw-alias-border-l2,#ffffff1f)",
   background: "var(--dsw-alias-bg-base,#151517)",
   color: "inherit",
   fontSize: 12
 };
 var INPUT_FULL_STYLE = { ...INPUT_BASE_STYLE, width: "100%", boxSizing: "border-box" };
 var ROW_STYLE = { display: "flex", gap: 8, alignItems: "center" };
+var RADIO_ROW_STYLE = { display: "flex", alignItems: "flex-start", gap: 8, padding: "5px 0", cursor: "pointer" };
+var RADIO_TEXT_STYLE = { fontSize: 12.5, lineHeight: 1.5, color: "var(--dsw-alias-label-primary,#e7eaf0)" };
 var FLEX_1_STYLE = { flex: 1 };
 var DEV_TOOLS_OVERLAY_STYLE = {
   position: "fixed",
@@ -1511,6 +1479,15 @@ var DEV_TOOLS_BODY_STYLE = { fontSize: 12.5, lineHeight: 1.6, color: "var(--dsw-
 var DEV_TOOLS_ACTIONS_STYLE = { display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 };
 var DEV_TOOLS_CONFIRM = devToolsConfirmCopy();
 var DEV_TOOLS_DISABLE = devToolsDisableCopy();
+var LOOPBACK_AGGREGATION_OPTIONS = [
+  { value: "full", label: "\u5168\u5F00\uFF08\u9ED8\u8BA4\uFF09", detail: "\u5408\u5E76\u5E76\u53D1 GET\uFF0C\u5E76\u6574\u6761\u7F13\u51B2 \u2264256KB \u7684\u54CD\u5E94" },
+  { value: "stream", label: "\u53EA\u5173\u7F13\u51B2", detail: "\u4ECD\u5408\u5E76\uFF0C\u4F46\u54CD\u5E94\u8FB9\u5230\u8FB9\u4E0B\u53D1" },
+  { value: "none", label: "\u5168\u5173", detail: "\u4E0D\u5408\u5E76\uFF0C\u6BCF\u4E2A\u8BF7\u6C42\u5404\u81EA\u6253\u5BBF\u4E3B" }
+];
+function loopbackAggregationMode(raw) {
+  const hit = LOOPBACK_AGGREGATION_OPTIONS.find((o) => o.value === raw);
+  return hit === void 0 ? "full" : hit.value;
+}
 var BTN_PRIMARY_STYLE = {
   background: "var(--dsw-alias-brand-primary-new-color,#4176e6)",
   border: "none",
@@ -1523,7 +1500,7 @@ var BTN_PRIMARY_STYLE = {
 var BTN_GHOST_STYLE = {
   ...BTN_PRIMARY_STYLE,
   background: "transparent",
-  border: "1px solid var(--dsw-alias-border-l,#ffffff1f)",
+  border: "1px solid var(--dsw-alias-border-l2,#ffffff1f)",
   color: "var(--dsw-alias-label-primary,#e7eaf0)"
 };
 var BTN_DANGER_STYLE = {
@@ -1653,6 +1630,9 @@ function DesktopSettingsPanel() {
   const [devToolsNote, setDevToolsNote] = (0, import_react3.useState)(null);
   const [preventSleep, setPreventSleep] = (0, import_react3.useState)(true);
   const [preventSleepNote, setPreventSleepNote] = (0, import_react3.useState)(null);
+  const [mobileLayoutNote, setMobileLayoutNote] = (0, import_react3.useState)(null);
+  const [loopbackAggregation, setLoopbackAggregation] = (0, import_react3.useState)("full");
+  const [loopbackAggregationNote, setLoopbackAggregationNote] = (0, import_react3.useState)(null);
   (0, import_react3.useEffect)(() => {
     setDesktopLayoutOnPhones(desktop.desktop_layout_on_phones === true);
     setPreventSleep(desktop.prevent_sleep !== false);
@@ -1808,6 +1788,7 @@ function DesktopSettingsPanel() {
           proxy_pass: ns.proxy_pass || p.proxy_pass || ""
         });
         setProxyEffective(p.effective);
+        setLoopbackAggregation(loopbackAggregationMode(ns.loopback_aggregation));
         setDesktop({
           ...d,
           remote_addr: ns.remote_addr ?? d.remote_addr ?? null,
@@ -2048,12 +2029,29 @@ function DesktopSettingsPanel() {
       )
     ).catch((e) => setPreventSleepNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`));
   };
-  const handleSaveMobileLayout = () => {
-    void nsSave({ desktop_layout_on_phones: desktopLayoutOnPhones }).then(
-      () => setDownloadBoxNote(
-        desktopLayoutOnPhones ? "\u5DF2\u4FDD\u5B58\uFF1A\u624B\u673A\u4F7F\u7528\u684C\u9762\u5E03\u5C40\uFF08\u4E0D\u52A0\u8F7D\u79FB\u52A8\u5E03\u5C40\u63D2\u4EF6\uFF09\uFF0C\u91CD\u542F dsh \u751F\u6548\u3002" : "\u5DF2\u4FDD\u5B58\uFF1A\u624B\u673A\u4F7F\u7528\u79FB\u52A8\u5E03\u5C40\uFF0C\u91CD\u542F dsh \u751F\u6548\u3002"
+  const handleToggleMobileLayout = (next) => {
+    setDesktopLayoutOnPhones(next);
+    void nsSave({ desktop_layout_on_phones: next }).then(
+      () => setMobileLayoutNote(
+        next ? "\u5DF2\u4FDD\u5B58\uFF1A\u624B\u673A\u4F7F\u7528\u684C\u9762\u5E03\u5C40\uFF08\u4E0D\u52A0\u8F7D\u79FB\u52A8\u5E03\u5C40\u63D2\u4EF6\uFF09\uFF0C\u91CD\u542F dsh \u751F\u6548\u3002" : "\u5DF2\u4FDD\u5B58\uFF1A\u624B\u673A\u4F7F\u7528\u79FB\u52A8\u5E03\u5C40\uFF0C\u91CD\u542F dsh \u751F\u6548\u3002"
       )
-    ).catch((e) => setDownloadBoxNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`));
+    ).catch((e) => {
+      setDesktopLayoutOnPhones(!next);
+      setMobileLayoutNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`);
+    });
+  };
+  const handleSaveLoopbackAggregation = (next) => {
+    const prev = loopbackAggregation;
+    if (next === prev) return;
+    setLoopbackAggregation(next);
+    void nsSave({ loopback_aggregation: next }).then(
+      () => setLoopbackAggregationNote(
+        `\u5DF2\u4FDD\u5B58\uFF1A${LOOPBACK_AGGREGATION_OPTIONS.find((o) => o.value === next)?.label ?? next}\uFF08\u7ACB\u5373\u751F\u6548\uFF0C\u65E0\u9700\u91CD\u542F\uFF09`
+      )
+    ).catch((e) => {
+      setLoopbackAggregation(prev);
+      setLoopbackAggregationNote(`\u4FDD\u5B58\u5931\u8D25\uFF0C\u5DF2\u56DE\u5230\u539F\u6863\u4F4D\uFF1A${String(e)}`);
+    });
   };
   const handleSaveProxy = () => {
     if (busy) return;
@@ -2783,24 +2781,43 @@ function DesktopSettingsPanel() {
         "dsh \u7F51\u5173\u5BF9 ",
         /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("code", { children: "/api/remote.mux" }),
         " \u7684\u5FC3\u8DF3\u95F4\u9694\uFF08\u6BEB\u79D2\uFF09\u3002dsh \u539F\u751F 2s \u4E14\u8FDE\u4E22 2 \u6B21\u5373\u65AD\u5F00\uFF0C \u79FB\u52A8\u7AEF\u5207\u540E\u53F0/\u5F31\u7F51\u4F1A\u88AB\u79D2\u5224\u6B7B\uFF08\u8868\u73B0\u4E3A\u300C\u80FD\u53D1\u6D88\u606F\u3001\u6536\u4E0D\u5230\u65B0\u6D88\u606F\u300D\uFF09\uFF1B\u58F3\u9ED8\u8BA4\u8986\u76D6\u4E3A 30000\u3002 \u586B 0 = \u4E0D\u8986\u76D6\uFF08\u56DE\u9000 dsh \u9ED8\u8BA4\uFF09\uFF0C\u6539\u52A8\u91CD\u542F dsh \u751F\u6548\u3002"
-      ] })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: ROW_STYLE, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { ...LABEL_STYLE, marginTop: 12 }, children: "\u79FB\u52A8\u7AEF\u5E03\u5C40" }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: ROW_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
         /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
           "input",
           {
             type: "checkbox",
             "data-desktop-settings": "desktop-layout-on-phones",
             checked: desktopLayoutOnPhones,
-            onChange: (e) => setDesktopLayoutOnPhones(e.target.checked)
+            onChange: (e) => handleToggleMobileLayout(e.target.checked)
           }
         ),
         "\u624B\u673A\u7AEF\u6539\u7528\u684C\u9762\u5E03\u5C40\uFF08\u4E0D\u52A0\u8F7D\u79FB\u52A8\u5E03\u5C40\u63D2\u4EF6\uFF09"
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveMobileLayout, children: "\u4FDD\u5B58" })
+      ] }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u624B\u673A\u4E0A\u7684\u5361\u987F\u6765\u81EA\u5BBF\u4E3B\u524D\u7AEF\uFF08\u4F1A\u8BDD\u6574\u6BB5\u6302\u8F7D + \u9010\u5757\u4EE3\u7801\u9AD8\u4EAE\uFF09\uFF0C\u4E0D\u662F\u7F51\u7EDC\u3002\u52FE\u9009\u540E\u624B\u673A\u8D70\u4E0E iPad \u76F8\u540C\u7684\u684C\u9762\u5E03\u5C40\uFF1A\u660E\u663E\u66F4\u6D41\u7545\uFF0C\u4EE3\u4EF7\u662F\u6392\u7248\u66F4\u6324\uFF08\u53EF\u6A2A\u5C4F\u7F13\u89E3\uFF09\u3002\u4E0D\u52FE\u9009 = \u79FB\u52A8\u5E03\u5C40\u3002\u6539\u52A8\u91CD\u542F dsh \u751F\u6548\u3002" }),
+      mobileLayoutNote && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: mobileLayoutNote })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u624B\u673A\u4E0A\u7684\u5361\u987F\u6765\u81EA\u5BBF\u4E3B\u524D\u7AEF\uFF08\u4F1A\u8BDD\u6574\u6BB5\u6302\u8F7D + \u9010\u5757\u4EE3\u7801\u9AD8\u4EAE\uFF09\uFF0C\u4E0D\u662F\u7F51\u7EDC\u3002\u52FE\u9009\u540E\u624B\u673A\u8D70\u4E0E iPad \u76F8\u540C\u7684\u684C\u9762\u5E03\u5C40\uFF1A\u660E\u663E\u66F4\u6D41\u7545\uFF0C\u4EE3\u4EF7\u662F\u6392\u7248\u66F4\u6324\uFF08\u53EF\u6A2A\u5C4F\u7F13\u89E3\uFF09\u3002\u4E0D\u52FE\u9009 = \u79FB\u52A8\u5E03\u5C40\u3002\u6539\u52A8\u91CD\u542F dsh \u751F\u6548\u3002" }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "loopback \u6570\u636E\u9762\u805A\u5408", children: [
+      LOOPBACK_AGGREGATION_OPTIONS.map((opt) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { style: RADIO_ROW_STYLE, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+          "input",
+          {
+            type: "radio",
+            name: "loopback-aggregation",
+            "data-desktop-settings": `loopback-aggregation-${opt.value}`,
+            checked: loopbackAggregation === opt.value,
+            onChange: () => handleSaveLoopbackAggregation(opt.value)
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { style: RADIO_TEXT_STYLE, children: [
+          opt.label,
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { style: { color: "var(--dsw-alias-label-secondary,#9aa4b2)", marginLeft: 8 }, children: opt.detail })
+        ] })
+      ] }, opt.value)),
+      loopbackAggregationNote && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: loopbackAggregationNote }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u684C\u9762\u58F3\u56DE\u73AF\u6570\u636E\u9762\uFF08\u684C\u9762\u9875\u9762\u548C\u624B\u673A\u8FDC\u7A0B\u8BBF\u95EE\u90FD\u8D70\u5B83\uFF09\u5BF9 GET \u8BF7\u6C42\u7684\u5408\u5E76\u4E0E\u7F13\u51B2\u7B56\u7565\u3002\u300C\u53EA\u5173\u7F13\u51B2\u300D\u4FDD\u7559\u5408\u5E76\uFF0C \u53EA\u8BA9\u54CD\u5E94\u8FB9\u5230\u8FB9\u4E0B\u53D1\uFF1B\u300C\u5168\u5173\u300D\u8FDE\u5408\u5E76\u4E5F\u505C\u6389\uFF0C\u6BCF\u4E2A\u8BF7\u6C42\u5404\u81EA\u6253\u4E0A\u6E38\uFF0C\u4E0D\u4F1A\u5173\u6389\u522B\u7684\u529F\u80FD\u3002\u6539\u52A8\u7ACB\u5373\u751F\u6548\uFF0C \u4E0D\u9700\u8981\u91CD\u542F\u3002" })
+    ] }),
     /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u7535\u6E90", children: [
       /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: ROW_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
         /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
@@ -2926,9 +2943,9 @@ function DesktopSettingsPanel() {
       proxy.proxy_mode === "manual" && proxy.proxy_url && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
         /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { marginTop: 8 }, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: handleTestProxy, children: testBusy ? "\u6D4B\u8BD5\u4E2D\u2026" : "\u6D4B\u8BD5\u8FDE\u63A5" }) }),
         testResult && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: testResult })
-      ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { marginTop: 10 }, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "primary", disabled: busy, onClick: handleSaveProxy, children: busy ? "\u4FDD\u5B58\u4E2D\u2026" : "\u4FDD\u5B58\u4EE3\u7406\u8BBE\u7F6E" }) })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "primary", disabled: busy, onClick: handleSaveProxy, children: busy ? "\u4FDD\u5B58\u4E2D\u2026" : "\u4FDD\u5B58\u4EE3\u7406\u8BBE\u7F6E" }) }),
     msg && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
       "div",
       {
@@ -2954,7 +2971,18 @@ function DesktopSettingsPanel() {
         children: msg.text
       }
     ),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u670D\u52A1\u5730\u5740/Profile \u5207\u6362\u4F1A\u7ACB\u5373\u91CD\u542F dsh\uFF1B\u7AEF\u53E3\u4E0E\u4EE3\u7406\u5728\u4E0B\u6B21\u91CD\u542F\u540E\u751F\u6548\u3002" })
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+      "div",
+      {
+        style: {
+          ...NOTE_STYLE,
+          marginTop: 2,
+          paddingTop: 10,
+          borderTop: "1px solid var(--dsw-alias-border-l2, #ffffff1f)"
+        },
+        children: "\u670D\u52A1\u5730\u5740/Profile \u5207\u6362\u4F1A\u7ACB\u5373\u91CD\u542F dsh\uFF1B\u7AEF\u53E3\u4E0E\u4EE3\u7406\u5728\u4E0B\u6B21\u91CD\u542F\u540E\u751F\u6548\u3002"
+      }
+    )
   ] });
 }
 function registerDesktopSettings(ctx) {
@@ -2987,7 +3015,7 @@ function registerDesktopSettings(ctx) {
       const el = document.createElement("div");
       el.style.cssText = "position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)";
       const card = document.createElement("div");
-      card.style.cssText = "background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l,#ffffff1f);border-radius:12px;padding:24px;min-width:320px;max-width:400px";
+      card.style.cssText = "background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l2,#ffffff1f);border-radius:12px;padding:24px;min-width:320px;max-width:400px";
       const title = document.createElement("div");
       title.style.cssText = "font-size:15px;font-weight:600;margin-bottom:16px;color:var(--dsw-alias-label-primary,#e7eaf0)";
       title.textContent = "\u9009\u62E9\u8981\u542F\u52A8\u7684 Profile";
@@ -2996,7 +3024,7 @@ function registerDesktopSettings(ctx) {
       list.style.cssText = "display:flex;flex-direction:column;gap:8px";
       for (const p of profiles) {
         const btn = document.createElement("button");
-        btn.style.cssText = "padding:10px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer;text-align:left";
+        btn.style.cssText = "padding:10px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer;text-align:left";
         btn.textContent = p;
         btn.onmouseenter = () => btn.style.background = "var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07))";
         btn.onmouseleave = () => btn.style.background = "transparent";
@@ -3008,7 +3036,7 @@ function registerDesktopSettings(ctx) {
         list.appendChild(btn);
       }
       const input = document.createElement("input");
-      input.style.cssText = "margin-top:12px;padding:8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;width:100%;box-sizing:border-box";
+      input.style.cssText = "margin-top:12px;padding:8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;width:100%;box-sizing:border-box";
       input.placeholder = "\u6216\u8F93\u5165\u65B0 profile \u540D\u79F0";
       const startBtn = document.createElement("button");
       startBtn.style.cssText = "margin-top:8px;padding:8px 14px;border-radius:8px;border:none;background:var(--dsw-alias-brand-primary-new-color,#4176e6);color:#fff;font-size:13px;cursor:pointer;width:100%";
@@ -3039,7 +3067,7 @@ function registerDesktopSettings(ctx) {
       const el = document.createElement("div");
       el.style.cssText = "position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)";
       const card = document.createElement("div");
-      card.style.cssText = "background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l,#ffffff1f);border-radius:12px;padding:24px;min-width:340px;max-width:420px;text-align:center";
+      card.style.cssText = "background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l2,#ffffff1f);border-radius:12px;padding:24px;min-width:340px;max-width:420px;text-align:center";
       const title = document.createElement("div");
       title.style.cssText = "font-size:15px;font-weight:600;margin-bottom:8px;color:var(--dsw-alias-label-primary,#e7eaf0)";
       title.textContent = `Profile\u300C${profile}\u300D\u4E0D\u5B8C\u6574`;
@@ -3049,7 +3077,7 @@ function registerDesktopSettings(ctx) {
       const btns = document.createElement("div");
       btns.style.cssText = "display:flex;gap:10px";
       const noBtn = document.createElement("button");
-      noBtn.style.cssText = "flex:1;padding:10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer";
+      noBtn.style.cssText = "flex:1;padding:10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer";
       noBtn.textContent = "\u76F4\u63A5\u542F\u52A8";
       noBtn.onclick = () => {
         el.remove();
@@ -3170,34 +3198,34 @@ function invoke3(cmd, args) {
 var SYS_PREFS = "x-apple.systempreferences:com.apple.Preference.Notifications";
 var PANEL_CSS2 = `
 [data-notification-settings] { font-size: 13px; }
-[data-notification-settings] .n-card { border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-radius:12px; padding:12px 16px; margin-bottom:10px; }
-[data-notification-settings] .n-banner { display:flex; gap:10px; align-items:center; border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-left:3px solid var(--dsw-alias-state-warn,#e8a33d); background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); border-radius:8px; padding:9px 12px; font-size:12.5px; margin-bottom:10px; }
+[data-notification-settings] .n-card { border:1px solid var(--dsw-alias-border-l2,#ffffff1f); border-radius:12px; padding:12px 16px; margin-bottom:10px; }
+[data-notification-settings] .n-banner { display:flex; gap:10px; align-items:center; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); border-left:3px solid var(--dsw-alias-state-warn,#e8a33d); background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); border-radius:8px; padding:9px 12px; font-size:12.5px; margin-bottom:10px; }
 [data-notification-settings] .n-banner.granted { border-left-color:var(--dsw-alias-state-success,#2fbf71); }
 [data-notification-settings] .n-banner.denied { border-left-color:var(--dsw-alias-state-danger,#e5534b); }
-[data-notification-settings] .n-banner.neutral { border-left-color:var(--dsw-alias-border-l,#ffffff1f); }
+[data-notification-settings] .n-banner.neutral { border-left-color:var(--dsw-alias-border-l2,#ffffff1f); }
 [data-notification-settings] .n-banner .grow { flex:1; min-width:0; }
-[data-notification-settings] .n-chip { display:inline-block; font-size:11px; border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-radius:6px; padding:1px 7px; color:var(--dsw-alias-label-secondary,#9aa4b2); white-space:nowrap; }
+[data-notification-settings] .n-chip { display:inline-block; font-size:11px; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); border-radius:6px; padding:1px 7px; color:var(--dsw-alias-label-secondary,#9aa4b2); white-space:nowrap; }
 [data-notification-settings] .n-chip.ok { color:var(--dsw-alias-state-success,#2fbf71); border-color:var(--dsw-alias-state-success,#2fbf71); }
 [data-notification-settings] .n-chip.warn { color:var(--dsw-alias-state-warn,#e8a33d); border-color:var(--dsw-alias-state-warn,#e8a33d); }
 [data-notification-settings] .n-chip.danger { color:var(--dsw-alias-state-danger,#e5534b); border-color:var(--dsw-alias-state-danger,#e5534b); }
 [data-notification-settings] .n-btn { background:var(--dsw-alias-brand-primary-new-color,#4176e6); border:none; color:#fff; border-radius:8px; padding:5px 12px; font-size:12px; cursor:pointer; }
 [data-notification-settings] .n-btn:hover { filter:brightness(1.12); }
-[data-notification-settings] .n-btn.ghost { background:transparent; border:1px solid var(--dsw-alias-border-l,#ffffff1f); color:var(--dsw-alias-label-primary,#e7eaf0); }
+[data-notification-settings] .n-btn.ghost { background:transparent; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); color:var(--dsw-alias-label-primary,#e7eaf0); }
 [data-notification-settings] .n-btn.ghost:hover { background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); filter:none; }
 [data-notification-settings] .n-btn.mini { padding:2px 9px; font-size:11px; }
 [data-notification-settings] .n-btn:disabled { opacity:.45; cursor:default; filter:none; }
-[data-notification-settings] .n-switch { position:relative; width:34px; height:19px; border-radius:999px; background:var(--dsw-alias-border-l,#ffffff1f); cursor:pointer; flex:none; transition:background .15s; display:inline-block; vertical-align:middle; }
+[data-notification-settings] .n-switch { position:relative; width:34px; height:19px; border-radius:999px; background:var(--dsw-alias-border-l2,#ffffff1f); cursor:pointer; flex:none; transition:background .15s; display:inline-block; vertical-align:middle; }
 [data-notification-settings] .n-switch.on { background:var(--dsw-alias-state-success,#2fbf71); }
 [data-notification-settings] .n-switch::after { content:""; position:absolute; top:2px; left:2px; width:15px; height:15px; border-radius:50%; background:var(--dsw-alias-bg-base,#151517); transition:left .15s; }
 [data-notification-settings] .n-switch.on::after { left:17px; }
 [data-notification-settings] .n-setrow { display:flex; justify-content:space-between; align-items:center; gap:10px; font-size:12.5px; }
-[data-notification-settings] .n-srow { display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid var(--dsw-alias-border-l,#ffffff1f); }
+[data-notification-settings] .n-srow { display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid var(--dsw-alias-border-l2,#ffffff1f); }
 [data-notification-settings] .n-grp:last-child .n-srow:last-child { border-bottom:none; }
 [data-notification-settings] .n-sinfo { flex:1; min-width:0; }
 [data-notification-settings] .n-sinfo b { font-size:12.5px; font-weight:600; }
 [data-notification-settings] .n-mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:10.5px; color:var(--dsw-alias-label-secondary,#9aa4b2); }
 [data-notification-settings] .n-gname { font-size:11px; color:var(--dsw-alias-label-secondary,#9aa4b2); letter-spacing:.4px; margin:10px 0 2px; }
-[data-notification-settings] .n-select, [data-notification-settings] .n-time { font:inherit; font-size:12px; color:inherit; background:transparent; border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-radius:8px; padding:3px 7px; }
+[data-notification-settings] .n-select, [data-notification-settings] .n-time { font:inherit; font-size:12px; color:inherit; background:transparent; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); border-radius:8px; padding:3px 7px; }
 [data-notification-settings] .n-note { font-size:11px; color:var(--dsw-alias-label-secondary,#9aa4b2); margin-top:8px; }
 [data-notification-settings] .n-mastoff .n-srow .n-switch, [data-notification-settings] .n-mastoff .n-srow select, [data-notification-settings] .n-mastoff .n-srow button { opacity:.4; pointer-events:none; }
 [data-notification-settings] input[type="time"] { color-scheme: inherit; }

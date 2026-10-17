@@ -11,17 +11,16 @@
 //      所以页面侧只接桥即可覆盖全部平台。
 //   2. mobile-access 中继桥（配对远程页）：`__DSH_SHELL_RELAY__.invoke`（#47 注入，
 //      远程页没有原生桥，物理上走不了官方 RPC，HTTP 中继是唯一通道）。
-//   3. 同源 fetch 兜底：POST /__shell__/rpc（壳 loopback 同源 + x-dsh-shell-view token，
-//      token 由壳 preload 暴露在 `__DSH_SHELL_VIEW_TOKEN__`）。
+//
+// #128：第 3 级「同源 fetch 兜底」整条删除（连带 token 判据）。壳 preload 已经在最早期装好
+// 官方 RPC 分发器 `__DSH_SHELL_RPC__`，接收面与 id 空间都归它。插件在场时把**整条官方通道**
+// 委托给它，而不是只把接收面让出去：两个 owner 各发各的 id，壳侧按 id 存表只留最后一份，
+// 另一个在途请求的回包就永远丢了。只有 dev/旧壳（无分发器）时插件才自己接管接收面。
 //
 // 语义与旧 shim 一致：成功 resolve value；业务失败 reject(new Error(error))；
-// 没有任何通道时 reject('shell rpc unavailable')。注意：官方通道**请求级失败不重试**
-// （超时/拒绝都不再打 fetch 兜底）——命令可能已在壳侧生效，toggle 类命令二次执行会翻转两次。
+// 没有任何通道时 reject('shell rpc unavailable')。官方通道**请求级失败不重试**（命令可能已在
+// 壳侧生效，toggle 类命令二次执行会翻转两次）。
 
-/** 壳 RPC 端点（与壳侧 tauri-ipc 时代的常量同名同值；现仅作 fetch 兜底用）。 */
-const RPC_ENDPOINT = '/__shell__/rpc'
-/** 每视图 token 请求头（壳侧 shared/view-grant.ts 的同名常量；跨包复制，注释互指）。 */
-const VIEW_TOKEN_HEADER = 'x-dsh-shell-view'
 /** 官方默认单请求超时：官方 createRPC 的默认值是 1000ms，对文件选择器太紧。 */
 const DEFAULT_TIMEOUT_MS = 15_000
 /** 请求 id 上限（对齐官方 MAX_ID，溢出归零）。 */
@@ -37,8 +36,19 @@ export interface ShellRpcGlobals {
   __electrobunPendingHostMessages?: unknown[]
   /** mobile-access 中继桥（#47：配对远程页） */
   __DSH_SHELL_RELAY__?: { invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> }
-  /** 壳 preload 暴露的每视图 token（fetch 兜底认证用） */
-  __DSH_SHELL_VIEW_TOKEN__?: string
+  /** 壳 preload 的官方 RPC 分发器（#128：preload 最早期装；官方通道交给它，见文件头） */
+  __DSH_SHELL_RPC__?: {
+    invoke?: <T = unknown>(
+      method: string,
+      params: Record<string, unknown>,
+      options?: { timeoutMs?: number; noTimeout?: boolean },
+    ) => Promise<T>
+    request?: (
+      method: string,
+      params: Record<string, unknown>,
+      options?: { timeoutMs?: number; noTimeout?: boolean },
+    ) => Promise<unknown>
+  }
 }
 
 
@@ -53,11 +63,9 @@ export interface ShellRpcInvokeOptions {
   noTimeout?: boolean
 }
 
-export type ShellRpcMessageListener = (name: string, payload: unknown) => void
 
 export interface ShellRpcClient {
   invoke<T = unknown>(cmd: string, args?: Record<string, unknown>, options?: ShellRpcInvokeOptions): Promise<T>
-  onMessage(listener: ShellRpcMessageListener): () => void
   /** 是否存在任一可用通道（面板据此决定激活桌面 chrome 与否）。 */
   available(): boolean
 }
@@ -70,7 +78,6 @@ interface PendingRequest {
 
 export interface ShellRpcDeps {
   readGlobals: () => ShellRpcGlobals
-  fetchImpl: typeof fetch
   setTimeoutImpl: typeof setTimeout
   clearTimeoutImpl: typeof clearTimeout
 }
@@ -81,12 +88,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function createShellRpc(deps?: Partial<ShellRpcDeps>): ShellRpcClient {
   const readGlobals = deps?.readGlobals ?? (() => globalThis as unknown as ShellRpcGlobals)
-  const fetchImpl = deps?.fetchImpl ?? ((...a: Parameters<typeof fetch>) => fetch(...a))
   const setTimeoutImpl = deps?.setTimeoutImpl ?? ((fn, ms) => setTimeout(fn, ms))
   const clearTimeoutImpl = deps?.clearTimeoutImpl ?? ((t) => clearTimeout(t))
 
   const pending = new Map<number, PendingRequest>()
-  const messageListeners = new Set<ShellRpcMessageListener>()
   let nextId = 0
   /** 接收面是否已接管（每文档一次；接管后宿主回包直达 handlePacket）。 */
   let receiveAttached = false
@@ -98,20 +103,6 @@ export function createShellRpc(deps?: Partial<ShellRpcDeps>): ShellRpcClient {
 
   function handlePacket(packet: unknown): void {
     if (!isRecord(packet)) return
-    // 壳→页面的主动推送（#73）：{type:'message', id:消息名, payload}。消息是触发器，
-    // 客户端收到就自重查真值（window_get_state 是唯一状态源）；一个监听器抛错不影响其余。
-    if (packet.type === 'message') {
-      const name = typeof packet.id === 'string' ? packet.id : ''
-      if (name === '') return
-      for (const listener of messageListeners) {
-        try {
-          listener(name, packet.payload)
-        } catch (error) {
-          console.error('shell rpc message listener failed', error)
-        }
-      }
-      return
-    }
     if (packet.type !== 'response') return
     const id = typeof packet.id === 'number' ? packet.id : NaN
     const waiter = pending.get(id)
@@ -122,8 +113,16 @@ export function createShellRpc(deps?: Partial<ShellRpcDeps>): ShellRpcClient {
     else waiter.reject(new Error(typeof packet.error === 'string' ? packet.error : 'shell rpc failed'))
   }
 
-  /** 接管官方接收面并排空先期积压（顺序对齐官方 Electroview.init）。 */
+  /**
+   * 接管官方接收面并排空先期积压（顺序对齐官方 Electroview.init）。
+   * #128：preload 分发器在场时**直接复用，一个字节都不碰** receiveMessageFromHost——
+   * 后装的 handler 会把前一个顶掉，前一个在途请求的回包就没人接了。
+   */
   function ensureReceive(): void {
+    if (typeof readGlobals().__DSH_SHELL_RPC__?.invoke === 'function') {
+      receiveAttached = true
+      return
+    }
     if (receiveAttached) return
     const g = readGlobals()
     const eb = g.__electrobun
@@ -138,6 +137,9 @@ export function createShellRpc(deps?: Partial<ShellRpcDeps>): ShellRpcClient {
   }
 
   function officialInvoke<T>(cmd: string, args: Record<string, unknown>, options?: ShellRpcInvokeOptions): Promise<T> {
+    // #128：preload 分发器拥有接收面与 id 空间，在场时整条官方通道委托给它（理由见文件头）。
+    const dispatcher = readGlobals().__DSH_SHELL_RPC__
+    if (typeof dispatcher?.invoke === 'function') return dispatcher.invoke<T>(cmd, args, options)
     const post = officialBridge()
     if (post === undefined) return Promise.reject(new Error('official bridge unavailable'))
     ensureReceive()
@@ -174,44 +176,20 @@ export function createShellRpc(deps?: Partial<ShellRpcDeps>): ShellRpcClient {
     return invoke(cmd, args) as Promise<T>
   }
 
-  async function fetchInvoke<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
-    const token = readGlobals().__DSH_SHELL_VIEW_TOKEN__
-    let response: Response
-    try {
-      response = await fetchImpl(RPC_ENDPOINT, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', ...(typeof token === 'string' && token !== '' ? { [VIEW_TOKEN_HEADER]: token } : {}) },
-        body: JSON.stringify({ cmd, args }),
-      })
-    } catch (error) {
-      throw new Error(`shell rpc failed: ${error instanceof Error ? error.message : String(error)}`)
-    }
-    if (!response.ok) throw new Error(`shell rpc failed: ${String(response.status)}`)
-    const body = (await response.json().catch(() => null)) as { ok?: unknown; value?: unknown; error?: unknown } | null
-    if (body !== null && body.ok === true) return body.value as T
-    throw new Error(typeof body?.error === 'string' ? body.error : 'shell rpc failed')
-  }
 
   return {
     invoke<T = unknown>(cmd: string, args?: Record<string, unknown>, options?: ShellRpcInvokeOptions): Promise<T> {
       const rest = isRecord(args) ? args : {}
       if (officialBridge() !== undefined) return officialInvoke<T>(cmd, rest, options)
       if (typeof readGlobals().__DSH_SHELL_RELAY__?.invoke === 'function') return relayInvoke<T>(cmd, rest)
-      if (typeof readGlobals().__DSH_SHELL_VIEW_TOKEN__ === 'string') return fetchInvoke<T>(cmd, rest)
       return Promise.reject(new Error('shell rpc unavailable'))
-    },
-    onMessage(listener: ShellRpcMessageListener): () => void {
-      messageListeners.add(listener)
-      return () => {
-        messageListeners.delete(listener)
-      }
     },
     available(): boolean {
       const g = readGlobals()
       return (
         officialBridge() !== undefined ||
         typeof g.__DSH_SHELL_RELAY__?.invoke === 'function' ||
-        typeof g.__DSH_SHELL_VIEW_TOKEN__ === 'string'
+        typeof g.__DSH_SHELL_RPC__?.invoke === 'function'
       )
     },
   }

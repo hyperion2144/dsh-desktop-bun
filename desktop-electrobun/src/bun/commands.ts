@@ -19,6 +19,10 @@ import { EMPTY_TASK, startupAction, validProfileName, type MigrationStatus, type
 import type { ShellUpdater } from './updater.ts'
 import type { ProxyEnv } from '../shared/proxy-env.ts'
 import type { KeepAwakeCapability } from './keep-awake.ts'
+import type { BootPayload } from './shell-server.ts'
+import type { ContextMenuRequest } from './context-menu.ts'
+import { isOpenablePath } from './context-menu.ts'
+import { isOpenableUrl } from './external.ts'
 
 export interface CommandDeps {
   home: string
@@ -48,6 +52,10 @@ export interface CommandDeps {
   /** 运行中的 dsh 版本（运行时树的版本；快照缺位时兜底） */
   dshVersion?: () => string
   openExternal?: (url: string) => void
+  /** #128：页面注入脚本的 boot 包（`/__shell__/boot` 的同一份数据）；宿主未就绪返回 null。 */
+  bootPayload?: () => BootPayload | null
+  /** #128：页面右键菜单（`/__shell__/context-menu` 的同一个回调，由主进程弹原生菜单）。 */
+  showContextMenu?: (request: ContextMenuRequest) => void
   closeWindow?: () => void
   /** 试听音效（设置面板的「试听」）：真的出声才 true；没后端时 false，面板据此提示（不再假报成功） */
   playSound?: (name: string) => boolean
@@ -631,9 +639,43 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       const result = deps.exportDiagnostics(snapshot)
       return { path: result.path, bytes: result.bytes }
     },
+
+    // ---- #128：页面注入脚本（preload）——原先打壳自答 HTTP 端点，现走官方 RPC 显式方法 ----
+    // 两条都只依赖注入的 deps，boot 就绪判定沿用 HTTP 路由的 503 语义（throw ⇒ 命令面报错）。
+    get_boot_payload: () => {
+      const payload = deps.bootPayload?.()
+      if (payload === null || payload === undefined) throw new Error('boot pending')
+      return payload
+    },
+    show_context_menu: (args: Record<string, unknown>) => {
+      if (deps.showContextMenu === undefined) throw new Error('没有窗口宿主（右键菜单不可用）')
+      // 字段解析口径与 shell-server.ts 的 `/__shell__/context-menu` 同款：entry 白名单化、
+      // 路径只认绝对路径（isOpenablePath，防相对路径/URL 混入）。
+      // 这里**不**再叠第二层鉴权：请求已经过 createShellRpcFunnel 的 view 授权
+      // （isCommandAllowed），叠一层只会把 remote lane 的调用也挡掉。
+      const entry = args['filesEntry']
+      const path = args['filesPath']
+      const link = args['linkUrl']
+      deps.showContextMenu({
+        linkUrl: typeof link === 'string' && link !== '' ? link : null,
+        hasSelection: args['hasSelection'] === true,
+        editable: args['editable'] === true,
+        filesEntry: entry === 'file' || entry === 'directory' || entry === 'other' ? entry : null,
+        filesPath: typeof path === 'string' && isOpenablePath(path) ? path : null,
+      })
+      return {}
+    },
     open_external: (args) => {
       const url = argString(args, 'url')
       if (url === '') throw new Error('open_external: url 不能为空')
+      // #128：RPC 直达主进程，命令面必须自带闸——否则 javascript:/file: 这类协议、
+      // 或壳自己的 loopback origin 链接会直接落到系统打开器。
+      // 用 isOpenableUrl（两档口径，见 external.ts）而不是 isExternalUrl（仅链接口径）：
+      // 壳内按钮也要用 open_external 唤起系统设置面板（x-apple.systempreferences:），
+      // 只放行链接口径会把那条按钮静默吞掉。拿不到 origin（无窗口单测）时退化成协议闸。
+      const running = deps.status?.() ?? {}
+      const selfOrigin = typeof running.origin === 'string' ? running.origin : undefined
+      if (!isOpenableUrl(url, selfOrigin)) throw new Error(`open_external: 不是可外部打开的 URL（${url}）`)
       deps.openExternal?.(url)
       return {}
     },

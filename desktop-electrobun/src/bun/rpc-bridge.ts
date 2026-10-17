@@ -92,6 +92,15 @@ export function createShellRpcFunnel(deps: ShellRpcDeps): ShellRpcFunnel {
       deps.window.close()
       return null
     }
+    // #128：F13 旧命令 toggle_zoom（窗口⇄工作区）原先走命令表 → deps.zoomToggle() →
+    // focusedWindow()，是「窗口命令打哪扇窗由全局决定」的最后一条漏网路径（多窗口下会盖错窗）。
+    // 归进漏斗与 window_* 同源：作用对象恒为发起请求的那扇窗；切换语义本就等价于
+    // window_toggle_maximize（Electrobun 无 workArea API，maximize/unmaximize 就是「窗口⇄工作区」）。
+    // 命令表里的同名条目保留——保留的 HTTP /__shell__/rpc 路由（远程页中继目标）仍走它。
+    if (method === 'toggle_zoom') {
+      toggleMaximize()
+      return { ok: true }
+    }
     const router = deps.router()
     if (router === null) throw new Error('shell rpc not ready')
     const raw = JSON.stringify({ cmd: method, args: isRecord(params) ? params : {} })

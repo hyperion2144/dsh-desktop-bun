@@ -27,7 +27,12 @@ export const VIEW_TOKEN_HEADER = 'x-dsh-shell-view'
 
 /**
  * guest 视图唯一放行的命令：报日志。
- * 其余一律拒绝——包括 `open_external` 这类看似无害的（外链有专门的端点，不走命令表）。
+ * 其余一律拒绝——包括 `open_external` 这类看似无害的。
+ *
+ * #128 的依据（不用改名单的理由）：壳 preload 注入的脚本（boot / 标题栏带 / 外链 /
+ * 右键菜单 / 输入确认）**只装在 shell 视图**——全仓唯一喂 `bootPreloadScript` 的是
+ * index.ts 里给 `views.issue('shell', …)` 发的那个 view；guest 子 webview（guest-manager.ts）
+ * 与 remote lane 都不装 preload。故这批命令在 guest 侧根本没有发起方，换命令不改授权语义。
  */
 export const GUEST_ALLOWED_COMMANDS: readonly string[] = ['log_console', 'log_console_batch', 'log_diag']
 

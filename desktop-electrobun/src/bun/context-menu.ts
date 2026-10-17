@@ -1,17 +1,20 @@
 // 页面右键菜单：CEF 默认不弹菜单（Electrobun 用自己的 CefContextMenuHandler 接管），
 // 旧壳（WKWebView）自带的那份里「刷新页面」等项在换壳后就没了。
 //
-// 做法：页面在 `contextmenu` 时把上下文（有没有点到链接、是否可编辑、有没有选中）报给壳端点，
-// 由**主进程**用 Electrobun 的 `ContextMenu.showContextMenu` 弹原生菜单——复制/剪切/粘贴/全选
+// 做法：页面在 `contextmenu` 时把上下文（有没有点到链接、是否可编辑、有没有选中）报给壳，
+// #128：报给壳的方式从壳自答 HTTP 端点换成官方 RPC 显式方法 show_context_menu（commands.ts），
+// 壳侧再交回主进程用 Electrobun 的 `ContextMenu.showContextMenu` 弹原生菜单。
 // 走原生 role（macOS 上才有意义，Windows/Linux 由 CEF 自己处理 Ctrl 系快捷键）；「刷新」
 // 「在系统浏览器打开链接」「复制链接地址」「打开 / 打开文件夹（工作区文件行）」
 // 「打开 DevTools」（dev 构建 = CEF openDevTools；win = 合成 F12，#106 返工）是我们自己的 action。
 //
 // 这里是纯逻辑部分（菜单结构 + 注入脚本），执行部分在 index.ts。
 
+/** 右键菜单的 HTTP 端点（壳侧路由保留，见 shell-server.ts）；#128 起注入脚本改走官方 RPC 显式方法。 */
 export const CONTEXT_MENU_ENDPOINT = '/__shell__/context-menu'
+/** 右键菜单请求走的官方 RPC 方法名（commands.ts 的 show_context_menu）。 */
+export const CONTEXT_MENU_METHOD = 'show_context_menu'
 
-import { VIEW_TOKEN_HEADER } from '../shared/view-grant.ts'
 
 export interface ContextMenuRequest {
   /** 右键点到的链接（没有则 null）。 */
@@ -103,12 +106,16 @@ export function contextMenuItems(
   return items
 }
 
-/** document-start 注入：右键时把上下文报给壳，交给原生菜单。 */
-export function contextMenuScript(viewToken: string): string {
+/**
+ * document-start 注入：右键时把上下文报给壳，交给原生菜单。
+ * #128：改走官方 RPC 显式方法 show_context_menu，不再打 /__shell__/context-menu。
+ */
+export function contextMenuScript(): string {
   return [
     ';(() => {',
-    `  const ENDPOINT = ${JSON.stringify(CONTEXT_MENU_ENDPOINT)}`,
-    `  const VIEW_TOKEN = ${JSON.stringify(viewToken)}`,
+    `  const CONTEXT_MENU_METHOD = ${JSON.stringify(CONTEXT_MENU_METHOD)}`,
+    // #128：官方 RPC 分发器（preload 最早期装）。永远返回 Promise，桥缺失时 reject 不抛同步异常。
+    '  const call = (method, params) => (globalThis.__DSH_SHELL_RPC__ ?? {}).request?.(method, params) ?? Promise.reject(new Error("shell rpc unavailable"))',
     '  const log = (msg) => console.info("[context-menu] " + msg)',
     '  document.addEventListener("contextmenu", (event) => {',
     '    const target = event.target',
@@ -123,14 +130,8 @@ export function contextMenuScript(viewToken: string): string {
     '    // 页面自己接管了右键（例如 dsh 的富文本区域）就不插手',
     '    if (event.defaultPrevented) return',
     '    event.preventDefault()',
-    '    try {',
-    '      void fetch(ENDPOINT, {',
-    '        method: "POST",',
-    `        headers: { "content-type": "application/json", ${JSON.stringify(VIEW_TOKEN_HEADER)}: VIEW_TOKEN },`,
-    '        body: JSON.stringify({ linkUrl: href, hasSelection: selection.length > 0, editable, filesEntry, filesPath, x: event.clientX, y: event.clientY }),',
-    '        keepalive: true,',
-    '      })',
-    '    } catch (error) { log("右键菜单请求失败：" + String(error)) }',
+    '    void call(CONTEXT_MENU_METHOD, { linkUrl: href, hasSelection: selection.length > 0, editable, filesEntry, filesPath, x: event.clientX, y: event.clientY })',
+    '      .catch((error) => log("右键菜单请求失败：" + String(error)))',
     '  })',
     '})()',
   ].join('\n')
