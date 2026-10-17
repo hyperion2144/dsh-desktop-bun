@@ -11,7 +11,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createCommandTable, type CommandDeps } from '../src/bun/commands.ts'
 import type { RpcContext } from '../src/bun/rpc.ts'
-import { importSound, listSounds, systemDefaultSoundCommand } from '../src/bun/notifications.ts'
+import { importSound, listSounds, type Notifier } from '../src/bun/notifications.ts'
+import { systemDefaultSoundCommand } from '../src/bun/sound-playback.ts'
 import { SOUND_FORMATS, soundFormatMatches } from '../src/shared/notify-policy.ts'
 import {
   defaultSettings,
@@ -49,9 +50,13 @@ function harness(overrides: Partial<CommandDeps> = {}): Harness {
       settings = updateSettings(home, patch)
       return settings
     },
-    playSound: (name) => calls.sounds.push(name),
+    playSound: (name) => {
+      calls.sounds.push(name)
+      return true
+    },
     playSystemSound: () => {
       calls.systemSounds += 1
+      return true
     },
     pickSoundFile: async () => calls.picked(),
     importSound: (path) => importSound(home, path),
@@ -85,7 +90,7 @@ describe('桌面通知 tab 的数据面', () => {
 
       const scenarios = state.scenarios as Array<Record<string, unknown>>
       expect(scenarios).toHaveLength(NOTIFICATION_SCENARIOS.length)
-      expect(scenarios).toHaveLength(14)
+      expect(scenarios).toHaveLength(15)
       for (const row of scenarios) {
         expect(typeof row.id).toBe('string')
         expect(typeof row.group).toBe('string')
@@ -142,21 +147,84 @@ describe('桌面通知 tab 的数据面', () => {
 })
 
 describe('试听：旧壳 preview_notification_sound(sound) 的语义', () => {
-  test('none 不响、default 播系统音、custom:<名> 剥前缀后播自定义音', async () => {
+  test('#74：none 不响、default 播系统音、custom:<名> 剥前缀后播（audible 如实回）', async () => {
     const h = harness()
     try {
       expect(await h.table.preview_notification_sound?.({ sound: 'none' })).toEqual({
         played: null,
         sound: 'none',
+        audible: false,
       })
-      await h.table.preview_notification_sound?.({ sound: 'default' })
+      expect(await h.table.preview_notification_sound?.({ sound: 'default' })).toEqual({
+        played: 'default',
+        sound: 'default',
+        audible: true,
+      })
       expect(h.calls.systemSounds).toBe(1)
       expect(h.calls.sounds).toEqual([])
-      await h.table.preview_notification_sound?.({ sound: 'custom:a-tone.wav' })
+      expect(await h.table.preview_notification_sound?.({ sound: 'custom:a-tone.wav' })).toEqual({
+        played: 'a-tone.wav',
+        sound: 'a-tone.wav',
+        audible: true,
+      })
       expect(h.calls.sounds).toEqual(['a-tone.wav'])
       // 兼容旧调用方的 { name } 形状
-      await h.table.preview_notification_sound?.({ name: 'b-tone.wav' })
+      expect(await h.table.preview_notification_sound?.({ name: 'b-tone.wav' })).toEqual({
+        played: 'b-tone.wav',
+        sound: 'b-tone.wav',
+        audible: true,
+      })
       expect(h.calls.sounds).toEqual(['a-tone.wav', 'b-tone.wav'])
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('#74：播放层说没出声 ⇒ audible=false（面板据此提示，不假报成功）', async () => {
+    const h = harness({ playSound: () => false, playSystemSound: () => false })
+    try {
+      expect(await h.table.preview_notification_sound?.({ sound: 'custom:a-tone.wav' })).toEqual({
+        played: 'a-tone.wav',
+        sound: 'a-tone.wav',
+        audible: false,
+      })
+      expect(await h.table.preview_notification_sound?.({ sound: 'default' })).toEqual({
+        played: 'default',
+        sound: 'default',
+        audible: false,
+      })
+      expect(h.calls.logs.some((line) => line.includes('本机没有可用后端'))).toBe(true)
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('#74：get_notifications_state 带上本机播放能力（没接播放层时为 null，面板要容错）', async () => {
+    const h = harness()
+    try {
+      const bare = (await h.table.get_notifications_state?.({})) as Record<string, unknown>
+      expect(bare.capability).toBeNull()
+
+      const capability = {
+        platform: 'win32' as NodeJS.Platform,
+        formats: {
+          wav: { ok: true, backend: 'powershell-soundplayer', reason: null },
+          mp3: {
+            ok: false,
+            backend: null,
+            reason: '本机装配不了 WPF 播放器（PresentationCore）：装上 ffmpeg（提供 ffplay）后才能播',
+          },
+          ogg: { ok: false, backend: null, reason: '系统自带播放器不认 Ogg Vorbis：装上 ffmpeg（提供 ffplay）后才能播' },
+        },
+        hint: '本机没有 .mp3 / .ogg 的播放后端',
+      }
+      const wired = harness({ notifier: { soundCapability: () => capability } as unknown as Notifier })
+      try {
+        const state = (await wired.table.get_notifications_state?.({})) as Record<string, unknown>
+        expect(state.capability).toEqual(capability)
+      } finally {
+        wired.cleanup()
+      }
     } finally {
       h.cleanup()
     }
@@ -264,12 +332,23 @@ describe('音效格式表与系统音', () => {
     expect(soundFormatMatches('wav', new Uint8Array([0x52, 0x49, 0x46, 0x46]))).toBe(false)
   })
 
-  test('系统默认提示音（D7）：三平台各有命令，Linux 无主题音则静默', () => {
+  test('系统默认提示音（D7）：三平台各有命令，Linux 主题音只有能解码的后端才算（#74）', () => {
     expect(systemDefaultSoundCommand('darwin')?.[0]).toBe('afplay')
-    expect(systemDefaultSoundCommand('win32')?.[0]).toBe('powershell')
-    // Linux：有 freedesktop 主题音则给 aplay 命令，没有则静默（null）——两种都合法，
-    // runner 镜像是否带音效文件不受我们控制（ubuntu-26 已自带），不能断言具体值。
+    // Windows：显式播系统自带 wav（PlaySync 阻塞到播完）——不再是可能被音效方案静默掉的事件音别名
+    const win = systemDefaultSoundCommand('win32', {
+      env: {
+        SystemRoot: 'C:\\Windows',
+        PATH: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0',
+        PATHEXT: '.EXE',
+      },
+      exists: (path) =>
+        path.endsWith('powershell.exe') || path === 'C:\\Windows\\Media\\Windows Notify System Generic.wav',
+    })
+    expect(win?.[0]).toBe('powershell')
+    expect(win?.join(' ')).toContain('Windows Notify System Generic.wav')
+    // Linux：主题音是 Ogg Vorbis，只有 paplay / pw-play / ffplay 才算数（aplay 只吃 WAV，不算）；
+    // runner 镜像装没装主题音与播放器不受我们控制，两种结果（命令 / null）都合法。
     const linux = systemDefaultSoundCommand('linux')
-    expect(linux === null || linux[0] === 'aplay').toBe(true)
+    expect(linux === null || ['paplay', 'pw-play', 'ffplay'].includes(linux[0] ?? '')).toBe(true)
   })
 })

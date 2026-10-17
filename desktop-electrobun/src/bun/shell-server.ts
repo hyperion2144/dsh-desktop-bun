@@ -18,11 +18,14 @@ import { statSync } from 'node:fs'
 import { decide } from '../shared/admission.ts'
 import { INDEX_FILE, contentTypeFor, isNoContentAsset, resolveAsset } from '../shared/asset-path.ts'
 import { corsHeaders, scrubRequestHeaders, scrubResponseHeaders, shouldNoStore } from '../shared/headers.ts'
+import { DEFAULT_LOOPBACK_AGGREGATION, type LoopbackAggregation } from '../shared/settings.ts'
 import { isExternalUrl } from './external.ts'
 import { VIEW_TOKEN_HEADER, denyReason, isCommandAllowed } from '../shared/view-grant.ts'
 import type { ViewGrant, ViewRegistry } from '../shared/view-grant.ts'
-import { isOpenablePath, type ContextMenuRequest } from './context-menu.ts'
-import type { ProfileOpRequest, ProfileOpResult } from './profile-dialog.ts'
+import { parseContextMenuRequest, type ContextMenuRequest } from './context-menu.ts'
+import { FOLLOWER_WAIT_MS, GetCoalescer, aggregationPolicy, type SharedGet } from './coalescing.ts'
+import { isWindowControlAction, type WindowControlAction, type WindowMaxState } from './window-max.ts'
+
 
 /** 官方 web-document.ts 的同一行：index 会等异步的 Host 注入，先把 promise 挂上。 */
 export const BOOT_LINE = '<script>globalThis.__DSH_BOOT_READY__ = Promise.withResolvers()</script>'
@@ -54,11 +57,11 @@ export interface ShellServerOptions {
   /** 单实例激活：第二个壳请求把窗口带到前台（主进程实现） */
   onActivate?: () => void
   /** 自绘窗口控制（A5）：页面三键 → 主进程操作 BrowserWindow */
-  onWindowControl?: (action: 'minimize' | 'toggle-maximize' | 'close') => void
-  /** F9：托盘弹框的新建/迁移 profile 提交（服务面实现） */
+  onWindowControl?: (action: WindowControlAction) => void
+  /** 最大化态读取（#112 壳层标题栏带）：GET /__shell__/window 回 { maximized }；缺省时 GET 仍 405 */
+  onWindowState?: () => WindowMaxState
   /** F12：页面内确认弹窗的回填（旧壳 ui_input_confirm） */
   onInputConfirm?: (flow: string, value: string) => void
-  onProfileOp?: (request: ProfileOpRequest) => Promise<ProfileOpResult>
   /** 壳 ↔ 页面 RPC（`/__shell__/rpc`）：调用方给命令表与错误语义，这里只管 HTTP */
   /**
    * 每视图授权（#220 决策 12）：页面桥带 `x-dsh-shell-view` 回来，这里查表拿视图种类。
@@ -66,6 +69,16 @@ export interface ShellServerOptions {
    * 不传 `views` ⇒ 不做每视图校验（只在测试与旧调用点里出现）。
    */
   views?: ViewRegistry
+  /** loopback 数据面聚合档位（#128）；缺省 = 全开。热路径读，不得每次同步读盘。 */
+  aggregation?: () => LoopbackAggregation
+  /**
+   * 单飞跟随者等待上限（#144-1）；缺省 = FOLLOWER_WAIT_MS。
+   *
+   * 与 `aggregation` 同款的 live getter 形状，但**service.ts 目前没传它**——壳里生效的值就是 10s 常量，
+   * 没有对应的设置键。存在的理由是测试要注入 150ms 这种小阈值（10s 的超时路径进不了单测），
+   * 以及将来真把它做成设置项时不必改这里的读法。health 同步暴露当前生效值。
+   */
+  followerWaitMs?: () => number
   onRpc?: (raw: string, grant: ViewGrant | null) => Promise<{ status: number; body: Record<string, unknown> }>
   onLog?: (line: string) => void
 }
@@ -94,8 +107,7 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
   // 数据面在飞计数（#54）：loopback 反代与批量端点子请求共用一个计数，health 暴露，
   // 用来在 Windows 上区分「壳还在处理请求」与「壳已经闲着」。
   let inFlight = 0
-  // 单飞合并省掉的重复上游 GET 数（#54）：health 暴露，验证合并是否生效。
-  let coalesced = 0
+  // 搭车（coalesced）与因等待上限掉队（followerDropouts）的计数归 GetCoalescer（#144-1/#144-3），health 从那里读。
 
   /**
    * 每视图授权：页面桥带 `x-dsh-shell-view` 回来。missing/未登记 —— 拒绝；
@@ -152,21 +164,17 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
     return `${html.slice(0, insertAt)}${BOOT_LINE}${html.slice(insertAt)}`
   }
 
-  /** 单飞共享的已完成响应：整条缓冲（只有 ≤256KB 且带 content-length 的 GET 才走这条路）。 */
-  interface SharedGet {
-    status: number
-    headers: Headers
-    body: ArrayBuffer
-  }
-  /** 在飞中的领头 GET：等待者搭车拿 SharedGet；null = 领头失败/不可共享，各自打上游。 */
-  interface InflightGet {
-    done: boolean
-    buffered: Promise<SharedGet | null>
-    resolve: (value: SharedGet | null) => void
-  }
-  /** 超过这个体积的 GET 不做单飞（大响应/流式响应绝不缓冲，避免内存与背压问题）。 */
+  /** 共享体的定义、在飞登记表与跟随者等待都在 coalescing.ts（#144-3）；proxy() 只读它导出的结果。 */
+  /** 共享体的体积上限（#128）：`full` 档按 content-length 预先判定，`stream` 档按实际累积量封顶——超了放弃共享，绝不无限缓冲。 */
   const SINGLEFLIGHT_MAX_BYTES = 262_144
-  const inflightGets = new Map<string, InflightGet>()
+  /**
+   * 档位读取（#128）：缺省 = 全开。每个请求在 proxy() 入口取一次，同请求内不重复读；
+   * 调用方给的是内存 getter（liveSettings），切档即时生效且热路径零磁盘 IO。
+   */
+  const aggregation = (): LoopbackAggregation => options.aggregation?.() ?? DEFAULT_LOOPBACK_AGGREGATION
+  const coalescer = new GetCoalescer()
+  /** 跟随者等待上限（#144-1）：live getter，缺省 FOLLOWER_WAIT_MS。health 暴露当前值。 */
+  const followerWaitMs = (): number => options.followerWaitMs?.() ?? FOLLOWER_WAIT_MS
 
   /**
    * 流式回传 + 完成结算（#54）：pull 式逐 chunk 转发（保背压），done / 上游出错 / 页面取消
@@ -215,6 +223,68 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
       },
     })
     return new Response(stream, { status: input.status, headers: input.headers })
+  }
+  /** 累积的 chunk 拼成一份 ArrayBuffer（跟随者拿到的就是这一份）。 */
+  function concatChunks(chunks: Uint8Array[], total: number): ArrayBuffer {
+    const out = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) {
+      out.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return out.buffer
+  }
+
+  /**
+   * `stream` 档的领头 body（#128）：pull 式逐 chunk 转发给页面（保背压），同时旁路累积一份——
+   * 首个 chunk 一到就下发，首字节不再等整条读完。累积总量超上限立刻放弃共享并丢掉已累积的引用（内存有界）；
+   * 读完且在限额内才 settle 一份给跟随者（仍在合并）。读失败 / 页面取消 / 超限 ⇒ settle(null)，
+   * 跟随者各自回落打一次上游。settle 恰好一次。
+   */
+  function teeSharedBody(
+    source: ReadableStream<Uint8Array>,
+    head: { status: number; headers: Headers },
+    settle: (value: SharedGet | null) => void,
+  ): ReadableStream<Uint8Array> {
+    const reader = source.getReader()
+    const chunks: Uint8Array[] = []
+    let accumulated = 0
+    let shareable = true
+    let settled = false
+    const finish = (value: SharedGet | null): void => {
+      if (settled) return
+      settled = true
+      chunks.length = 0
+      settle(value)
+    }
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read()
+          if (done) {
+            controller.close()
+            finish(shareable ? { status: head.status, headers: head.headers, body: concatChunks(chunks, accumulated) } : null)
+            return
+          }
+          controller.enqueue(value)
+          if (!shareable) return
+          accumulated += value.byteLength
+          if (accumulated > SINGLEFLIGHT_MAX_BYTES) {
+            shareable = false
+            chunks.length = 0
+            return
+          }
+          chunks.push(value)
+        } catch (error) {
+          controller.error(error)
+          finish(null)
+        }
+      },
+      cancel(reason) {
+        void reader.cancel(reason).catch(() => {})
+        finish(null)
+      },
+    })
   }
 
   // ---- 批量转发端点（#54 数据面聚合）：一次 POST 携 N 个子请求，并发转发、按序聚合 ----
@@ -276,24 +346,36 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
     proxied += 1
     const method = request.method.toUpperCase()
     const key = `${pathname}${search}`
+    // #128：档位每请求读一次，同请求内不再读——中途切档只影响后续请求，不会把在飞请求换语义。
+    const mode = aggregation()
+    // #144-3：档位判别只有这一处——后续只 switch 策略标签，不再比较档位字符串、不再持有派生的布尔量。
+    const policy = aggregationPolicy(mode)
 
-    // ---- GET 单飞（#54）：并发同 URL 搭领头请求的车，不重复打上游 ----
-    const joined = method === 'GET' ? inflightGets.get(key) : undefined
-    if (joined !== undefined && !joined.done) {
-      coalesced += 1
+    // ---- GET 单飞（#54）：并发同 URL 搭领头请求的车，不重复打上游；等满上限就自己打一次（#144-1）----
+    const riding = policy.kind === 'passthrough' || method !== 'GET' ? undefined : coalescer.peek(key)
+    if (riding !== undefined && !riding.done) {
       inFlight += 1
       const t0 = performance.now()
-      const shared = await joined.buffered
+      const outcome = await coalescer.wait(riding, request.signal, followerWaitMs())
       inFlight = Math.max(0, inFlight - 1)
-      if (shared !== null) {
+      if (outcome.kind === 'shared') {
         // 缓冲路径：拿到共享响应即整条完成（body ≤256KB 才会走到这）
+        const shared = outcome.shared
         const totalMs = Math.round(performance.now() - t0)
         if (totalMs >= 2_000) {
           log(`[proxy] SLOW ttfb=${totalMs}ms total=${totalMs}ms ${method} ${pathname} -> ${shared.status}（单飞跟随）`)
         }
         return new Response(shared.body, { status: shared.status, headers: new Headers(shared.headers) })
       }
-      // 领头失败/不可共享 ⇒ 落回自己打一次
+      if (outcome.kind === 'aborted') {
+        // 页面自己断了：不再占资源，也不该替它去打上游（#144-1）。
+        log(`[proxy] 跟随者被页面取消，放弃 ${method} ${pathname}`)
+        return new Response(null, { status: 499 })
+      }
+      // unshared（领头失败/不可共享）或 timeout（等满上限掉队）⇒ 落回自己打一次。
+      // 这一支安全的前提：这个请求从头到尾没发出去过，「自己再发一次」不产生重复副作用——
+      // 也正是因此绝不给任何**已发出**的请求加自动重试（#54 拍板的架构口径）。
+      log(`[proxy] 跟随者${outcome.kind === 'timeout' ? '等满上限掉队' : '没拿到共享响应'}，自己打一次 ${method} ${pathname}`)
     }
 
     inFlight += 1
@@ -303,26 +385,8 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
     let upstream: Response
     const t0 = performance.now()
 
-    // 领头占位：先登记再发上游，并发同 URL 才赶得上搭车
-    let entry: InflightGet | null = null
-    if (method === 'GET') {
-      const prior = inflightGets.get(key)
-      if (prior !== undefined && prior.done) inflightGets.delete(key)
-      if (!inflightGets.has(key)) {
-        let resolve!: (value: SharedGet | null) => void
-        const buffered = new Promise<SharedGet | null>((res) => { resolve = res })
-        entry = { done: false, buffered, resolve }
-        inflightGets.set(key, entry)
-      }
-    }
-
-    const releaseEntry = (): void => {
-      if (entry === null) return
-      entry.done = true
-      entry.resolve(null)
-      if (inflightGets.get(key) === entry) inflightGets.delete(key)
-      entry = null
-    }
+    // 领头占位：先登记再发上游，并发同 URL 才赶得上搭车（passthrough 档与非 GET 压根不登记）。
+    const entry = policy.kind === 'passthrough' || method !== 'GET' ? null : coalescer.claim(key)
 
     try {
       upstream = await fetch(target, {
@@ -333,7 +397,7 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
       })
     } catch (error) {
       inFlight = Math.max(0, inFlight - 1)
-      releaseEntry()
+      coalescer.settle(key, entry, null)
       log(`[shell] 转发失败 ${method} ${pathname}: ${String(error)}`)
       return new Response('upstream unreachable', { status: 502 })
     }
@@ -343,6 +407,37 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
 
     // 可共享判定：只合并「带 content-length 且 ≤256KB」的 GET——大响应与流式（SSE/chunked）
     // 一律不缓冲，避免内存膨胀与背压变化。
+    const onSettled = (): void => {
+      inFlight = Math.max(0, inFlight - 1)
+    }
+
+    // `stream` 档（#128）：领头立刻流式下发（首字节不等整条读完），边转发边旁路累积一份给跟随者。
+    // 不看 content-length，靠实际累积量封顶；超限 / 读失败 / 页面取消 ⇒ 跟随者回落自己打一次。
+    // 判定只看策略标签：streamed 走下面这段，buffered 落到 full 段，passthrough 压根没有 entry。
+    if (policy.kind === 'coalesced-streamed' && entry !== null) {
+      const inflight = entry
+      const streamed = upstream.body
+      if (streamed === null) {
+        coalescer.settle(key, entry, null)
+        onSettled()
+        return new Response(null, { status: upstream.status, headers: outHeaders })
+      }
+      return trackedResponse({
+        status: upstream.status,
+        headers: outHeaders,
+        body: teeSharedBody(streamed, { status: upstream.status, headers: outHeaders }, (value) => {
+          coalescer.settle(key, inflight, value)
+        }),
+        method,
+        pathname,
+        ttfbMs,
+        t0,
+        onSettled,
+      })
+    }
+
+    // `full`（默认，= #54 原行为）：只合并「带 content-length 且 ≤256KB」的 GET——大响应与流式
+    // （SSE/chunked）一律不缓冲，避免内存膨胀与背压变化。`none` 档压根没有 entry，整段跳过。
     let shared: SharedGet | null = null
     if (entry !== null && upstream.body !== null) {
       const length = Number(upstream.headers.get('content-length'))
@@ -354,18 +449,7 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
         }
       }
     }
-    if (entry !== null) {
-      const finished = entry
-      entry = null
-      finished.done = true
-      finished.resolve(shared)
-      if (inflightGets.get(key) === finished) inflightGets.delete(key)
-    }
-
-    const onSettled = (): void => {
-      inFlight = Math.max(0, inFlight - 1)
-    }
-
+    coalescer.settle(key, entry, shared)
     if (shared !== null) {
       onSettled()
       const totalMs = Math.round(performance.now() - t0)
@@ -464,18 +548,9 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
         if (decision.rel === 'context-menu') {
           if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
           if (options.onContextMenu === undefined) return new Response('no window host', { status: 501 })
-          const body = (await request.json().catch(() => null)) as Partial<ContextMenuRequest> | null
-          options.onContextMenu({
-            linkUrl: typeof body?.linkUrl === 'string' && body.linkUrl !== '' ? body.linkUrl : null,
-            hasSelection: body?.hasSelection === true,
-            editable: body?.editable === true,
-            // 工作区文件行：entry 白名单化，路径只认绝对路径（isOpenablePath，防相对路径/URL 混入）
-            filesEntry:
-              body?.filesEntry === 'file' || body?.filesEntry === 'directory' || body?.filesEntry === 'other'
-                ? body.filesEntry
-                : null,
-            filesPath: typeof body?.filesPath === 'string' && isOpenablePath(body.filesPath) ? body.filesPath : null,
-          })
+          // 字段归一化只有一份实现（#144-2）：与 commands.ts 的 show_context_menu 共用同一个解析器，
+          // 改一边忘另一边导致的漂移就此消失。本分支**不**叠 authorize()——HTTP 分支缺鉴权是另一张票（#130）。
+          options.onContextMenu(parseContextMenuRequest(await request.json().catch(() => null)))
           return new Response(null, { status: 204 })
         }
         // 单实例：第二个壳请已有实例把窗口带到前台（不占端口、不起宿主）
@@ -488,6 +563,10 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
         }
         // 自绘窗口控制（A5）：最小化 / 最大化切换 / 关闭
         if (decision.rel === 'window') {
+          if (request.method.toUpperCase() === 'GET') {
+            if (options.onWindowState === undefined) return new Response('method not allowed', { status: 405 })
+            return Response.json(options.onWindowState(), { headers: { 'cache-control': 'no-store' } })
+          }
           if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
           if (options.onWindowControl === undefined) return new Response('no window host', { status: 501 })
           let action = ''
@@ -497,7 +576,7 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           } catch {
             return new Response('bad json', { status: 400 })
           }
-          if (action !== 'minimize' && action !== 'toggle-maximize' && action !== 'close') {
+          if (!isWindowControlAction(action)) {
             return new Response(`unknown window action: ${action}`, { status: 400 })
           }
           options.onWindowControl(action)
@@ -517,26 +596,6 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           if (typeof body.flow !== 'string') return new Response('bad flow', { status: 400 })
           options.onInputConfirm(body.flow, typeof body.value === 'string' ? body.value : '')
           return new Response(null, { status: 204 })
-        }
-        if (decision.rel === 'profile-op') {
-          if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
-          if (options.onProfileOp === undefined) return new Response('not implemented', { status: 501 })
-          let body: unknown
-          try {
-            body = await request.json()
-          } catch {
-            return new Response('bad json', { status: 400 })
-          }
-          const op = (body as { op?: unknown }).op
-          if (op !== 'create' && op !== 'migrate') return new Response('unknown op', { status: 400 })
-          const payload = body as { target?: unknown; source?: unknown; overwrite?: unknown }
-          const result = await options.onProfileOp({
-            op,
-            target: typeof payload.target === 'string' ? payload.target : '',
-            source: typeof payload.source === 'string' ? payload.source : '',
-            overwrite: payload.overwrite === true,
-          })
-          return Response.json(result)
         }
         // 批量转发（#54 数据面聚合）：一次 POST 携 N 个子请求，壳并发转发、按序聚合返回；
         // 单个子请求失败不拖垮整批（各自回状态码）。整包响应 no-store。
@@ -617,7 +676,10 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
       served,
       proxied,
       proxiedInFlight: inFlight,
-      coalesced,
+      coalesced: coalescer.joined,
+      // #144-1：跟随者等满上限掉队的次数（>0 ⇒ 上游曾卡住并拖住过一批搭车请求）+ 当前等待阈值。
+      followerDropouts: coalescer.dropouts,
+      followerWaitMs: followerWaitMs(),
       uptimeMs: Date.now() - startedAt,
     }
   }

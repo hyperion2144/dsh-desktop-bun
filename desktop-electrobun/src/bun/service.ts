@@ -21,6 +21,15 @@ import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-s
 import type { ShellStage } from './stages.ts'
 import { dshHome, layout, resolveBuiltinRuntimeDir, type ShellLayout } from './runtime.ts'
 import { startShellServer, type BootPayload, type ShellServer, type ShellServerOptions } from './shell-server.ts'
+import type { UpdateNoticeOp, UpdateNoticePayload } from './update-notice-dialog.ts'
+import type { UpdateNoticeTarget } from '../shared/update-notice-policy.ts'
+import { evaluateRuntimeUpdates, DEFAULT_CATALOG_SOURCE } from '../shared/runtime-update.ts'
+import { installableVersions, runtimeInstallability } from '../shared/runtime-installability.ts'
+import { createUpdateNoticeStore } from './update-notice-store.ts'
+import { readShellTheme } from './theme-source.ts'
+import { runUpdateNoticeCheck, type UpdateNoticeCheckResult } from './update-notice-check.ts'
+import { createUpdateNoticeOpRunner, type UpdateNoticeOpResult } from './update-notice-ops.ts'
+import type { WindowControlAction, WindowMaxState } from './window-max.ts'
 import { readHostRecords, sweepStaleHosts, upsertHostRecord, writeHostRecords } from './host-registry.ts'
 import { createRestartLedger } from './supervisor.ts'
 import type { ContextMenuRequest } from './context-menu.ts'
@@ -33,16 +42,18 @@ import { createArbiter } from '../shared/power-arbiter.ts'
 import { proxyEnvRecord, resolveProxyEnv } from '../shared/proxy-env.ts'
 import { detectSystemProxy } from './system-proxy.ts'
 import type { ProxyEnv } from '../shared/proxy-env.ts'
-import { createKeepAwake } from './keep-awake.ts'
+import { createKeepAwake, syncPreventSleep } from './keep-awake.ts'
 import { startNotifyServer } from './notify-server.ts'
-import { createNotifier, importSound as importSoundFile, systemDefaultSoundCommand, type Notifier } from './notifications.ts'
+import { createNotifier, importSound as importSoundFile, type Notifier } from './notifications.ts'
+import { systemDefaultSoundCommand } from './sound-playback.ts'
 import { createNativeNotify, type NativeNotify } from './notify-un.ts'
 import type { ViewRegistry } from '../shared/view-grant.ts'
 import type { GuestCommands } from './guest-manager.ts'
 import { createUpdater, type ShellUpdater } from './updater.ts'
 import { permissionHint, permissionLabel } from '../shared/notify-permission.ts'
 import { NOTIFY_TYPE_SCENARIOS, SCENARIO } from '../shared/notify-policy.ts'
-import { activeProfile, profileLanePort, profilePort, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
+import { resolveBundleIdentifier } from '../shared/app-identity.ts'
+import { DEFAULT_LOOPBACK_AGGREGATION, activeProfile, changedPortKeys, profileLanePort, profilePort, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
 import { createCommandTable, type RuntimeSnapshot } from './commands.ts'
 import { createRpcRouter, dispatchRpc, type RpcRouter } from './rpc.ts'
 import { updateSettings } from './settings-store.ts'
@@ -63,12 +74,16 @@ import {
   fetchRuntimeCatalog,
   listInstalledRuntimes,
   purgeRuntimeTrash,
+  purgeStagingDirs,
   readRuntimeVersion,
   recordInstalledRuntime,
   trashInstalledRuntime,
 } from './runtime-store.ts'
-import { createRuntimeDownloader, ensureNodeShim, ensureShimDir, installRuntime, resolvePnpmCjs } from './runtime-install.ts'
+import { createRuntimeDownloader, ensureNodeShim, ensureShimDir, installRuntime, resolvePnpmCjs, withRuntimeDownloadNotify } from './runtime-install.ts'
 
+
+/** #117：服务面自己管 DSH 的判别位（ShellState.status 取这个联合）。 */
+export type ShellServiceStatus = 'stopped' | 'starting' | 'running' | 'failed' | 'blocked'
 export interface ServiceOptions {
   /** 平台（命令表要回给页面；缺省 process.platform） */
   platform?: NodeJS.Platform
@@ -94,8 +109,15 @@ export interface ServiceOptions {
   onHostGiveUp?: (state: ShellState, reason: string) => void
   /** #60：手动「重启 dsh 服务」= DSH 树级完整重启（宿主+伴生树灭后全新拉起，壳/窗口不动）；缺省回落宿主级 restartHost（无窗口/测试） */
   onFullRestart?: () => Promise<void>
+  /** #119：整应用退出 + 自动重启（B）。拉不起时带原因回传（dev 态显式降级），不抛给页面。 */
+  onRestartApp?: () => Promise<{ ok: boolean; reason?: string; message?: string }>
   /** F9：托盘弹框的 profile 新建/迁移落地后（create → 开窗，migrate → 刷新托盘） */
   onProfileOpApplied?: (op: 'create' | 'migrate', profile: string) => void
+  /** #142：提醒卡的「不再提示」拉黑版本号（壳主进程持有 update-notice.json；没接上时如实报不可用） */
+  /** #142：启动检查的提醒窗由壳主进程开；没接上就一路不弹（只进日志） */
+  onOpenUpdateNotice?: (payload: UpdateNoticePayload) => boolean | Promise<boolean>
+  /** #142：提醒卡的「不再提示」拉黑版本号（带路：壳与运行时各算各的）；缺省写自己的 update-notice.json */
+  onIgnoreVersions?: (targets: UpdateNoticeTarget[]) => void
   /** F12：页面内确认弹窗的回填（壳主进程的 pending-input 单槽） */
   onInputConfirm?: (flow: string, value: string) => void
   /** 启动阶段变化（启动界面据此报进度；无窗口模式也会调） */
@@ -103,7 +125,11 @@ export interface ServiceOptions {
   /** 第二个实例请求把窗口带到前台（单实例激活） */
   onActivate?: () => void
   /** 自绘窗口控制（A5）：页面三键 → 主进程操作 BrowserWindow */
-  onWindowControl?: (action: 'minimize' | 'toggle-maximize' | 'close') => void
+  onWindowControl?: (action: WindowControlAction) => void
+  /** 该 profile 的窗口是否在前台聚焦（#115：聚焦 → 通知整条不投递；无窗口/测试可不给） */
+  isWindowFocused?: (profile: string) => boolean
+  /** 最大化态读取（#112 壳层标题栏带）：GET /__shell__/window 回 { maximized }；缺省时 GET 仍 405 */
+  onWindowState?: () => WindowMaxState
   onLog?: (line: string) => void
   /** 通知权限桥（index.ts 注入同一个实例；缺省自建） */
   notifyBridge?: NativeNotify
@@ -148,6 +174,14 @@ export interface ShellState {
   settingsProvenance: { created: boolean; migrated: boolean; recovered: boolean }
   /** 启动被阻塞的原因（旧壳 ForeignUnknown：端口被陌生程序占用，只报错不代杀）；未阻塞时无此字段 */
   blocked?: string
+  /**
+   * #117：服务面自己管 DSH 的判别位。服务面**先于** DSH 存在：
+   * stopped=壳的面全就绪但还没拉 DSH / starting=正在拉 / running=DSH 已就绪 /
+   * failed=拉过但没起来（看 error）/ blocked=端口被陌生程序占着，自动拉起被拒（看 blocked）。
+   */
+  status: ShellServiceStatus
+  /** status === 'failed' 时的原因。托盘据此显示，用户改完运行时还能再拉一次。 */
+  error: string | null
 }
 
 export interface ShellService {
@@ -182,8 +216,23 @@ export interface ShellService {
   profileOp: (request: ProfileOpRequest) => Promise<ProfileOpResult>
   /** profileOp 落地后的回调（create → 开窗，migrate → 刷新托盘）；测试可注入 */
   onProfileOpApplied: (op: 'create' | 'migrate', profile: string) => void
+  /** #139：启动更新提醒卡的动作落地（壳与运行时两段，共用已有下载/切换/重启路径） */
+  updateNoticeOp: (op: UpdateNoticeOp) => Promise<UpdateNoticeOpResult>
+  /**
+   * #141：托盘「检查更新」显式触发一次（`manual`）——绕过总开关与「已提醒过」，但拉黑仍然认。
+   * 与启动那次共用同一份 store / 探针 / 提醒窗，不另长一套 UI。
+   */
+  checkUpdates: (trigger: 'startup' | 'manual') => Promise<UpdateNoticeCheckResult>
   /** 官方 RPC 的命令表（惰性；壳 RPC 漏斗派发用，见 rpc-bridge.ts #50） */
   rpcRouter: () => RpcRouter | null
+  /**
+   * #117：把 DSH 拉起来 —— 服务面**管理** DSH 的动作，不是服务面**存在**的前提。
+   * startService() 不调它；调用方（index.ts 冷启动 / serve.ts 黑盒握手 / 托盘改完运行时再试一次）
+   * 决定什么时候要 DSH。已经在 running / 正在拉 / blocked 时都是空操作（或复用正在拉的那次，
+   * 不重复 spawn 宿主）。失败不重建服务面：落 failed 态 + 记原因 + 照旧抛给调用方——
+   * 壳自己的部分（托盘/设置/切换运行时/退出）此时完全可用，这正是 #117 要的死局出口。
+   */
+  ensureRunning: () => Promise<void>
 }
 
 export async function startService(options: ServiceOptions): Promise<ShellService> {
@@ -246,6 +295,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 共享 hardlink 的 ctime，触发 dsh 插件 rebuilt → 白屏），所以只能在 spawn 之前清。
   const purgedTrash = purgeRuntimeTrash(paths.appSupport, log)
   if (purgedTrash > 0) log(`运行时回收站：清理 ${String(purgedTrash)} 项（上一次卸载的残留）`)
+  // 安装中断留下的临时目录（.staging-*）：扫描看不见但占磁盘，同样在 spawn 之前清
+  const purgedStaging = purgeStagingDirs(paths.appSupport, log)
+  if (purgedStaging > 0) log(`运行时安装残留：清理 ${String(purgedStaging)} 项（上次装到一半没装完的）`)
 
   // ---- 运行时下载安装：面板点「下载」→ 单飞装树（命令表只调 downloader，不自己 spawn）----
   // pnpm.cjs 随内置树分发（prepare:bundle 按 builtin-runtime.json 声明物化，#16）；包管理器跑在**我们的 Bun** 上。
@@ -291,6 +343,13 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       })
     },
     log,
+  })
+
+  // 运行时下载的唯一通知出口（#115 收全通知面）：托盘（service.download）与面板（download_runtime）
+  // 两条路都汇到这里的包装——成功/失败发 SCENARIO.RUNTIME_DOWNLOAD（取消不发），调用方不重复发。
+  const downloadRuntimeNotified = withRuntimeDownloadNotify((version, source) => downloader.start(version, source), {
+    notify: (scenarioId, body) => notifier.notify(scenarioId, body),
+    cancelled: () => downloader.status().cancelled,
   })
 
   // ---- 宿主 PATH 垫片（#70）：connect 时现算——切运行时/新下载后重连即拿到新 pnpm.cjs；
@@ -467,7 +526,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onLog: log,
   })
   const keepAwake = createKeepAwake({ arbiter, log })
-  if (settings.preventSleep) keepAwake.start()
+  if (settings.preventSleep ?? true) keepAwake.start()
   else log('防休眠：设置里已关闭（prevent_sleep = false）')
 
   // ---- 通知：决策在 notify-policy，这里只做「场景 → 投递」与宿主事件映射 ----
@@ -481,6 +540,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       notifications: settings.notifications,
       home,
       onLog: log,
+      isFocused: () => options.isWindowFocused?.(paths.profile) ?? false,
       show: notifyBridge.available
         ? (payload) => {
             const ok = notifyBridge.post({ title: payload.title, body: payload.body, sound: payload.silent !== true })
@@ -532,7 +592,19 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // remote 视图 token（#47）：铸给 mobile-access 远程命令桥；守护器重启宿主时沿用同一枚
   let remoteViewToken: string | undefined
   let hostInjections: readonly unknown[] = []
+  // #101：boot 载荷是否已可写（applyInjections 声明在前，载荷声明在后；声明前的早期更新只落 hostInjections）
+  let bootPayloadLive = false
   let cookie = ''
+
+  // #101：宿主运行期图重算（插件更新/装卸）会经 HOST-INJECTIONS 通道推送新清单，boot 载荷必须
+  // 跟着刷新——页面每次刷新都从 /__shell__/boot 现取，冻在 ready 快照就是 #101 的死态。
+  // HOST-INJECTIONS 到达即换载荷；远程模式不会收到（无宿主）。bootPayloadLive 守护声明前的
+  // 极窄早期窗口（宿主 ready → 载荷首次填充之间）：更新先落 hostInjections，不会被丢。
+  const applyInjections = (rows: readonly unknown[]): void => {
+    hostInjections = rows
+    if (bootPayloadLive) bootPayload.injections = [...rows]
+    log(`[shell] 注入清单更新：injections = ${String(rows.length)}（宿主图重算，boot 载荷已刷新）`)
+  }
   // 起宿主 + 取 cookie。守护器重启时重复调这个（同一个 cookie 变量与服务面 options）。
   // 设置面板会写盘：内存里也同步一份，免得面板读回来还是旧值（必须先于 connect：connect 里会读）
   let liveSettings = settings
@@ -579,6 +651,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         mode: hostMode,
         env: childEnv,
         onLog: log,
+        onInjections: applyInjections,
         patchFiles,
         upstreamPort,
         shellPagePort: pagePort,
@@ -604,6 +677,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         mode: 'existing',
         env: childEnv,
         onLog: log,
+        onInjections: applyInjections,
         patchFiles,
         upstreamPort,
         shellPagePort: pagePort,
@@ -643,8 +717,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   })
   let blockedMessage: string | undefined
   // 远程模式跳过本地端口认领（旧壳 startup 远程短路：根本不走本地 spawn 链）
+  // #117：把「认领判定」（壳的事，startService 阶段就跑完）与「把 DSH 拉起来」（服务面管的事）拆开。
+  // 这里只决定该不该拉、为什么不该拉；真拉是 ensureRunning() 的活。
+  let shouldConnect = false
   if (remoteAddr !== null || decision === 'free') {
-    await connect()
+    shouldConnect = true
   } else if (decision === 'foreign-unknown') {
     blockedMessage = `端口 ${String(upstreamPort)} 被其他实例或程序占用（profile=${paths.profile}），已停止自动拉起；可在设置中调整该 profile 的端口后重试`
     log(`[shell] ${blockedMessage}`)
@@ -653,7 +730,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     const freed = await stopPortOwner({ port: upstreamPort, log })
     if (freed) {
       log(`[shell] 已清理 127.0.0.1:${String(upstreamPort)} 上的旧实例，由壳重新拉起上游`)
-      await connect()
+      shouldConnect = true
     } else {
       blockedMessage = `端口 ${String(upstreamPort)} 清理失败，仍被其他程序占用（profile=${paths.profile}）；可在设置中调整该 profile 的端口后重试`
       log(`[shell] ${blockedMessage}`)
@@ -685,6 +762,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     chooseDirectory: options.chooseDownloadDir,
     concurrency: liveSettings.downloadConcurrency,
     saveConcurrency: (value) => {
+      // 注意：这条写路径绕过 saveSettings——新增「需即时生效」的开关键必须改走 saveSettings，否则壳侧裁决器/循环不同步。
       liveSettings = updateSettings(home, { download_concurrency: value }, log)
     },
     cookieFor: (url) => {
@@ -725,9 +803,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onContextMenu: options.onContextMenu,
     onActivate: options.onActivate,
     onWindowControl: options.onWindowControl,
-    onProfileOp: (request) => service.profileOp(request),
+    onWindowState: options.onWindowState,
     onInputConfirm: options.onInputConfirm,
     views: options.views,
+    // #128：聚合档位读内存单写者（saveSettings 每次重新赋值 liveSettings）——切档即时生效，热路径零磁盘 IO。
+    aggregation: () => liveSettings.loopbackAggregation ?? DEFAULT_LOOPBACK_AGGREGATION,
     onLog: log,
     onRpc: async (raw, grant) => {
       if (rpcRouter === null) return { status: 503, body: { ok: false, error: 'shell rpc not ready' } }
@@ -741,6 +821,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   const server = startShellServer(serverOptions)
   options.onStage?.('server')
   bootPayload.injections = [...hostInjections]
+  // #101：从这里起 boot 载荷可写；applyInjections 在此之前的极窄窗口只更新 hostInjections（不丢）
+  bootPayloadLive = true
   // 手机稳定接入点（旧壳 forwarder.rs #94）：监听遗留 lane 端口（laneForwarderPort > lanePort > 3091），
   // 新连接落本实例的 lane；外部 dsh 占了端口时退场（手机直连它即可）。多实例下只有先起的那份
   // 服务面拿得到转发器（同端口第二绑定必失败），index.ts 的焦点切换会找到它更新目标。
@@ -784,6 +866,10 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     settings,
     settingsProvenance: { created: loaded.created, migrated: loaded.migrated, recovered: loaded.recovered },
     ...(blockedMessage === undefined ? {} : { blocked: blockedMessage }),
+    // #117：此刻要么 blocked（端口占着，自动拉起被拒），要么 stopped（壳的面全就绪，DSH 还没拉）。
+    // 「把 DSH 拉起来」是 ensureRunning() 的事，不再是 startService() 返回的前提。
+    status: blockedMessage === undefined ? 'stopped' : 'blocked',
+    error: null,
   }
   await Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
 
@@ -918,14 +1004,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     options.onHostRestart?.(state)
     void supervise()
   }
-  if (host !== undefined) {
-    registerHost()
-    void supervise()
-  } else {
-    log('端口被外部实例占用：等用户选完「兼容 / 高级」再拉起（弹框期间不 spawn 宿主）')
-  }
+  // #117：registerHost / supervise 跟着 ensureRunning 走了 —— 它们描述的是「宿主在跑」这件事，
+  // 而 startService 现在只负责把服务面立起来。端口台账（writeClaim）与诊断快照仍在这里。
   log(`端口台账：${JSON.stringify(claims)}`)
   options.onStage?.('ready')
+// #117：'ready' 阶段不再在这里推 —— 它得等 DSH 真的就绪，由 ensureRunning() 推（启动界面据此收尾）。
 
   // ---- D2 守护器：周期 TCP 判活（旧壳 lib.rs 守护器的等价物，语义照旧壳）----
   // 只管「运行中」：readyOnce 之前（启动/重启期/等选模式）归 spawn 与守护器退出事件管。
@@ -982,10 +1065,20 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
 
   // 写设置的唯一路径：命令表（设置面板）与壳侧（托盘切运行时）都走它
   const saveSettings = (patch: Record<string, unknown>): DesktopSettings => {
+    const before = liveSettings
     liveSettings = updateSettings(home, patch, log)
+    // config.info（端口保存等低危信息）：只有真动了端口键才提示一句，普通保存不打扰。
+    const changedPorts = changedPortKeys(before, liveSettings)
+    if (changedPorts.length > 0) {
+      notifier.notify(SCENARIO.CONFIG_INFO, `端口设置已保存（${changedPorts.join('、')}）；重连服务面后生效。`)
+    }
     state.settings = liveSettings
     state.settingsProvenance = { created: false, migrated: false, recovered: false }
     void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
+    // 面板承诺「改动立即生效」，这里兑现（#186 遗留）：prevent_sleep 不能只在启动时读一次。
+    // 放在状态文件写入之后：平台断言这条路径万一抛错（darwin 分支没有 try/catch）也不拖累落盘。
+    // `?? true` 与 createArbiter 的缺省一致（settings 已归一化，这里只是给类型收口）。
+    syncPreventSleep(liveSettings.preventSleep ?? true, { arbiter, keepAwake })
     return liveSettings
   }
 
@@ -1004,6 +1097,195 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     if (!result.ok) throw new Error(result.error)
     return `${profile}：依赖已重建`
   }
+
+  // ---- #117：服务面管 DSH 的那条线 ----
+  /** 落判别位并写状态文件。「DSH 怎么了」在壳内的唯一事实源（托盘/面板/诊断快照都读 state）。 */
+  const setStatus = (next: ShellServiceStatus, error: string | null = null): void => {
+    state.status = next
+    state.error = error
+    void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
+  }
+  /** 正在拉的那次（并发调用复用它，不重复 spawn 宿主） */
+  let starting: Promise<void> | null = null
+  /**
+   * 按当前设置重新解析运行时布局，并就地更新服务面认的那一份（paths/共享池/distDir/状态文件）。
+   * 设置面板切版本与托盘切版本共用这条。**切不出来就落 failed 态并抛，绝不拿旧布局去拉宿主**——
+   * 把现在还能跑的 DSH 弄死，换来的还是一个起不来的。
+   */
+  const adoptLayout = (): void => {
+    const next = layout({ env, profile: paths.profile, preferred: liveSettings.dshRuntime })
+    if (next.unresolved !== null) {
+      setStatus('failed', next.unresolved)
+      log(`运行时切换失败：${next.unresolved}（保持当前运行时不动）`)
+      throw new Error(next.unresolved)
+    }
+    if (next.runtimeDir !== paths.runtimeDir) {
+      log(
+        `运行时切换：${paths.runtimeVersion ?? paths.runtimeDir} → ${next.runtimeVersion ?? next.runtimeDir}（${next.runtimeKind}）`
+      )
+    }
+    Object.assign(paths, next)
+    // #13：运行时变了，共享池立即重指（全局一份，重指一次全部 profile 生效；迁移清理幂等）
+    reconcileProfileFor(paths.profile)
+    serverOptions.distDir = paths.distDir
+    state.runtimeDir = paths.runtimeDir
+    state.distDir = paths.distDir
+    void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
+  }
+  /**
+   * 把 DSH 拉起来 —— 服务面**管理** DSH 的动作，不是它**存在**的前提。
+   * 调用方（index.ts 冷启动 / serve.ts 黑盒握手 / 托盘改完运行时再试一次）决定什么时候要 DSH。
+   *
+   * 失败不重建服务面：落 failed 态 + 记原因 + 照旧抛给调用方。壳自己的部分（托盘/设置/
+   * profile/退出）此时完全可用 —— 这正是 #117：DSH 起不来时用户仍然能换一个运行时再试。
+   */
+  const ensureRunning = async (): Promise<void> => {
+    if (stopping) return
+    if (state.status === 'running') return
+    // 端口被陌生程序占着：重试没用，得先改该 profile 的端口（状态里已经有原因）
+    if (state.status === 'blocked') throw new Error(state.blocked ?? '端口被占用')
+    if (starting !== null) return await starting
+    // #117：用户刚在托盘/面板换了运行时 → 设置里的偏好与服务面认的运行时已经不是一回事，
+    // 重新解析一次布局。切不出来 adoptLayout 自己落 failed 并抛，不会拿旧布局去拉。
+    if (liveSettings.dshRuntime !== (paths.runtimeVersion ?? null)) adoptLayout()
+    // 布局/运行时一个都解析不出来：没有可启动的宿主。服务面照样在，原因说清楚就行。
+    if (paths.unresolved !== null) {
+      setStatus('failed', paths.unresolved)
+      log(`[shell] dsh 起不来：${paths.unresolved}`)
+      throw new Error(paths.unresolved)
+    }
+    setStatus('starting')
+    starting = (async (): Promise<void> => {
+      if (shouldConnect) {
+        await connect()
+        serverOptions.upstreamOrigin = hostOrigin !== '' ? hostOrigin : `http://127.0.0.1:${String(upstreamPort)}`
+        applyHost()
+      }
+      registerHost()
+      readyOnce = true
+      dshStatusCode = 2
+      options.onStage?.('ready')
+      setStatus('running')
+      // #142：服务面就绪后在**后台**查一次更新（fire-and-forget）：窗口与托盘不等人，查不到也静默。
+      void checkUpdates('startup')
+      // 崩溃自愈/退避重启那条线跟服务面绑在一起，不跟某一次启动绑（#60 的语义原样保留）
+      void supervise()
+    })()
+    try {
+      await starting
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      dshStatusCode = 5
+      setStatus('failed', reason)
+      log(`[shell] dsh 未起来：${reason}（服务面仍在：托盘/设置/切换运行时/退出都可用）`)
+      throw error
+    } finally {
+      starting = null
+    }
+  }
+  // #60：面板「重启 dsh 服务」= 壳级完整重启（退出级 teardown → 全新启动，壳本体/托盘不退出）；
+  // 无窗口/测试没有壳 teardown 回调，回落宿主级 restartHost（已树安全）。
+  // #126 起托盘那项已是「重启应用」（整应用重来），不再是本条的同语义兄弟。
+  // 具名是因为提醒卡的「切换后重启」也要走它（#139）——两条路径只能有一份。
+  const restartService = async (): Promise<void> => {
+    if (options.onFullRestart !== undefined) {
+      await options.onFullRestart()
+      return
+    }
+    await service.restartHost()
+  }
+  // ---- #142：启动后那次后台更新检查 ----
+  // 判定/去重/记账都在纯逻辑层（shared/update-notice-policy.ts + #138 的判定层），这里只接两路探针。
+  // app-support/update-notice.json 是服务面自己的落点——它不在 desktop-settings.json 里（键名是契约红线）。
+  const updateNoticeStore = createUpdateNoticeStore(paths.appSupport, log)
+
+  /**
+   * 未下载候选的「装得上吗」闸门（#139 两次实机修）：目录说有 ≠ 装得上。
+   *
+   * 第一次真实失败是 GitHub 上刚发、npm 上还没有；第二次更隐蔽——`dsh@0.2.1-rc.2` 已在 npm，
+   * 但它 pin 的第一方兄弟包 `dsh-tool-pwsh-persistent@0.2.1-rc.2` 还没发，`pnpm add` 直接炸
+   * ERR_PNPM_NO_MATCHING_VERSION。所以这里按 registry 包文档核验每个候选的依赖闭包
+   * （`shared/runtime-installability.ts`）：缺任何一个兄弟包就不提醒它。
+   *
+   * 无状态、每次真查：上游把缺的包补上之后，下一次检查自己就恢复（用户原话「拉黑你怎么知道有没有
+   * 恢复」——所以不拉黑）。安装源恒为 npm（runtime-install.ts 无条件 pnpm add），这道闸门跟设置里
+   * 的「运行时下载源」无关，GitHub 目录也一样要过。
+   *
+   * 返回 null = 压根没有未下载候选，不设闸；返回 [] = 一个都装不上（含「核验没查成」）。
+   */
+  const installableGate = async (candidates: readonly string[]): Promise<readonly string[] | null> => {
+    if (candidates.length === 0) return null
+    return installableVersions(await runtimeInstallability({ versions: candidates, log }))
+  }
+  // 启动那次与托盘手动那次共用这份依赖；差别只有 trigger（#141）。
+  const checkUpdates = async (trigger: 'startup' | 'manual'): Promise<UpdateNoticeCheckResult> => {
+    const open = options.onOpenUpdateNotice
+    // 启动那次：主进程没接开窗能力就压根不查（省掉两次网络，也没东西可提醒）；
+    // 托盘那次照查——用户亲手点的，结果要落到托盘那行灰字上。
+    if (open === undefined && trigger === 'startup') {
+      return { notify: false, reason: '提醒窗未接入', notified: [] }
+    }
+    return runUpdateNoticeCheck({
+      trigger,
+      store: updateNoticeStore,
+      // 壳这一路：框架 updater 拿不到更新源（dev 构建）时 view 里压根没有新版本 ⇒ 自然静默。
+      probeShell: async () => ({ view: (await updater.check()).view, fresh: true }),
+      probeRuntime: async () => {
+        const snapshot = runtimeSnapshot()
+        const source = liveSettings.runtimeSource ?? DEFAULT_CATALOG_SOURCE
+        const catalog = await fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log })
+        const base = {
+          running: snapshot.activeVersion,
+          builtin: snapshot.builtinVersion,
+          catalog: catalog.entries,
+          installed: snapshot.installed,
+          source,
+          ...(catalog.error === undefined ? {} : { catalogError: catalog.error }),
+        }
+        // 第一遍只为算出「比在跑的更高的未下载候选」；核验过它们的依赖闭包，第二遍才是最终判定。
+        const candidates = evaluateRuntimeUpdates(base).entries
+          .filter((entry) => entry.source === 'remote')
+          .map((entry) => entry.version)
+        const installable = await installableGate(candidates)
+        return {
+          report: evaluateRuntimeUpdates({
+            ...base,
+            ...(installable === null ? {} : { installable }),
+          }),
+          fresh: true,
+        }
+      },
+      context: () => ({
+        profile: paths.profile,
+        baseline: runtimeVersion,
+        preference: liveSettings.dshRuntime ?? '',
+        theme: readShellTheme(paths.home, paths.profile),
+      }),
+      open: open ?? (() => false),
+      log,
+    })
+  }
+  // #139：提醒卡动作的依赖全部指向**已有**能力——壳下载走 updater，运行时下载走同一个单飞下载器，
+  // 落设置走 saveSettings（#97：dsh_mode 必须一起写，否则「切回内置」会被当成没设置），重启走上面那份，
+  // 「不再提示」落到上面那份 update-notice.json（测试可经 options.onIgnoreVersions 注入假实现）。
+  const updateNoticeOp = createUpdateNoticeOpRunner({
+    downloadShell: async () => {
+      await updater.download()
+    },
+    // 端点是回环 HTTP，source 按普通外部输入对待：只认这两个，其余回落 github。
+    downloadRuntime: (version, source) => downloadRuntimeNotified(version, source === 'npm' ? 'npm' : 'github'),
+    switchRuntime: (version) => {
+      saveSettings({ dsh_runtime: version, dsh_mode: 'builtin' })
+    },
+    restartService,
+    ignoreVersions: (targets) => {
+      if (options.onIgnoreVersions !== undefined) {
+        options.onIgnoreVersions(targets)
+        return
+      }
+      updateNoticeStore.ignore(targets)
+    },
+  })
   const service: ShellService = {
     state,
     paths,
@@ -1012,14 +1294,20 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     rpcRouter: () => rpcRouter,
     notify: notifyBridge,
     settings: () => liveSettings,
+    // #117：服务面管理 DSH 的入口。起服务面不等它；什么时候要 DSH 由调用方说。
+    ensureRunning,
     save: saveSettings,
     runtime: () => runtimeSnapshot(),
     fetchCatalog: (source) =>
       fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log }),
     downloadStatus: () => downloader.status(),
-    download: (version, source) => downloader.start(version, source),
+    download: downloadRuntimeNotified,
     // #97：托盘与面板共用同一个取消口，取消后两边都从轮询快照看到 cancelled 终态
     cancelRuntimeDownload: () => downloader.cancel(),
+    // #139：提醒卡动作复用同一条重启路径（面板切运行时也是它）
+    updateNoticeOp,
+    // #141：托盘「检查更新」显式触发（manual）——同一份 store/探针/提醒窗，只是绕过去重
+    checkUpdates,
     profileOp: async (request) => {
       if (request.op === 'create') {
         const name = request.target ?? ''
@@ -1031,6 +1319,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
           ? `profile ${name} 已创建；开窗时会自动装依赖树并拉起 dsh。`
           : `profile ${name} 已存在，直接打开即可。`
         options.onProfileOpApplied?.('create', name)
+        if (result.created) notifier.notify(SCENARIO.PROFILE_OP, `profile ${name} 已创建`)
         return { ok: true, message, profile: name }
       }
       // migrate：校验后交给命令表同一条迁移路径（复制依赖树 + pnpm install，长任务）
@@ -1063,9 +1352,12 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
           track: taskTracker,
         })
         options.onProfileOpApplied?.('migrate', target)
+        notifier.notify(SCENARIO.PROFILE_OP, `profile ${target} 迁移完成`)
         return { ok: true, message: summary, profile: target }
       } catch (error) {
-        return { ok: false, message: String(error) }
+        const reason = error instanceof Error ? error.message : String(error)
+        notifier.notify(SCENARIO.PROFILE_ERROR, `profile ${target} 迁移失败：${reason}`)
+        return { ok: false, message: reason }
       }
     },
     onProfileOpApplied: (op, profile) => {
@@ -1075,23 +1367,13 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       if (stopping) return
       // 设置面板切了运行时版本：这里重新解析选中项（同一个 paths 对象就地更新，
       // 服务面、状态与命令表都以它为事实源），再杀宿主——守护器会带着新运行时重启。
-      const next = layout({
-        env,
-        profile: paths.profile,
-        preferred: liveSettings.dshRuntime,
-      })
-      if (next.runtimeDir !== paths.runtimeDir) {
-        log(
-          `运行时切换：${paths.runtimeVersion ?? paths.runtimeDir} → ${next.runtimeVersion ?? next.runtimeDir}（${next.runtimeKind}）`
-        )
+      adoptLayout()
+      // #117：服务面还没在跑 DSH 时，切运行时不需要走「杀宿主」那条路——直接按新布局拉起来即可。
+      // 只有 DSH 已经在跑的时候，才需要先把旧宿主停下来。
+      if (state.status !== 'running' && state.status !== 'starting') {
+        await ensureRunning()
+        return
       }
-      Object.assign(paths, next)
-      // #13：运行时变了，共享池立即重指（全局一份，重指一次全部 profile 生效；迁移清理幂等）
-      reconcileProfileFor(paths.profile)
-      serverOptions.distDir = paths.distDir
-      state.runtimeDir = paths.runtimeDir
-      state.distDir = paths.distDir
-      void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
       // 远程/本地互切：先重算 remoteAddr（设置面板 nsSave 已落盘），再分流——
       // 远程模式没有宿主可杀，直接把服务面切过去；从远程切回本地时也没有宿主，立即拉起。
       // 其余（本地→本地）杀掉宿主即可：退出会唤醒守护器，由它重启并把服务面切过去。
@@ -1140,17 +1422,21 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       home,
       profile: () => paths.profile,
       platform: options.platform ?? process.platform,
+      bundleId: resolveBundleIdentifier(),
+      // #75：Linux 防休眠通道的能力快照（面板可见；拿不到通道时不静默）
+      keepAwake: () => keepAwake.capability(),
       log,
       settings: () => liveSettings,
       save: saveSettings,
-      restartService: async () => {
-        // #60：面板「重启 dsh 服务」= 壳级完整重启（退出级 teardown → 全新启动，与托盘同语义）；
-        // 无窗口/测试没有壳 teardown 回调，回落宿主级 restartHost（已树安全）。
-        if (options.onFullRestart !== undefined) {
-          await options.onFullRestart()
-          return
+      restartService,
+      // #119：整应用重启与「重启 dsh 服务」是两条路。壳没这个能力（无窗口模式/测试）时如实报不可用，
+      // 不静默回落成 restartHost——那正是本票要修的那个「以为重启了其实没重跑」的假象。
+      restartApp: async () => {
+        if (options.onRestartApp === undefined) {
+          log('[shell] 重启桌面应用：当前无壳层入口（无窗口模式），未执行')
+          return { ok: false, reason: 'unavailable', message: '当前运行模式不支持自动重启桌面应用，请手动重启。' }
         }
-        await service.restartHost()
+        return options.onRestartApp()
       },
       status: () => ({ ...state }),
       ports: () => ({ port: pagePort, upstreamPort, lanePort }),
@@ -1158,22 +1444,26 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       portClaims: async () => pruneClaims(parseClaims(await readClaims()), isAlivePid),
       profiles: () => listProfiles(home, paths.profile),
       openExternal: options.onOpenExternal,
+      // 壳 preload 脚本迁官方 RPC（#128③）：boot 载荷与右键菜单改走命令表
+      bootPayload: () => bootPayload,
+      showContextMenu: options.onContextMenu,
       closeWindow: options.onCloseWindow,
-      playSound: (name) => {
-        notifier.previewSound(name)
-      },
+      playSound: (name) => notifier.previewSound(name),
       playSystemSound: () => {
         const command = systemDefaultSoundCommand(options.platform ?? process.platform)
         if (command === null) {
-          log('[notify] 系统默认提示音只在 macOS 上试听')
-          return
+          // 没有后端就如实回 false：面板会提示「本机不支持」，不再假报成功（#74）
+          log('[notify] 系统默认提示音：本机没有可用播放后端，未出声')
+          return false
         }
         try {
           const child = Bun.spawn(command, { stdout: 'ignore', stderr: 'ignore' })
           child.unref?.()
           log(`[notify] 试听系统提示音：${command.join(' ')}（pid = ${String(child.pid)}）`)
+          return true
         } catch (error) {
           log(`[notify] 系统音试听失败：${error instanceof Error ? error.message : String(error)}`)
+          return false
         }
       },
       pickSoundFile: options.pickSoundFile,
@@ -1190,7 +1480,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       removeRuntime: async (version) => {
         trashInstalledRuntime(paths.appSupport, version, log)
       },
-      downloadRuntime: (version, source) => downloader.start(version, source),
+      downloadRuntime: downloadRuntimeNotified,
       downloadStatus: () => downloader.status(),
       cancelRuntimeDownload: () => downloader.cancel(),
       downloads,
@@ -1279,6 +1569,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         read: () => readKeybindings(home),
         write: (raw) => writeKeybindings(home, raw),
       },
+      // #136：启动更新提醒的开关与拉黑列表（落 app-support/update-notice.json，不动设置键名）
+      updateNotice: updateNoticeStore,
       // 面板展示与真实注入同源：一样走 scutil / 注册表 / 环境变量三级检测。
       proxyEffective: () => resolveProxyEnv(liveSettings, detectSystemProxy({ platform: process.platform, env: childEnv, log })),
     }),

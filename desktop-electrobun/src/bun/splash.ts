@@ -8,6 +8,12 @@
 
 import { APP_NAME } from '../shared/app.ts'
 import { FAILED_LABEL, stageLabel, stagePercent, type ShellStage } from './stages.ts'
+import {
+  DEFAULT_SHELL_THEME,
+  shellThemeAttr,
+  shellThemeStyle,
+  type ShellThemePreference,
+} from '../shared/shell-theme.ts'
 
 export const SPLASH_WIDTH = 420
 export const SPLASH_HEIGHT = 236
@@ -25,28 +31,29 @@ export function splashFailScript(message: string): string {
   return `window.__dshSplash && window.__dshSplash.fail(${jsString(message)})`
 }
 
-export function splashHtml(): string {
-  // 深色、居中、无边框——与产品主题一致；失败时把红字与提示露出来，别静默转圈。
+  // 跟产品主题走：读 profile 的 ui-theme 偏好，没配就跟随系统（= DSH 的缺省口径）。
+  // 配色走 CSS 变量 + prefers-color-scheme，所以系统切深浅色时这扇窗不用重开就能跟上。
+export function splashHtml(theme: ShellThemePreference = DEFAULT_SHELL_THEME): string {
   return `<!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN"${shellThemeAttr(theme)}>
 <head>
 <meta charset="utf-8" />
 <title>${APP_NAME}</title>
 <style>
-  :root { color-scheme: dark; }
+${shellThemeStyle()}
   * { box-sizing: border-box; }
   body {
     margin: 0; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 14px; background: #16161a; color: #e7e7ea;
+    gap: 14px; background: var(--dsw-alias-bg-layer-1, #16161a); color: var(--dsw-alias-label-primary, #e7e7ea);
     font: 13px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
     -webkit-user-select: none; user-select: none;
   }
   .name { font-size: 15px; font-weight: 600; letter-spacing: .02em; }
-  .stage { color: #9a9aa2; min-height: 20px; }
-  .track { width: 260px; height: 4px; border-radius: 2px; background: #2a2a31; overflow: hidden; }
-  .bar { height: 100%; width: 4%; border-radius: 2px; background: #6c7bff; transition: width .18s ease; }
-  .error { display: none; max-width: 340px; text-align: center; color: #ff8b8b; white-space: pre-wrap; }
-  .hint { display: none; max-width: 340px; text-align: center; color: #7c7c85; font-size: 12px; }
+  .stage { color: var(--dsw-alias-label-secondary, #9a9aa2); min-height: 20px; }
+  .track { width: 260px; height: 4px; border-radius: 2px; background: var(--dsw-alias-border-l2, #2a2a31); overflow: hidden; }
+  .bar { height: 100%; width: 4%; border-radius: 2px; background: var(--dsw-alias-state-accent-primary, #6c7bff); transition: width .18s ease; }
+  .error { display: none; max-width: 340px; text-align: center; color: var(--dsw-alias-state-danger, #ff8b8b); white-space: pre-wrap; }
+  .hint { display: none; max-width: 340px; text-align: center; color: var(--dsw-alias-label-secondary, #7c7c85); font-size: 12px; }
   body.failed .track { display: none; }
   body.failed .error, body.failed .hint { display: block; }
 </style>
@@ -56,7 +63,7 @@ export function splashHtml(): string {
   <div class="stage" id="stage">正在启动…</div>
   <div class="track"><div class="bar" id="bar"></div></div>
   <div class="error" id="error"></div>
-  <div class="hint" id="hint">可退出后重试；日志在 ~/.dsh/shell.log</div>
+  <div class="hint" id="hint">托盘已就绪：可在托盘里换运行时版本或退出；日志在 ~/.dsh/shell.log</div>
   <script>
     window.__dshSplash = {
       stage: function (text, percent) {

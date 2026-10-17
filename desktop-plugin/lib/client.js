@@ -45,9 +45,6 @@ __export(index_exports, {
 module.exports = __toCommonJS(index_exports);
 
 // src/client/shell-rpc.ts
-var RPC_ENDPOINT = "/__shell__/rpc";
-var WINDOW_ENDPOINT = "/__shell__/window";
-var VIEW_TOKEN_HEADER = "x-dsh-shell-view";
 var DEFAULT_TIMEOUT_MS = 15e3;
 var MAX_ID = 1e10;
 function isRecord(value) {
@@ -55,11 +52,9 @@ function isRecord(value) {
 }
 function createShellRpc(deps) {
   const readGlobals = deps?.readGlobals ?? (() => globalThis);
-  const fetchImpl = deps?.fetchImpl ?? ((...a) => fetch(...a));
   const setTimeoutImpl = deps?.setTimeoutImpl ?? ((fn, ms) => setTimeout(fn, ms));
   const clearTimeoutImpl = deps?.clearTimeoutImpl ?? ((t) => clearTimeout(t));
   const pending = /* @__PURE__ */ new Map();
-  const messageListeners = /* @__PURE__ */ new Set();
   let nextId = 0;
   let receiveAttached = false;
   function officialBridge() {
@@ -68,18 +63,6 @@ function createShellRpc(deps) {
   }
   function handlePacket(packet) {
     if (!isRecord(packet)) return;
-    if (packet.type === "message") {
-      const name = typeof packet.id === "string" ? packet.id : "";
-      if (name === "") return;
-      for (const listener of messageListeners) {
-        try {
-          listener(name, packet.payload);
-        } catch (error) {
-          console.error("shell rpc message listener failed", error);
-        }
-      }
-      return;
-    }
     if (packet.type !== "response") return;
     const id = typeof packet.id === "number" ? packet.id : NaN;
     const waiter = pending.get(id);
@@ -90,6 +73,10 @@ function createShellRpc(deps) {
     else waiter.reject(new Error(typeof packet.error === "string" ? packet.error : "shell rpc failed"));
   }
   function ensureReceive() {
+    if (typeof readGlobals().__DSH_SHELL_RPC__?.invoke === "function") {
+      receiveAttached = true;
+      return;
+    }
     if (receiveAttached) return;
     const g = readGlobals();
     const eb = g.__electrobun;
@@ -103,6 +90,8 @@ function createShellRpc(deps) {
     }
   }
   function officialInvoke(cmd, args, options) {
+    const dispatcher = readGlobals().__DSH_SHELL_RPC__;
+    if (typeof dispatcher?.invoke === "function") return dispatcher.invoke(cmd, args, options);
     const post = officialBridge();
     if (post === void 0) return Promise.reject(new Error("official bridge unavailable"));
     ensureReceive();
@@ -133,123 +122,25 @@ function createShellRpc(deps) {
     if (typeof invoke4 !== "function") return Promise.reject(new Error("relay bridge unavailable"));
     return invoke4(cmd, args);
   }
-  async function fetchInvoke(cmd, args) {
-    const token = readGlobals().__DSH_SHELL_VIEW_TOKEN__;
-    let response;
-    try {
-      response = await fetchImpl(RPC_ENDPOINT, {
-        method: "POST",
-        headers: { "content-type": "application/json", ...typeof token === "string" && token !== "" ? { [VIEW_TOKEN_HEADER]: token } : {} },
-        body: JSON.stringify({ cmd, args })
-      });
-    } catch (error) {
-      throw new Error(`shell rpc failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    if (!response.ok) throw new Error(`shell rpc failed: ${String(response.status)}`);
-    const body = await response.json().catch(() => null);
-    if (body !== null && body.ok === true) return body.value;
-    throw new Error(typeof body?.error === "string" ? body.error : "shell rpc failed");
-  }
   return {
     invoke(cmd, args, options) {
       const rest = isRecord(args) ? args : {};
       if (officialBridge() !== void 0) return officialInvoke(cmd, rest, options);
       if (typeof readGlobals().__DSH_SHELL_RELAY__?.invoke === "function") return relayInvoke(cmd, rest);
-      if (typeof readGlobals().__DSH_SHELL_VIEW_TOKEN__ === "string") return fetchInvoke(cmd, rest);
       return Promise.reject(new Error("shell rpc unavailable"));
-    },
-    onMessage(listener) {
-      messageListeners.add(listener);
-      return () => {
-        messageListeners.delete(listener);
-      };
     },
     available() {
       const g = readGlobals();
-      return officialBridge() !== void 0 || typeof g.__DSH_SHELL_RELAY__?.invoke === "function" || typeof g.__DSH_SHELL_VIEW_TOKEN__ === "string";
+      return officialBridge() !== void 0 || typeof g.__DSH_SHELL_RELAY__?.invoke === "function" || typeof g.__DSH_SHELL_RPC__?.invoke === "function";
     }
   };
 }
 var shellRpc = createShellRpc();
-async function sendWindowAction(action, deps) {
-  const method = { minimize: "window_minimize", "toggle-maximize": "window_toggle_maximize", close: "window_close" }[action];
-  const rpc = deps?.rpc ?? shellRpc;
-  const readGlobals = deps?.readGlobals ?? (() => globalThis);
-  if (typeof readGlobals().__electrobunHostBridge?.postMessage === "function") {
-    await rpc.invoke(method, {}, { timeoutMs: 3e4 });
-    return;
-  }
-  const fetchImpl = deps?.fetchImpl ?? ((...a) => fetch(...a));
-  const token = readGlobals().__DSH_SHELL_VIEW_TOKEN__;
-  const response = await fetchImpl(WINDOW_ENDPOINT, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...typeof token === "string" && token !== "" ? { [VIEW_TOKEN_HEADER]: token } : {} },
-    body: JSON.stringify({ action })
-  });
-  if (!response.ok) throw new Error(`window action failed: ${String(response.status)}`);
-}
 
 // src/client/local-chrome.ts
-var STRIP_HEIGHT = {
-  darwin: 28,
-  win32: 32,
-  linux: 32
-};
+var DARWIN_STRIP_HEIGHT = 28;
 var TRAFFIC_LIGHT_BAND = 76;
-var CAPTION_CONTROLS_WIDTH = 138;
 var FRAME_LAYER_SELECTOR = "[data-shell-overlay]";
-function runWindowAction(action) {
-  sendWindowAction(action).catch((error) => console.error("[dsh-desktop] window action failed", error));
-}
-var maximizeIconSvg = (maximized) => maximized ? '<rect x="1.5" y="4.5" width="7" height="6" stroke="currentColor" strokeWidth="1" fill="none" /><path d="M3.5 4.5V2.5H10.5V9H8.5" stroke="currentColor" strokeWidth="1" fill="none" />' : '<rect x="1.5" y="1.5" width="9" height="9" stroke="currentColor" strokeWidth="1" fill="none" />';
-function syncMaximizeIcon() {
-  const button = document.querySelector(".dshDesktopCaptionButton-maximize");
-  if (button === null) return;
-  shellRpc.invoke("window_get_state", void 0, { timeoutMs: 5e3 }).then((state) => {
-    button.innerHTML = `<svg viewBox="0 0 12 12" aria-hidden="true">${maximizeIconSvg(state.maximized)}</svg>`;
-    button.setAttribute("aria-label", state.maximized ? "\u8FD8\u539F" : "\u6700\u5927\u5316");
-  }).catch(() => void 0);
-}
-function makeCaptionButton(aria, extraClass, svgPath) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = `dshDesktopCaptionButton${extraClass ? ` ${extraClass}` : ""}`;
-  button.setAttribute("aria-label", aria);
-  button.innerHTML = `<svg viewBox="0 0 12 12" aria-hidden="true">${svgPath}</svg>`;
-  return button;
-}
-function buildWindowControls(platform) {
-  const box = document.createElement("div");
-  box.className = "dshDesktopWindowControls";
-  box.appendChild(makeCaptionButton("\u6700\u5C0F\u5316", "", '<path d="M1 6h10" stroke="currentColor" strokeWidth="1" fill="none" />'));
-  box.appendChild(makeCaptionButton("\u6700\u5927\u5316", "dshDesktopCaptionButton-maximize", maximizeIconSvg(false)));
-  box.appendChild(makeCaptionButton("\u5173\u95ED", "dshDesktopCaptionButton-close", '<path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1" />'));
-  box.addEventListener("click", (event) => {
-    const button = event.target.closest("button");
-    const action = button?.getAttribute("aria-label");
-    if (action === "\u6700\u5C0F\u5316") runWindowAction("minimize");
-    else if (action === "\u6700\u5927\u5316" || action === "\u8FD8\u539F") {
-      runWindowAction("toggle-maximize");
-      syncMaximizeIcon();
-    } else if (action === "\u5173\u95ED") runWindowAction("close");
-  });
-  if (platform !== "darwin") {
-    syncMaximizeIcon();
-    shellRpc.onMessage((name) => {
-      if (name === "window_state_changed") syncMaximizeIcon();
-    });
-    let resizeTimer = 0;
-    window.addEventListener("resize", () => {
-      window.clearTimeout(resizeTimer);
-      resizeTimer = window.setTimeout(syncMaximizeIcon, 200);
-    });
-    window.addEventListener("focus", () => syncMaximizeIcon());
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") syncMaximizeIcon();
-    });
-  }
-  return box;
-}
 function locateLayout() {
   const layer = document.querySelector(FRAME_LAYER_SELECTOR);
   const frame = layer?.parentElement;
@@ -258,7 +149,6 @@ function locateLayout() {
   return { frame, sidebar: children[0] ?? frame, center: children[1] ?? null, rightColumn: children[2] ?? null };
 }
 function installLocalChrome(platform) {
-  const height = STRIP_HEIGHT[platform];
   const host = document.createElement("div");
   host.className = "dshDesktopChromeHost";
   const strip = document.createElement("div");
@@ -266,10 +156,8 @@ function installLocalChrome(platform) {
   const drag = document.createElement("div");
   drag.className = "dshDesktopChromeDrag";
   drag.classList.add("electrobun-webkit-app-region-drag");
-  if (platform !== "darwin") drag.addEventListener("dblclick", () => runWindowAction("toggle-maximize"));
   strip.appendChild(drag);
-  if (platform !== "darwin") strip.appendChild(buildWindowControls(platform));
-  host.appendChild(strip);
+  if (platform === "darwin") host.appendChild(strip);
   document.body.appendChild(host);
   const STATUS_BAR_HEIGHT = 24;
   const STATUS_TEXT = {
@@ -469,7 +357,7 @@ function installLocalChrome(platform) {
       return;
     }
     attempts = 0;
-    const { frame, sidebar, center, rightColumn } = layout;
+    const { frame, sidebar } = layout;
     ensureSidebarScroll(sidebar);
     const sidebarWidth = sidebar.offsetWidth;
     sidebar.style.paddingBottom = `${STATUS_BAR_HEIGHT}px`;
@@ -478,21 +366,15 @@ function installLocalChrome(platform) {
       const collapsed = frame.hasAttribute("data-sidebar-collapsed");
       frame.style.setProperty("transition", "none", "important");
       if (collapsed) {
-        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${height}px;background:transparent;`;
+        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${DARWIN_STRIP_HEIGHT}px;background:transparent;`;
         drag.style.cssText = "position:absolute;inset:0;";
         sidebar.style.paddingTop = "";
         bar.style.display = "none";
       } else {
-        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${height}px;`;
+        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${DARWIN_STRIP_HEIGHT}px;`;
         drag.style.cssText = "position:absolute;inset:0;";
         bar.style.display = "";
       }
-    } else {
-      strip.style.cssText = `left:${sidebarWidth}px;right:0;top:0;height:${height}px;`;
-      drag.style.cssText = `position:absolute;top:0;bottom:0;left:0;right:${CAPTION_CONTROLS_WIDTH}px;`;
-      if (center !== null) center.style.paddingTop = `${height}px`;
-      const rightPanel = rightColumn?.querySelector("[data-sidebar-right-panel]");
-      if (rightPanel !== null) rightPanel.style.top = `${height}px`;
     }
   };
   try {
@@ -516,9 +398,6 @@ function installLocalChrome(platform) {
         attributes: true,
         attributeFilter: ["data-sidebar-collapsed", "data-details-collapsed", "style"]
       });
-      if (layout.rightColumn !== null) {
-        mutationObserver.observe(layout.rightColumn, { childList: true, subtree: true });
-      }
     }
     return true;
   };
@@ -546,9 +425,6 @@ function installLocalChrome(platform) {
       found.sidebar.style.removeProperty("border-right");
       found.frame.style.removeProperty("transition");
       found.frame.style.removeProperty("grid-template-columns");
-      if (found.center !== null) found.center.style.paddingTop = "";
-      const rightPanel = found.rightColumn?.querySelector("[data-sidebar-right-panel]");
-      if (rightPanel !== null) rightPanel.style.top = "";
     }
     for (const el of minWidthPatched) el.style.minWidth = "";
     for (const el of overflowXPatched) el.style.overflowX = "";
@@ -581,11 +457,6 @@ var ADVANCED_STYLES = `
    \u7528\u5F39\u7A97\u7A33\u5B9A\u6807\u8BB0\u5B9A\u4F4D\uFF0C\u4E0D\u4F9D\u8D56 hash \u7C7B\u540D\u3002 */
 [role="dialog"][aria-modal="true"] nav { min-height: 0; overflow: hidden; }
 [role="dialog"][aria-modal="true"] nav > div:last-child { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-.dshDesktopWindowControls { position: absolute; top: 0; right: 0; height: 100%; display: flex; align-items: stretch; }
-.dshDesktopCaptionButton { width: 46px; border: none; margin: 0; padding: 0; background: transparent; color: var(--dsw-alias-label-primary, currentColor); display: grid; place-items: center; cursor: default; }
-.dshDesktopCaptionButton:hover { background: rgba(128, 128, 128, 0.18); }
-.dshDesktopCaptionButton-close:hover { background: #e81123; color: #fff; }
-.dshDesktopCaptionButton svg { width: 12px; height: 12px; display: block; }
 /* \u4FA7\u8FB9\u680F\u5185\u5BB9\u533A\u6EDA\u52A8\uFF08local-chrome.ts ensureSidebarScroll \u6253\u7A33\u5B9A\u6807\u8BB0\uFF1B\u5185\u8054 overflow
    \u5DF2\u8986\u76D6 stock \u7684 hidden\uFF0C\u8FD9\u91CC\u53EA\u505A\u6EDA\u52A8\u6761\u89C2\u611F\u4E0E\u6EDA\u52A8\u94FE\u6536\u655B\uFF09\u3002 */
 [data-dsh-desktop-scroll] { overscroll-behavior: contain; scrollbar-width: thin; }
@@ -597,15 +468,6 @@ var ADVANCED_STYLES = `
 .dshDesktopStatusBar[data-dsh-exit-mode="hover"] { background: rgba(220, 38, 38, 0.16); color: #ef4444; font-weight: 600; }
 .dshDesktopExitBtn { padding: 3px 10px; border-radius: 6px; border: 1px solid rgba(239, 68, 68, 0.55); background: transparent; color: inherit; font-size: 11px; line-height: 1; cursor: default; flex: none; }
 .dshDesktopExitBtn:hover { filter: brightness(1.1); }
-/* \u4FA7\u680F header \u5355\u884C\u5316\uFF08#44\uFF09\uFF1A\u5B98\u65B9 alpha \u524D\u7AEF\u7684 darwin \u5206\u652F\u628A\u6298\u53E0\u6309\u94AE\u72EC\u5360\u4E00\u6761 52px
-   \u9876\u5E26\uFF08topStrip\uFF09\uFF0Clogo \u843D\u5728\u4E0B\u4E00\u884C\uFF1B\u5B98\u65B9 Desktop.app \u4E0E\u65E7\u58F3\u7684\u5B9E\u9645\u89C6\u89C9\u662F logo \u4E0E\u6298\u53E0
-   \u6309\u94AE\u540C\u4E00\u884C\u3001\u7EA2\u7EFF\u706F\u6D6E\u5728\u5176\u4E0A\u65B9\u72EC\u7ACB\u8BA9\u4F4D\u5E26\u3002data-platform \u672C\u8EAB\u4FDD\u7559\uFF08\u6298\u53E0\u5168\u9690/\u5EA7\u4F4D
-   \u6309\u94AE\u4F9D\u8D56\u5B83\uFF09\uFF0C\u8FD9\u91CC\u53EA\u7528 CSS \u8FD8\u539F\u5355\u884C\u51E0\u4F55\uFF1AtopStrip \u6D6E\u5230 logoRow \u884C\u9AD8\uFF0ClogoRow \u9876\u56DE
-   \u7EA2\u7EFF\u706F\u8BA9\u4F4D\u5E26\u4E0B\u65B9\u5E76\u5DE6\u79FB\u8BA9\u5F00\u7EA2\u7EFF\u706F\u3002\u9009\u62E9\u5668\u6309 CSS-modules \u8BCD\u5E72\u5339\u914D\uFF08hash \u524D\u7F00\u968F\u6784\u5EFA
-   \u53D8\u5316\uFF0C\u8BCD\u5E72\u7A33\u5B9A\uFF09\u3002 */
-html[data-platform='darwin'] [class*='_root']:has(> [class*='_topStrip']) { position: relative; }
-html[data-platform='darwin'] [class*='_topStrip'] { position: absolute; top: 32px; left: 0; right: 0; height: 28px; margin: 0; padding: 0 12px 0 0; }
-html[data-platform='darwin'] [class*='_topStrip'] + [class*='_logoRow'] { margin-top: 0; padding-top: 28px; padding-left: 64px; }
 `;
 function installAdvancedStyles() {
   const style = document.createElement("style");
@@ -697,7 +559,7 @@ function DownloadsPanel() {
   };
   const finishedCount = tasks.filter((t) => t.status === "completed" || t.status === "failed" || t.status === "cancelled").length;
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0, fontSize: 12 }, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderBottom: "1px solid var(--dsw-alias-border-l, rgba(255,255,255,.08))" }, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderBottom: "1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.08))" }, children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { style: { color: "var(--dsw-alias-label-secondary, #9aa3af)" }, children: [
         "\u5E76\u53D1 ",
         concurrency
@@ -709,12 +571,12 @@ function DownloadsPanel() {
           type: "button",
           disabled: busy || finishedCount === 0,
           onClick: () => void act("clear_finished_downloads", {}),
-          style: { padding: "2px 10px", borderRadius: 6, border: "1px solid var(--dsw-alias-border-l, rgba(255,255,255,.14))", background: "transparent", color: "inherit", cursor: "pointer" },
+          style: { padding: "2px 10px", borderRadius: 6, border: "1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))", background: "transparent", color: "inherit", cursor: "pointer" },
           children: "\u6E05\u7A7A\u5DF2\u5B8C\u6210"
         }
       )
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { flex: 1, minHeight: 0, overflowY: "auto", padding: "4px 0" }, children: tasks.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { padding: "28px 16px", textAlign: "center", color: "var(--dsw-alias-label-tertiary, #6b7280)" }, children: "\u6682\u65E0\u4E0B\u8F7D\u4EFB\u52A1\u3002\u9875\u9762\u91CC\u7684\u4E0B\u8F7D\uFF08session log\u3001\u6587\u4EF6\u7B49\uFF09\u4F1A\u51FA\u73B0\u5728\u8FD9\u91CC\u3002" }) : tasks.map((t) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { padding: "8px 10px", borderBottom: "1px solid var(--dsw-alias-border-l, rgba(255,255,255,.05))" }, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { flex: 1, minHeight: 0, overflowY: "auto", padding: "4px 0" }, children: tasks.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { padding: "28px 16px", textAlign: "center", color: "var(--dsw-alias-label-tertiary, #6b7280)" }, children: "\u6682\u65E0\u4E0B\u8F7D\u4EFB\u52A1\u3002\u9875\u9762\u91CC\u7684\u4E0B\u8F7D\uFF08session log\u3001\u6587\u4EF6\u7B49\uFF09\u4F1A\u51FA\u73B0\u5728\u8FD9\u91CC\u3002" }) : tasks.map((t) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { padding: "8px 10px", borderBottom: "1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.05))" }, children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--dsw-alias-label-primary, #e7eaf0)" }, title: t.filename, children: t.filename }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { style: { color: "var(--dsw-alias-label-tertiary, #6b7280)", fontSize: 11 }, children: STATUS_LABEL[t.status] })
@@ -760,7 +622,7 @@ function TextButton({ children, onClick }) {
         padding: "1px 8px",
         fontSize: 11,
         borderRadius: 6,
-        border: "1px solid var(--dsw-alias-border-l, rgba(255,255,255,.14))",
+        border: "1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))",
         background: "transparent",
         color: "inherit",
         cursor: "pointer"
@@ -1206,7 +1068,1420 @@ function installDesktopBrowserBridge() {
 }
 
 // src/client/desktop-settings.tsx
+var import_react18 = require("react");
+
+// src/client/devtools-toggle.ts
+function planDevToolsUi(current, next) {
+  if (current === next) return { action: "idle" };
+  return { action: next ? "confirm-on" : "confirm-off" };
+}
+function devToolsConfirmCopy() {
+  return {
+    title: "\u5F00\u542F\u5F00\u53D1\u8005\u5DE5\u5177\uFF1F",
+    lines: [
+      "\u5F00\u542F\u540E\uFF0C\u684C\u9762\u58F3\u4F1A\u5728\u672C\u673A\u56DE\u73AF\u5730\u5740\u76D1\u542C\u4E00\u4E2A\u8FDC\u7A0B\u8C03\u8BD5\u53E3\uFF1BWindows \u4E0B\u6309 F12 \u6216\u53F3\u952E\u83DC\u5355\u300C\u6253\u5F00 DevTools\u300D\u6253\u5F00\uFF08\u4E0E\u7269\u7406\u6309\u952E\u540C\u8DEF\u5F84\uFF09\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u5F39\u7A97\u3002",
+      "\u672C\u673A\u4E0A\u7684\u4EFB\u4F55\u7A0B\u5E8F\u90FD\u80FD\u501F\u8FD9\u4E2A\u53E3\u5728\u9875\u9762\u91CC\u6267\u884C\u4EFB\u610F\u4EE3\u7801\u3001\u8BFB\u53D6\u4F1A\u8BDD\u5185\u5BB9\uFF08\u542B\u767B\u5F55\u51ED\u636E\uFF09\u3002",
+      "\u53EA\u5728\u81EA\u5DF1\u9700\u8981\u6392\u67E5\u95EE\u9898\u65F6\u5F00\u542F\uFF1B\u7528\u5B8C\u5728\u8BBE\u7F6E\u91CC\u5173\u6389\u3002"
+    ],
+    confirm: "\u786E\u8BA4\u5F00\u542F\u5E76\u91CD\u542F",
+    cancel: "\u53D6\u6D88"
+  };
+}
+function devToolsDisableCopy() {
+  return {
+    title: "\u5173\u95ED\u5F00\u53D1\u8005\u5DE5\u5177\uFF1F",
+    lines: [
+      "\u786E\u8BA4\u540E\u684C\u9762\u58F3\u5C06\u91CD\u542F\uFF1A\u8FDC\u7A0B\u8C03\u8BD5\u53E3\u5173\u95ED\u3001\u53F3\u952E DevTools \u5165\u53E3\u6D88\u5931\u3002",
+      "\u91CD\u542F\u671F\u95F4\u5E94\u7528\u4F1A\u77ED\u6682\u9000\u51FA\u518D\u8D77\u6765\uFF0C\u9875\u9762\u77ED\u6682\u4E2D\u65AD\uFF1B\u6258\u76D8\u4F1A\u8DDF\u7740\u6D88\u5931\u51E0\u79D2\u3002"
+    ],
+    confirm: "\u786E\u8BA4\u5173\u95ED\u5E76\u91CD\u542F",
+    cancel: "\u53D6\u6D88"
+  };
+}
+function devToolsSavedNote(on, outcome) {
+  if (outcome !== void 0 && outcome !== null && !outcome.ok) {
+    return `\u8BBE\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u684C\u9762\u58F3\u6CA1\u80FD\u81EA\u52A8\u91CD\u542F\uFF1A${outcome.message ?? outcome.reason ?? "\u672A\u77E5\u539F\u56E0"}\u8BBE\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u8C03\u8BD5\u53E3\u8981\u7B49\u624B\u52A8\u91CD\u542F\u684C\u9762\u58F3\u540E\u624D\u751F\u6548\u3002`;
+  }
+  return on ? "\u5DF2\u5F00\u542F\uFF1A\u6B63\u5728\u91CD\u542F\u684C\u9762\u58F3\uFF0C\u91CD\u542F\u540E\u8C03\u8BD5\u53E3\u4E0E\u53F3\u952E DevTools \u5165\u53E3\u751F\u6548\u3002" : "\u5DF2\u5173\u95ED\uFF1A\u6B63\u5728\u91CD\u542F\u684C\u9762\u58F3\uFF0C\u91CD\u542F\u540E\u8C03\u8BD5\u53E3\u5173\u95ED\u3001\u83DC\u5355\u6D88\u5931\u3002";
+}
+
+// src/client/desktop-settings/styles.ts
+var PANEL_CSS = `
+[data-desktop-settings] .pf-btn { background:var(--dsw-alias-brand-primary-new-color,#4176e6); border:none; color:#fff; border-radius:8px; padding:6px 13px; font-size:12px; cursor:pointer; transition:filter .12s, transform .06s; }
+[data-desktop-settings] .pf-btn:hover { filter:brightness(1.12); }
+[data-desktop-settings] .pf-btn:active { transform:translateY(1px); }
+[data-desktop-settings] .pf-btn.ghost { background:transparent; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); color:var(--dsw-alias-label-primary,#e7eaf0); }
+[data-desktop-settings] .pf-btn.ghost:hover { background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); filter:none; }
+[data-desktop-settings] .pf-btn.ghost:active { background:var(--dsw-alias-interactive-bg-active,rgba(255,255,255,.12)); transform:translateY(1px); filter:none; }
+[data-desktop-settings] .pf-btn.danger { background:transparent; border:1px solid var(--dsw-alias-state-danger-primary,#e5534b); color:var(--dsw-alias-state-danger-primary,#e5534b); }
+[data-desktop-settings] .pf-btn.danger:hover { background:rgba(229,83,75,.12); filter:none; }
+[data-desktop-settings] .pf-btn:disabled { opacity:.5; cursor:not-allowed; }
+[data-desktop-settings] input, [data-desktop-settings] select { padding:6px 8px; border-radius:8px; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); background:var(--dsw-alias-bg-base,#151517); color:inherit; font-size:12px; }
+[data-desktop-settings] .pf-label { font-size:11px; color:var(--dsw-alias-label-secondary,#9aa4b2); margin-bottom:4px; }
+[data-desktop-settings] .pf-input { width:100%; box-sizing:border-box; }
+[data-desktop-settings] .pf-title { font-weight:600; font-size:13px; margin-bottom:10px; }
+[data-desktop-settings] .pf-row { display:flex; gap:8px; align-items:center; }
+[data-desktop-settings] .pf-note { font-size:11px; color:var(--dsw-alias-label-secondary,#9aa4b2); margin-top:8px; word-break:break-all; }
+`;
+var stylesInstalled = false;
+function ensureStyles() {
+  if (stylesInstalled) return;
+  stylesInstalled = true;
+  const style = document.createElement("style");
+  style.dataset.desktopSettings = "styles";
+  style.textContent = PANEL_CSS;
+  document.head.appendChild(style);
+}
+var ROOT_STYLE = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 14,
+  maxWidth: 680,
+  fontSize: 13
+};
+var SECTION_STYLE = {
+  border: "1px solid var(--dsw-alias-border-l2,#ffffff1f)",
+  borderRadius: 12,
+  padding: "14px 16px"
+};
+var TITLE_STYLE = {
+  fontWeight: 600,
+  fontSize: 13,
+  marginBottom: 10
+};
+var LABEL_STYLE = {
+  fontSize: 11,
+  color: "var(--dsw-alias-label-secondary,#9aa4b2)",
+  marginBottom: 4
+};
+var NOTE_STYLE = {
+  fontSize: 11,
+  color: "var(--dsw-alias-label-secondary,#9aa4b2)",
+  marginTop: 8,
+  wordBreak: "break-all"
+};
+var INPUT_BASE_STYLE = {
+  padding: "6px 8px",
+  borderRadius: 8,
+  border: "1px solid var(--dsw-alias-border-l2,#ffffff1f)",
+  background: "var(--dsw-alias-bg-base,#151517)",
+  color: "inherit",
+  fontSize: 12
+};
+var INPUT_FULL_STYLE = { ...INPUT_BASE_STYLE, width: "100%", boxSizing: "border-box" };
+var ROW_STYLE = { display: "flex", gap: 8, alignItems: "center" };
+var RADIO_ROW_STYLE = { display: "flex", alignItems: "flex-start", gap: 8, padding: "5px 0", cursor: "pointer" };
+var RADIO_TEXT_STYLE = { fontSize: 12.5, lineHeight: 1.5, color: "var(--dsw-alias-label-primary,#e7eaf0)" };
+var FLEX_1_STYLE = { flex: 1 };
+var DEV_TOOLS_OVERLAY_STYLE = {
+  position: "fixed",
+  inset: 0,
+  zIndex: 2147483e3,
+  background: "rgba(0,0,0,0.45)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center"
+};
+var DEV_TOOLS_MODAL_STYLE = {
+  background: "var(--dsw-alias-bg-layer-1,#1e1e1e)",
+  border: "1px solid var(--dsw-alias-border-l2,#444)",
+  borderRadius: 12,
+  padding: "18px 20px",
+  minWidth: 320,
+  maxWidth: "80vw",
+  boxShadow: "0 12px 40px rgba(0,0,0,.4)",
+  color: "var(--dsw-alias-label-primary,#eee)"
+};
+var DEV_TOOLS_TITLE_STYLE = { fontSize: 14, fontWeight: 600, marginBottom: 10 };
+var DEV_TOOLS_BODY_STYLE = { fontSize: 12.5, lineHeight: 1.6, color: "var(--dsw-alias-label-secondary,#bbb)" };
+var DEV_TOOLS_ACTIONS_STYLE = { display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 };
+var DEV_TOOLS_CONFIRM = devToolsConfirmCopy();
+var DEV_TOOLS_DISABLE = devToolsDisableCopy();
+var BTN_PRIMARY_STYLE = {
+  background: "var(--dsw-alias-brand-primary-new-color,#4176e6)",
+  border: "none",
+  color: "#fff",
+  borderRadius: 8,
+  padding: "6px 13px",
+  fontSize: 12,
+  cursor: "pointer"
+};
+var BTN_GHOST_STYLE = {
+  ...BTN_PRIMARY_STYLE,
+  background: "transparent",
+  border: "1px solid var(--dsw-alias-border-l2,#ffffff1f)",
+  color: "var(--dsw-alias-label-primary,#e7eaf0)"
+};
+var BTN_DANGER_STYLE = {
+  ...BTN_PRIMARY_STYLE,
+  background: "transparent",
+  border: "1px solid var(--dsw-alias-state-danger-primary,#e5534b)",
+  color: "var(--dsw-alias-state-danger-primary,#e5534b)"
+};
+var DANGER_NOTE_STYLE = {
+  ...NOTE_STYLE,
+  color: "var(--dsw-alias-state-danger-primary,#e5534b)"
+};
+var WARN_NOTE_STYLE = {
+  ...NOTE_STYLE,
+  color: "var(--dsw-alias-state-warn,#e8a33d)"
+};
+
+// src/client/desktop-settings/rpc.ts
+function invoke2(cmd, args, options) {
+  return shellRpc.invoke(cmd, args, options);
+}
+var nsRpc = null;
+function captureNsRpc(ctx) {
+  try {
+    nsRpc = ctx.connection ?? null;
+  } catch {
+    nsRpc = null;
+  }
+}
+function hasNsRpc() {
+  return nsRpc !== null;
+}
+async function nsSave(patch) {
+  await invoke2("save_desktop_settings", { patch });
+}
+async function nsGet() {
+  const d = await invoke2("get_desktop_settings_data");
+  return d.settings && typeof d.settings === "object" ? d.settings : {};
+}
+
+// src/client/desktop-settings/chrome.tsx
+var import_jsx_runtime2 = require("react/jsx-runtime");
+function SectionBox({ title, children }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { style: SECTION_STYLE, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { style: TITLE_STYLE, children: title }),
+    children
+  ] });
+}
+function PfBtn({
+  variant = "primary",
+  disabled = false,
+  onClick,
+  children,
+  style,
+  title
+}) {
+  const baseStyle = variant === "primary" ? BTN_PRIMARY_STYLE : variant === "ghost" ? BTN_GHOST_STYLE : BTN_DANGER_STYLE;
+  const cls = variant === "primary" ? "pf-btn" : `pf-btn ${variant}`;
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+    "button",
+    {
+      type: "button",
+      className: cls,
+      disabled,
+      title,
+      onClick,
+      style: { ...baseStyle, ...style ?? {} },
+      children
+    }
+  );
+}
+function PortCell({
+  testId,
+  placeholder,
+  value,
+  onChange,
+  onEnter,
+  onSave
+}) {
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+      "input",
+      {
+        placeholder,
+        style: { ...INPUT_BASE_STYLE, width: 84 },
+        "data-desktop-settings": testId,
+        value,
+        onChange: (e) => onChange(e.target.value),
+        onKeyDown: (e) => {
+          if (e.key === "Enter") onEnter();
+        }
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(PfBtn, { variant: "ghost", style: { marginLeft: 6 }, onClick: onSave, children: "\u4FDD\u5B58" })
+  ] });
+}
+function showToast(text, ok, tone = ok ? "ok" : "error") {
+  const palette = tone === "info" ? "background:rgba(96,165,250,.15);border:1px solid rgba(96,165,250,.6);color:#93c5fd" : tone === "ok" ? "background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.6);color:#4ade80" : "background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.6);color:#f87171";
+  const el = document.createElement("div");
+  el.style.cssText = `position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:999999;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:500;max-width:480px;box-shadow:0 4px 12px rgba(0,0,0,.4);cursor:pointer;backdrop-filter:blur(8px);${palette}`;
+  el.textContent = text;
+  el.addEventListener("click", () => el.remove());
+  document.body.appendChild(el);
+  if (ok) window.setTimeout(() => el.remove(), 5e3);
+}
+
+// src/client/desktop-settings/use-initial-data.ts
+var import_react2 = require("react");
+
+// src/client/desktop-settings/loopback-aggregation.ts
+var LOOPBACK_AGGREGATION_OPTIONS = [
+  { value: "full", label: "\u5168\u5F00", detail: "\u5408\u5E76\u5E76\u53D1 GET\uFF0C\u5E76\u6574\u6761\u7F13\u51B2 \u2264256KB \u7684\u54CD\u5E94" },
+  // 默认档＝壳侧 DEFAULT_LOOPBACK_AGGREGATION。面板不跨包 import 壳代码，两边各写一份字面量，
+  // 所以改默认值必须两边同时改（test-client.mjs 会核对这里与 use-initial-data.ts 的初始值都等于 stream）。
+  { value: "stream", label: "\u53EA\u5173\u7F13\u51B2\uFF08\u9ED8\u8BA4\uFF09", detail: "\u4ECD\u5408\u5E76\uFF0C\u4F46\u54CD\u5E94\u8FB9\u5230\u8FB9\u4E0B\u53D1" },
+  { value: "none", label: "\u5168\u5173", detail: "\u4E0D\u5408\u5E76\uFF0C\u6BCF\u4E2A\u8BF7\u6C42\u5404\u81EA\u6253\u5BBF\u4E3B" }
+];
+function loopbackAggregationMode(raw) {
+  const hit = LOOPBACK_AGGREGATION_OPTIONS.find((o) => o.value === raw);
+  return hit === void 0 ? "stream" : hit.value;
+}
+
+// src/client/desktop-settings/use-initial-data.ts
+var INITIAL = {
+  proxy: { proxy_mode: "off", proxy_url: "", no_proxy: "", proxy_user: "", proxy_pass: "" },
+  proxyEffective: void 0,
+  desktop: { remote_addr: null, remote_list: [], port: 3080, profiles: [] },
+  // 壳首回话前的占位值；真实档位随后从 get_desktop_settings_data 回来。回退档＝壳侧 DEFAULT_LOOPBACK_AGGREGATION（stream）。
+  loopbackAggregation: "stream",
+  forwarderInput: "",
+  profilePortInputs: {},
+  profileLaneInputs: {},
+  profilePageInputs: {},
+  migrationSource: "",
+  migrationDest: ""
+};
+function useInitialData(onLoadError) {
+  const [data, setData] = (0, import_react2.useState)(INITIAL);
+  const [loaded, setLoaded] = (0, import_react2.useState)(null);
+  (0, import_react2.useEffect)(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [ns, p, d] = await Promise.all([
+          nsGet(),
+          invoke2("get_proxy_settings"),
+          invoke2("get_desktop_settings_data")
+        ]);
+        if (cancelled) return;
+        const next = {
+          proxy: {
+            proxy_mode: ns.proxy_mode || p.proxy_mode || "off",
+            proxy_url: ns.proxy_url || p.proxy_url || "",
+            no_proxy: ns.no_proxy || p.no_proxy || "",
+            proxy_user: ns.proxy_user || p.proxy_user || "",
+            proxy_pass: ns.proxy_pass || p.proxy_pass || ""
+          },
+          proxyEffective: p.effective,
+          // #128：聚合档位从壳回吐的设置快照读（老设置文件没这个键 = undefined ⇒ 下面回默认 full）
+          loopbackAggregation: loopbackAggregationMode(ns.loopback_aggregation),
+          // 以 **壳返回的完整对象为基底**，只覆盖三个以 ns 优先的展示字段——
+          // 之前是手写对象，漏字段就静默丢值（#147 实测：勾选保存成功但重开永远不勾）。
+          desktop: {
+            ...d,
+            remote_addr: ns.remote_addr ?? d.remote_addr ?? null,
+            remote_list: ns.remote_list ?? d.remote_list ?? [],
+            port: ns.port || d.port || 3080,
+            mux_heartbeat_ms: d.mux_heartbeat_ms ?? null,
+            desktop_layout_on_phones: d.desktop_layout_on_phones ?? null,
+            prevent_sleep: d.prevent_sleep ?? null,
+            keep_awake: d.keep_awake ?? null
+          },
+          forwarderInput: typeof ns.lane_forwarder_port === "number" && ns.lane_forwarder_port > 0 ? String(ns.lane_forwarder_port) : "",
+          ...savedPortInputs(ns),
+          ...migrationSelectDefaults(d)
+        };
+        setData(next);
+        setLoaded(next);
+      } catch (err) {
+        if (cancelled) return;
+        onLoadError(`\u8BFB\u53D6\u8BBE\u7F6E\u5931\u8D25\uFF1A${String(err)}`);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [onLoadError]);
+  const refreshData = (0, import_react2.useCallback)(async () => {
+    try {
+      const d = await invoke2("get_desktop_settings_data");
+      setData((prev) => ({ ...prev, desktop: d }));
+    } catch {
+    }
+  }, []);
+  return { data, loaded, refreshData };
+}
+function savedPortInputs(ns) {
+  const saved = (key) => {
+    const raw = ns[key];
+    const out = {};
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      for (const [k, n] of Object.entries(raw)) {
+        if (typeof n === "number" && n > 0) out[k] = String(n);
+      }
+    }
+    return out;
+  };
+  return {
+    profilePortInputs: saved("profile_ports"),
+    profileLaneInputs: saved("profile_lane_ports"),
+    profilePageInputs: saved("profile_page_ports")
+  };
+}
+function migrationSelectDefaults(d) {
+  if (d.profiles.length === 0) return { migrationSource: "", migrationDest: "" };
+  const first = d.profiles[0];
+  if (!first) return { migrationSource: "", migrationDest: "" };
+  const other = d.profiles.find((pp) => pp.name !== first.name);
+  return { migrationSource: first.name, migrationDest: other ? other.name : "" };
+}
+
+// src/client/desktop-settings/cards/dependencies-card.tsx
 var import_react3 = __toESM(require("react"), 1);
+var import_jsx_runtime3 = require("react/jsx-runtime");
+function DependenciesCard() {
+  const [depProfiles, setDepProfiles] = (0, import_react3.useState)(null);
+  const [depRebuilding, setDepRebuilding] = (0, import_react3.useState)(null);
+  const [depNote, setDepNote] = (0, import_react3.useState)("");
+  const [depError, setDepError] = (0, import_react3.useState)(null);
+  const refreshDepStatus = (0, import_react3.useCallback)(async () => {
+    try {
+      const r = await invoke2("list_profile_dependency_status");
+      setDepProfiles(r?.profiles ?? []);
+    } catch (err) {
+      console.error("[desktop-settings] list_profile_dependency_status \u5931\u8D25\uFF1A", err);
+      setDepError(String(err));
+      setDepProfiles(null);
+    }
+  }, []);
+  import_react3.default.useEffect(() => {
+    void refreshDepStatus();
+  }, [refreshDepStatus]);
+  const handleRebuildDeps = (profile) => {
+    if (depRebuilding) return;
+    setDepRebuilding(profile);
+    setDepNote(`${profile}\uFF1A\u4F9D\u8D56\u91CD\u5EFA\u4E2D\uFF08\u7528\u5185\u7F6E pnpm \u91CD\u88C5\uFF0C\u53EF\u80FD\u9700\u8981\u51E0\u5206\u949F\uFF09\u2026`);
+    void invoke2("rebuild_profile_dependencies", { profile }).then(() => {
+      setDepNote(`${profile}\uFF1A\u4F9D\u8D56\u5DF2\u91CD\u5EFA\uFF0C\u91CD\u542F\u8BE5 profile \u540E\u751F\u6548\u3002`);
+      return refreshDepStatus();
+    }).catch((err) => setDepNote(`${profile}\uFF1A\u91CD\u5EFA\u5931\u8D25 \u2014\u2014 ${String(err)}`)).finally(() => setDepRebuilding(null));
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u4F9D\u8D56\u72B6\u6001\uFF08pnpm store \u4E00\u81F4\u6027\uFF09", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: LABEL_STYLE, children: "dsh \u7684\u63D2\u4EF6\u5B89\u88C5/\u5378\u8F7D\u7531\u5185\u7F6E pnpm \u6267\u884C\uFF1Bprofile \u7684 node_modules \u82E5\u7531\u5176\u5B83 pnpm \u7248\u672C\u88C5\u8FC7\uFF0C store \u5927\u7248\u672C\u4E0D\u4E00\u81F4\u4F1A\u62A5 ERR_PNPM_UNEXPECTED_STORE\u3002\u6B64\u5904\u53EF\u67E5\u770B\u5E76\u91CD\u5EFA\u3002" }),
+    depProfiles === null ? /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: NOTE_STYLE, children: [
+      "\u8BFB\u53D6\u5931\u8D25\uFF1A",
+      depError ?? "\u672A\u77E5\u539F\u56E0"
+    ] }) : depProfiles.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u672A\u53D1\u73B0 profile" }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("table", { style: { width: "100%", fontSize: 12, borderCollapse: "collapse" }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("tr", { style: { textAlign: "left", opacity: 0.75 }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("th", { style: { padding: "4px 6px" }, children: "Profile" }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("th", { style: { padding: "4px 6px" }, children: "\u4F9D\u8D56\u7531 pnpm" }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("th", { style: { padding: "4px 6px" }, children: "\u5185\u7F6E pnpm" }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("th", { style: { padding: "4px 6px" }, children: "\u72B6\u6001" }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("th", { style: { padding: "4px 6px" } })
+      ] }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("tbody", { children: depProfiles.map((p) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("tr", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { style: { padding: "4px 6px" }, children: p.profile }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { style: { padding: "4px 6px", opacity: 0.85 }, children: p.recordedPnpm ?? "\u672A\u77E5" }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { style: { padding: "4px 6px", opacity: 0.85 }, children: p.builtinPnpm ?? "\u672A\u77E5" }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { style: { padding: "4px 6px" }, children: !p.needsRebuild ? "\u4E00\u81F4" : p.running ? "\u9700\u91CD\u5EFA\uFF08\u8FD0\u884C\u4E2D\uFF09" : "\u9700\u91CD\u5EFA" }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { style: { padding: "4px 6px" }, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+          PfBtn,
+          {
+            variant: "ghost",
+            disabled: !p.needsRebuild || p.running || depRebuilding !== null,
+            title: p.running ? "\u8BE5 profile \u6B63\u5728\u8FD0\u884C\uFF1A\u5148\u505C\u6B62\u518D\u91CD\u5EFA" : p.needsRebuild ? "\u7528\u5185\u7F6E pnpm \u91CD\u5EFA\u4F9D\u8D56\uFF08\u8FC1\u79FB store \u5927\u7248\u672C\uFF09" : "\u65E0\u9700\u91CD\u5EFA",
+            onClick: () => handleRebuildDeps(p.profile),
+            children: depRebuilding === p.profile ? "\u91CD\u5EFA\u4E2D\u2026" : "\u91CD\u5EFA"
+          }
+        ) })
+      ] }, p.profile)) })
+    ] }),
+    depNote ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: depNote }) : null
+  ] });
+}
+
+// src/client/desktop-settings/cards/devtools-card.tsx
+var import_react4 = require("react");
+var import_jsx_runtime4 = require("react/jsx-runtime");
+function DevToolsCard({ desktop }) {
+  const [devToolsConfirmKind, setDevToolsConfirmKind] = (0, import_react4.useState)(null);
+  const [devTools, setDevTools] = (0, import_react4.useState)(false);
+  const [devToolsNote, setDevToolsNote] = (0, import_react4.useState)(null);
+  (0, import_react4.useEffect)(() => {
+    setDevTools(desktop.dev_tools === true);
+  }, [desktop]);
+  const handleToggleDevTools = (next) => {
+    const plan = planDevToolsUi(devTools, next);
+    if (plan.action === "idle") return;
+    setDevToolsConfirmKind(plan.action === "confirm-on" ? "on" : "off");
+  };
+  const saveDevToolsSetting = (on) => {
+    setDevToolsConfirmKind(null);
+    setDevTools(on);
+    void nsSave({ dev_tools: on }).then(() => invoke2("restart_desktop_app")).then((outcome) => setDevToolsNote(devToolsSavedNote(on, outcome))).catch((e) => {
+      if (/failed to fetch|network ?error|load failed|fetch failed|terminated/i.test(String(e))) {
+        setDevToolsNote(devToolsSavedNote(on));
+        return;
+      }
+      setDevToolsNote(`\u8BBE\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u91CD\u542F\u684C\u9762\u5E94\u7528\u5931\u8D25\uFF1A${String(e)}`);
+    });
+  };
+  (0, import_react4.useEffect)(() => {
+    if (devToolsConfirmKind === null) return;
+    const onKey = (e) => {
+      if (e.key === "Escape") setDevToolsConfirmKind(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [devToolsConfirmKind]);
+  const devToolsActiveConfirm = devToolsConfirmKind === "off" ? DEV_TOOLS_DISABLE : DEV_TOOLS_CONFIRM;
+  return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)(SectionBox, { title: "\u5F00\u53D1\u8005\u5DE5\u5177", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { style: ROW_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
+        "input",
+        {
+          type: "checkbox",
+          "data-desktop-settings": "dev-tools",
+          checked: devTools,
+          onChange: (e) => handleToggleDevTools(e.target.checked)
+        }
+      ),
+      "\u5141\u8BB8\u6253\u5F00 DevTools\uFF08\u6253\u5305\u6001\u9ED8\u8BA4\u5173\uFF1B\u6539\u52A8\u91CD\u542F\u684C\u9762\u58F3\u751F\u6548\uFF09"
+    ] }) }),
+    devToolsNote && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { style: NOTE_STYLE, children: devToolsNote }),
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { style: NOTE_STYLE, children: "\u5F00\u542F\u540E\u684C\u9762\u58F3\u5728\u672C\u673A\u56DE\u73AF\u5730\u5740\u76D1\u542C\u4E00\u4E2A\u8FDC\u7A0B\u8C03\u8BD5\u53E3\uFF0C\u672C\u673A\u4EFB\u610F\u7A0B\u5E8F\u53EF\u501F\u5B83\u5728\u9875\u9762\u91CC\u6267\u884C\u4EE3\u7801\u3002\u53EA\u5728\u81EA\u5DF1\u6392\u67E5\u95EE\u9898\u65F6\u5F00\u542F\uFF0C\u7528\u5B8C\u8BB0\u5F97\u5173\u6389\u5E76\u91CD\u542F\u3002 Windows \u4E0B\u6309 F12 \u6216\u53F3\u952E\u83DC\u5355\u300C\u6253\u5F00 DevTools\u300D\u6253\u5F00\uFF08\u4E0D\u81EA\u52A8\u5F39\u7A97\uFF09\uFF1Bmac/Linux \u4E3A\u300C\u6253\u5F00 DevTools\u300D\u3002" }),
+    devToolsConfirmKind !== null && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { style: DEV_TOOLS_OVERLAY_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { style: DEV_TOOLS_MODAL_STYLE, "data-desktop-settings": "dev-tools-confirm", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { style: DEV_TOOLS_TITLE_STYLE, children: devToolsActiveConfirm.title }),
+      devToolsActiveConfirm.lines.map((line) => /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { style: DEV_TOOLS_BODY_STYLE, children: line }, line)),
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { style: DEV_TOOLS_ACTIONS_STYLE, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(PfBtn, { variant: "ghost", onClick: () => setDevToolsConfirmKind(null), children: devToolsActiveConfirm.cancel }),
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(PfBtn, { variant: "primary", onClick: () => saveDevToolsSetting(devToolsConfirmKind === "on"), children: devToolsActiveConfirm.confirm })
+      ] })
+    ] }) })
+  ] });
+}
+
+// src/client/desktop-settings/cards/diagnostics-card.tsx
+var import_react5 = require("react");
+var import_jsx_runtime5 = require("react/jsx-runtime");
+function DiagnosticsCard() {
+  const [diagSummary, setDiagSummary] = (0, import_react5.useState)(null);
+  const [diagLogPath, setDiagLogPath] = (0, import_react5.useState)(null);
+  const [diagExport, setDiagExport] = (0, import_react5.useState)(null);
+  (0, import_react5.useEffect)(() => {
+    let cancelled = false;
+    void invoke2("get_diagnostics").then((r) => {
+      if (cancelled) return;
+      const summary = r.diagnostics?.summary;
+      if (typeof summary === "string" && summary !== "") setDiagSummary(summary);
+      const path = r.diagnostics?.logs?.shell?.path;
+      if (typeof path === "string" && path !== "") setDiagLogPath(path);
+    }).catch(() => {
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(SectionBox, { title: "\u65E5\u5FD7\u4E0E\u8BCA\u65AD", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { style: NOTE_STYLE, children: diagSummary === null ? "\u8BFB\u53D6\u4E2D\u2026" : diagSummary }),
+    diagLogPath !== null && /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { style: NOTE_STYLE, children: [
+      "\u58F3\u65E5\u5FD7\uFF1A",
+      diagLogPath
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { style: { display: "flex", gap: 8, marginTop: 8 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+        PfBtn,
+        {
+          variant: "ghost",
+          onClick: () => {
+            void invoke2("export_diagnostics").then((r) => {
+              setDiagExport(r.path);
+              showToast(`\u8BCA\u65AD\u5DF2\u5BFC\u51FA\uFF1A${r.path}`, true);
+            }).catch((e) => showToast(`\u5BFC\u51FA\u5931\u8D25\uFF1A${String(e)}`, false));
+          },
+          children: "\u5BFC\u51FA\u8BCA\u65AD"
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+        PfBtn,
+        {
+          variant: "ghost",
+          onClick: () => {
+            void invoke2("get_diagnostics").then((r) => {
+              const path = r.diagnostics?.logs?.shell?.path;
+              if (typeof path === "string" && path !== "") showToast(`\u58F3\u65E5\u5FD7\uFF1A${path}`, true);
+              else showToast("\u8BCA\u65AD\u91CC\u6CA1\u6709\u65E5\u5FD7\u8DEF\u5F84", false);
+            }).catch((e) => showToast(`\u8BFB\u53D6\u5931\u8D25\uFF1A${String(e)}`, false));
+          },
+          children: "\u663E\u793A\u65E5\u5FD7\u8DEF\u5F84"
+        }
+      )
+    ] }),
+    diagExport !== null && /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { style: NOTE_STYLE, children: [
+      "\u4E0A\u6B21\u5BFC\u51FA\uFF1A",
+      diagExport
+    ] })
+  ] });
+}
+
+// src/client/desktop-settings/cards/download-card.tsx
+var import_react6 = require("react");
+var import_jsx_runtime6 = require("react/jsx-runtime");
+function DownloadCard({
+  note,
+  onNote
+}) {
+  const [concurrencyInput, setConcurrencyInput] = (0, import_react6.useState)("3");
+  const concurrencyTouchedRef = (0, import_react6.useRef)(false);
+  (0, import_react6.useEffect)(() => {
+    invoke2("get_download_settings").then((s) => {
+      if (!concurrencyTouchedRef.current) setConcurrencyInput(String(s.concurrency));
+    }).catch(() => {
+    });
+  }, []);
+  const handleSaveConcurrency = () => {
+    const v = Math.max(1, Math.min(32, parseInt(concurrencyInput, 10) || 3));
+    void nsSave({ download_concurrency: v }).then(() => invoke2("set_download_concurrency", { value: v })).then(() => onNote(`\u5DF2\u4FDD\u5B58\uFF1A\u5E76\u53D1\u4E0A\u9650 ${v}`)).catch(() => onNote("\u4FDD\u5B58\u5931\u8D25\uFF08\u65E0 Tauri IPC\uFF1F\uFF09"));
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)(SectionBox, { title: "\u4E0B\u8F7D", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { style: ROW_STYLE, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+        "input",
+        {
+          placeholder: "1-32",
+          "data-desktop-settings": "download-concurrency",
+          style: { ...INPUT_BASE_STYLE, width: 80 },
+          value: concurrencyInput,
+          onChange: (e) => {
+            concurrencyTouchedRef.current = true;
+            setConcurrencyInput(e.target.value);
+          }
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveConcurrency, children: "\u4FDD\u5B58" })
+    ] }),
+    note && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: NOTE_STYLE, children: note }),
+    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: NOTE_STYLE, children: "\u540C\u65F6\u8FDB\u884C\u7684\u4E0B\u8F7D\u6570\u4E0A\u9650\uFF0C\u8D85\u51FA\u6392\u961F\uFF1B\u6539\u52A8\u7ACB\u5373\u751F\u6548\u3002" })
+  ] });
+}
+
+// src/client/desktop-settings/cards/loopback-aggregation-card.tsx
+var import_react7 = require("react");
+var import_jsx_runtime7 = require("react/jsx-runtime");
+function LoopbackAggregationCard({ value }) {
+  const [loopbackAggregation, setLoopbackAggregation] = (0, import_react7.useState)(value);
+  const [loopbackAggregationNote, setLoopbackAggregationNote] = (0, import_react7.useState)(null);
+  (0, import_react7.useEffect)(() => {
+    setLoopbackAggregation(value);
+  }, [value]);
+  const handleSaveLoopbackAggregation = (next) => {
+    const prev = loopbackAggregation;
+    if (next === prev) return;
+    setLoopbackAggregation(next);
+    void nsSave({ loopback_aggregation: next }).then(
+      () => setLoopbackAggregationNote(
+        `\u5DF2\u4FDD\u5B58\uFF1A${LOOPBACK_AGGREGATION_OPTIONS.find((o) => o.value === next)?.label ?? next}\uFF08\u7ACB\u5373\u751F\u6548\uFF0C\u65E0\u9700\u91CD\u542F\uFF09`
+      )
+    ).catch((e) => {
+      setLoopbackAggregation(prev);
+      setLoopbackAggregationNote(`\u4FDD\u5B58\u5931\u8D25\uFF0C\u5DF2\u56DE\u5230\u539F\u6863\u4F4D\uFF1A${String(e)}`);
+    });
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(SectionBox, { title: "loopback \u6570\u636E\u9762\u805A\u5408", children: [
+    LOOPBACK_AGGREGATION_OPTIONS.map((opt) => /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("label", { style: RADIO_ROW_STYLE, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+        "input",
+        {
+          type: "radio",
+          name: "loopback-aggregation",
+          "data-desktop-settings": `loopback-aggregation-${opt.value}`,
+          checked: loopbackAggregation === opt.value,
+          onChange: () => handleSaveLoopbackAggregation(opt.value)
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { style: RADIO_TEXT_STYLE, children: [
+        opt.label,
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { style: { color: "var(--dsw-alias-label-secondary,#9aa4b2)", marginLeft: 8 }, children: opt.detail })
+      ] })
+    ] }, opt.value)),
+    loopbackAggregationNote && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { style: NOTE_STYLE, children: loopbackAggregationNote }),
+    /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { style: NOTE_STYLE, children: "\u684C\u9762\u58F3\u56DE\u73AF\u6570\u636E\u9762\uFF08\u684C\u9762\u9875\u9762\u548C\u624B\u673A\u8FDC\u7A0B\u8BBF\u95EE\u90FD\u8D70\u5B83\uFF09\u5BF9 GET \u8BF7\u6C42\u7684\u5408\u5E76\u4E0E\u7F13\u51B2\u7B56\u7565\u3002\u300C\u53EA\u5173\u7F13\u51B2\u300D\u4FDD\u7559\u5408\u5E76\uFF0C \u53EA\u8BA9\u54CD\u5E94\u8FB9\u5230\u8FB9\u4E0B\u53D1\uFF1B\u300C\u5168\u5173\u300D\u8FDE\u5408\u5E76\u4E5F\u505C\u6389\uFF0C\u6BCF\u4E2A\u8BF7\u6C42\u5404\u81EA\u6253\u4E0A\u6E38\uFF0C\u4E0D\u4F1A\u5173\u6389\u522B\u7684\u529F\u80FD\u3002\u6539\u52A8\u7ACB\u5373\u751F\u6548\uFF0C \u4E0D\u9700\u8981\u91CD\u542F\u3002" })
+  ] });
+}
+
+// src/client/desktop-settings/cards/migration-card.tsx
+var import_react9 = require("react");
+
+// src/client/theme-select.tsx
+var import_react8 = require("react");
+var import_jsx_runtime8 = require("react/jsx-runtime");
+var TRIGGER_STYLE = {
+  minWidth: 0,
+  width: "100%",
+  height: 28,
+  color: "var(--dsw-alias-label-secondary)",
+  cursor: "pointer",
+  background: "transparent",
+  border: "none",
+  borderRadius: 24,
+  outline: "none",
+  alignItems: "center",
+  gap: 4,
+  padding: "0 4px 0 8px",
+  fontSize: 13,
+  fontWeight: 500,
+  lineHeight: "20px",
+  display: "flex"
+};
+var MENU_STYLE = {
+  zIndex: 1100,
+  background: "var(--dsw-specific-menu)",
+  boxShadow: "var(--dsw-elevation-prominent)",
+  color: "var(--dsw-alias-label-primary)",
+  minWidth: "min(240px, 100%)",
+  maxHeight: "min(360px, 60vh)",
+  borderRadius: 20,
+  padding: 4,
+  position: "absolute",
+  top: "calc(100% + 4px)",
+  left: 0,
+  right: 0,
+  overflowY: "auto",
+  overflowX: "hidden"
+};
+var OPTION_BASE = {
+  boxSizing: "border-box",
+  width: "100%",
+  minHeight: 38,
+  color: "inherit",
+  textAlign: "left",
+  cursor: "pointer",
+  background: "transparent",
+  border: "none",
+  borderRadius: 10,
+  outline: "none",
+  alignItems: "center",
+  gap: 8,
+  padding: "6px 8px",
+  display: "flex",
+  fontSize: 13
+};
+function ThemeSelect({ value, options, onChange, placeholder, style, disabled }) {
+  const [open, setOpen] = (0, import_react8.useState)(false);
+  const rootRef = (0, import_react8.useRef)(null);
+  const listRef = (0, import_react8.useRef)(null);
+  (0, import_react8.useEffect)(() => {
+    if (!open) return;
+    const onDown = (ev) => {
+      if (rootRef.current && !rootRef.current.contains(ev.target)) setOpen(false);
+    };
+    const onKey = (ev) => {
+      if (ev.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  (0, import_react8.useEffect)(() => {
+    if (!open || !listRef.current) return;
+    const sel = listRef.current.querySelector('[data-selected="1"]');
+    sel?.scrollIntoView({ block: "nearest" });
+  }, [open]);
+  const pick = (0, import_react8.useCallback)(
+    (v) => {
+      setOpen(false);
+      if (v !== value) onChange(v);
+    },
+    [onChange, value]
+  );
+  const onMenuKey = (0, import_react8.useCallback)(
+    (ev) => {
+      const idx = options.findIndex((o) => o.value === value);
+      if (ev.key === "ArrowDown") {
+        ev.preventDefault();
+        const next = options[Math.min(idx + 1, options.length - 1)];
+        if (next) onChange(next.value);
+      } else if (ev.key === "ArrowUp") {
+        ev.preventDefault();
+        const next = options[Math.max(idx - 1, 0)];
+        if (next) onChange(next.value);
+      } else if (ev.key === "Enter") {
+        ev.preventDefault();
+        if (value) onChange(value);
+      }
+    },
+    [options, onChange, value]
+  );
+  const current = options.find((o) => o.value === value);
+  return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { ref: rootRef, style: { minWidth: 0, position: "relative", ...style ?? {} }, onKeyDown: onMenuKey, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(
+      "button",
+      {
+        type: "button",
+        "data-theme-select-trigger": "1",
+        disabled,
+        onClick: () => setOpen((v) => !v),
+        style: { ...TRIGGER_STYLE, opacity: disabled ? 0.5 : 1 },
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
+            "span",
+            {
+              style: {
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                minWidth: 0,
+                overflow: "hidden",
+                flex: 1,
+                textAlign: "left"
+              },
+              children: current?.label ?? placeholder ?? ""
+            }
+          ),
+          /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
+            "span",
+            {
+              style: {
+                color: "var(--dsw-alias-label-caption)",
+                flex: "none",
+                transition: "transform .12s",
+                transform: open ? "rotate(180deg)" : void 0
+              },
+              children: "\u25BE"
+            }
+          )
+        ]
+      }
+    ),
+    open && /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { ref: listRef, style: MENU_STYLE, role: "listbox", children: [
+      options.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { style: { color: "var(--dsw-alias-label-tertiary)", padding: 10, fontSize: 13, lineHeight: "20px" }, children: "\u65E0\u9009\u9879" }),
+      options.map((o) => /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
+        "button",
+        {
+          type: "button",
+          "data-theme-select-option": "1",
+          "data-selected": o.value === value ? "1" : void 0,
+          onClick: () => {
+            setOpen(false);
+            onChange(o.value);
+          },
+          style: {
+            ...OPTION_BASE,
+            background: o.value === value ? "var(--dsw-alias-interactive-bg-hover)" : "transparent"
+          },
+          children: o.label
+        },
+        o.value
+      ))
+    ] })
+  ] });
+}
+
+// src/client/desktop-settings/cards/migration-card.tsx
+var import_jsx_runtime9 = require("react/jsx-runtime");
+function MigrationCard({
+  profiles,
+  loaded,
+  notify
+}) {
+  const [migrationSource, setMigrationSource] = (0, import_react9.useState)("");
+  const [migrationDest, setMigrationDest] = (0, import_react9.useState)("");
+  const [migrationRunning, setMigrationRunning] = (0, import_react9.useState)(false);
+  const [migrationProgress, setMigrationProgress] = (0, import_react9.useState)(null);
+  const selectsFilledRef = (0, import_react9.useRef)(false);
+  (0, import_react9.useEffect)(() => {
+    if (!loaded || selectsFilledRef.current) return;
+    selectsFilledRef.current = true;
+    setMigrationSource(loaded.migrationSource);
+    setMigrationDest(loaded.migrationDest);
+  }, [loaded]);
+  (0, import_react9.useEffect)(() => {
+    if (!migrationRunning) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const st = await invoke2("migration_status");
+        if (cancelled) return;
+        if (st.running) {
+          setMigrationProgress({ copied: st.copied, total: st.total });
+          window.setTimeout(tick, 300);
+        } else {
+          window.setTimeout(tick, 300);
+        }
+      } catch {
+      }
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+    };
+  }, [migrationRunning]);
+  const handleMigrate = () => {
+    if (!migrationDest) {
+      notify({ ok: false, text: "\u6CA1\u6709\u53EF\u9009\u7684\u76EE\u6807 profile\uFF08\u8BF7\u5148\u65B0\u5EFA\u4E00\u4E2A\uFF09" });
+      return;
+    }
+    const start = (overwrite) => {
+      setMigrationRunning(true);
+      setMigrationProgress({ copied: 0, total: 0 });
+      invoke2("migrate_profile", { source: migrationSource, dest: migrationDest, overwrite }).then((s) => {
+        setMigrationRunning(false);
+        setMigrationProgress(null);
+        showToast(s, true);
+      }).catch((e) => {
+        const m = String(e);
+        if (!overwrite && m.includes("\u9700\u786E\u8BA4\u8986\u76D6")) {
+          console.error("[migrate] \u9700\u786E\u8BA4\u8986\u76D6\uFF0C\u91CD\u8BD5 overwrite=true");
+          start(true);
+          return;
+        }
+        setMigrationRunning(false);
+        setMigrationProgress(null);
+        console.error("[migrate] \u5931\u8D25\uFF1A", m);
+        showToast(`\u8FC1\u79FB\u5931\u8D25\uFF1A${m}`, false);
+      });
+    };
+    start(false);
+  };
+  const migrationDestOptions = profiles.filter((p) => p.name !== migrationSource);
+  return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(SectionBox, { title: "\u8FC1\u79FB Profile", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { style: LABEL_STYLE, children: "\u6E90 profile \u2192 \u76EE\u6807 profile\uFF08\u5168\u91CF\u590D\u5236\uFF1B\u76EE\u6807\u5DF2\u5B58\u5728\u9700\u8986\u76D6\u786E\u8BA4\uFF09" }),
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { style: ROW_STYLE, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+        ThemeSelect,
+        {
+          style: { flex: 1 },
+          value: migrationSource,
+          onChange: (v) => {
+            setMigrationSource(v);
+            const others = profiles.filter((p) => p.name !== v);
+            const nextDest = others.find((p) => p.name === migrationDest) ?? others[0];
+            if (nextDest) setMigrationDest(nextDest.name);
+            else setMigrationDest("");
+          },
+          options: (profiles ?? []).map((p) => ({ value: p.name, label: p.name }))
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+        ThemeSelect,
+        {
+          style: { flex: 1 },
+          value: migrationDest,
+          onChange: (v) => setMigrationDest(v),
+          options: migrationDestOptions.map((p) => ({ value: p.name, label: p.name }))
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(PfBtn, { variant: "ghost", onClick: handleMigrate, children: "\u8FC1\u79FB\u2026" })
+    ] }),
+    migrationRunning && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { style: { marginTop: 10 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+        "div",
+        {
+          style: {
+            height: 6,
+            borderRadius: 4,
+            background: "var(--dsw-alias-bg-base,#111)",
+            overflow: "hidden"
+          },
+          children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+            "div",
+            {
+              style: {
+                height: "100%",
+                width: migrationProgress && migrationProgress.total > 0 ? `${Math.min(100, Math.round(migrationProgress.copied / migrationProgress.total * 100))}%` : "0%",
+                background: "var(--dsw-alias-state-accent-primary,#3b82f6)",
+                transition: "width .2s"
+              }
+            }
+          )
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { style: NOTE_STYLE, children: migrationProgress ? `\u8FC1\u79FB\u4E2D\uFF1A${migrationProgress.copied}/${migrationProgress.total} \u4E2A\u6587\u4EF6\uFF08${migrationProgress.total > 0 ? Math.min(100, Math.round(migrationProgress.copied / migrationProgress.total * 100)) : 0}%\uFF09` : "\u51C6\u5907\u4E2D\u2026" })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { style: NOTE_STYLE, children: "\u8FC1\u79FB\u4E3A\u5F53\u524D\u65F6\u70B9\u5FEB\u7167\uFF1A\u4E0D\u505C\u6B62\u3001\u4E0D\u91CD\u542F\u4EFB\u4F55\u8FD0\u884C\u4E2D\u7684\u670D\u52A1\uFF1B\u6E90\u5728\u8FC1\u79FB\u671F\u95F4\u7684\u65B0\u6570\u636E\u4E0D\u5305\u542B\u5728\u526F\u672C\u5185\u3002\u76EE\u6807\u4E3A\u6FC0\u6D3B profile \u65F6\u62D2\u7EDD\u8FC1\u79FB\u3002" })
+  ] });
+}
+
+// src/client/desktop-settings/cards/mobile-access-card.tsx
+var import_react10 = require("react");
+var import_jsx_runtime10 = require("react/jsx-runtime");
+function MobileAccessCard({
+  desktop,
+  onNote
+}) {
+  const [muxHeartbeatInput, setMuxHeartbeatInput] = (0, import_react10.useState)("30000");
+  const [desktopLayoutOnPhones, setDesktopLayoutOnPhones] = (0, import_react10.useState)(false);
+  const [mobileLayoutNote, setMobileLayoutNote] = (0, import_react10.useState)(null);
+  (0, import_react10.useEffect)(() => {
+    setDesktopLayoutOnPhones(desktop.desktop_layout_on_phones === true);
+    const hb = desktop.mux_heartbeat_ms;
+    setMuxHeartbeatInput(typeof hb === "number" ? String(hb) : "30000");
+  }, [desktop]);
+  const handleSaveMuxHeartbeat = () => {
+    const raw = muxHeartbeatInput.trim();
+    const parsed = raw === "" ? 3e4 : parseInt(raw, 10);
+    if (Number.isNaN(parsed) || parsed < 0) {
+      onNote("\u5FC3\u8DF3\u95F4\u9694\u9700\u4E3A\u6574\u6570\u6BEB\u79D2\uFF080 = \u4E0D\u8986\u76D6\uFF0C\u56DE\u9000 dsh \u9ED8\u8BA4 2s\uFF09");
+      return;
+    }
+    const v = Math.min(6e5, parsed);
+    void nsSave({ mux_heartbeat_ms: v }).then(
+      () => onNote(
+        v === 0 ? "\u5DF2\u4FDD\u5B58\uFF1A\u4E0D\u8986\u76D6\u5FC3\u8DF3\uFF08dsh \u9ED8\u8BA4 2s\uFF09\uFF0C\u91CD\u542F dsh \u751F\u6548\u3002" : `\u5DF2\u4FDD\u5B58\uFF1Amux \u5FC3\u8DF3 ${v}ms\uFF08dsh \u539F\u751F 2s\uFF09\uFF0C\u91CD\u542F dsh \u751F\u6548\u3002`
+      )
+    ).catch((e) => onNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`));
+  };
+  const handleToggleMobileLayout = (next) => {
+    setDesktopLayoutOnPhones(next);
+    void nsSave({ desktop_layout_on_phones: next }).then(
+      () => setMobileLayoutNote(
+        next ? "\u5DF2\u4FDD\u5B58\uFF1A\u624B\u673A\u4F7F\u7528\u684C\u9762\u5E03\u5C40\uFF08\u4E0D\u52A0\u8F7D\u79FB\u52A8\u5E03\u5C40\u63D2\u4EF6\uFF09\uFF0C\u91CD\u542F dsh \u751F\u6548\u3002" : "\u5DF2\u4FDD\u5B58\uFF1A\u624B\u673A\u4F7F\u7528\u79FB\u52A8\u5E03\u5C40\uFF0C\u91CD\u542F dsh \u751F\u6548\u3002"
+      )
+    ).catch((e) => {
+      setDesktopLayoutOnPhones(!next);
+      setMobileLayoutNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`);
+    });
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(SectionBox, { title: "\u624B\u673A\u8BBF\u95EE\uFF08\u8FDC\u7A0B\u8FDE\u63A5\uFF09", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { style: ROW_STYLE, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
+        "input",
+        {
+          placeholder: "30000",
+          "data-desktop-settings": "mux-heartbeat-ms",
+          style: { ...INPUT_BASE_STYLE, width: 100 },
+          value: muxHeartbeatInput,
+          onChange: (e) => setMuxHeartbeatInput(e.target.value)
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveMuxHeartbeat, children: "\u4FDD\u5B58" })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { style: NOTE_STYLE, children: [
+      "dsh \u7F51\u5173\u5BF9 ",
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("code", { children: "/api/remote.mux" }),
+      " \u7684\u5FC3\u8DF3\u95F4\u9694\uFF08\u6BEB\u79D2\uFF09\u3002dsh \u539F\u751F 2s \u4E14\u8FDE\u4E22 2 \u6B21\u5373\u65AD\u5F00\uFF0C \u79FB\u52A8\u7AEF\u5207\u540E\u53F0/\u5F31\u7F51\u4F1A\u88AB\u79D2\u5224\u6B7B\uFF08\u8868\u73B0\u4E3A\u300C\u80FD\u53D1\u6D88\u606F\u3001\u6536\u4E0D\u5230\u65B0\u6D88\u606F\u300D\uFF09\uFF1B\u58F3\u9ED8\u8BA4\u8986\u76D6\u4E3A 30000\u3002 \u586B 0 = \u4E0D\u8986\u76D6\uFF08\u56DE\u9000 dsh \u9ED8\u8BA4\uFF09\uFF0C\u6539\u52A8\u91CD\u542F dsh \u751F\u6548\u3002"
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: { ...LABEL_STYLE, marginTop: 12 }, children: "\u79FB\u52A8\u7AEF\u5E03\u5C40" }),
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: ROW_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
+        "input",
+        {
+          type: "checkbox",
+          "data-desktop-settings": "desktop-layout-on-phones",
+          checked: desktopLayoutOnPhones,
+          onChange: (e) => handleToggleMobileLayout(e.target.checked)
+        }
+      ),
+      "\u624B\u673A\u7AEF\u6539\u7528\u684C\u9762\u5E03\u5C40\uFF08\u4E0D\u52A0\u8F7D\u79FB\u52A8\u5E03\u5C40\u63D2\u4EF6\uFF09"
+    ] }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: NOTE_STYLE, children: "\u624B\u673A\u4E0A\u7684\u5361\u987F\u6765\u81EA\u5BBF\u4E3B\u524D\u7AEF\uFF08\u4F1A\u8BDD\u6574\u6BB5\u6302\u8F7D + \u9010\u5757\u4EE3\u7801\u9AD8\u4EAE\uFF09\uFF0C\u4E0D\u662F\u7F51\u7EDC\u3002\u52FE\u9009\u540E\u624B\u673A\u8D70\u4E0E iPad \u76F8\u540C\u7684\u684C\u9762\u5E03\u5C40\uFF1A\u660E\u663E\u66F4\u6D41\u7545\uFF0C\u4EE3\u4EF7\u662F\u6392\u7248\u66F4\u6324\uFF08\u53EF\u6A2A\u5C4F\u7F13\u89E3\uFF09\u3002\u4E0D\u52FE\u9009 = \u79FB\u52A8\u5E03\u5C40\u3002\u6539\u52A8\u91CD\u542F dsh \u751F\u6548\u3002" }),
+    mobileLayoutNote && /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: NOTE_STYLE, children: mobileLayoutNote })
+  ] });
+}
+
+// src/client/desktop-settings/cards/power-card.tsx
+var import_react11 = require("react");
+
+// src/client/keep-awake-note.ts
+var NOTE_TAIL = "\u76F4\u5230\u4F1A\u8BDD\u8DD1\u5B8C\u3001dsh \u5B9E\u4F8B\u505C\u6B62\u6216\u9000\u51FA\u58F3\u3002\u5C4F\u5E55\u8BE5\u5173\u8FD8\u662F\u7167\u5173\uFF0C\u53EA\u662F\u4E0D\u8BA9\u6574\u673A\u7761\u8FC7\u53BB\uFF1B\u5408\u76D6\u4ECD\u7136\u4F1A\u7761\u3002\u6539\u52A8\u7ACB\u5373\u751F\u6548\u3002";
+var GENERIC_HEAD = "\u7184\u5C4F\u540E\u82E5\u8FD8\u6709\u4F1A\u8BDD\u5728\u8DD1\uFF0C\u58F3\u4F1A\u6301\u6709\u7CFB\u7EDF\u9632\u4F11\u7720\u65AD\u8A00\uFF08macOS \u8D70 IOKit\u3001Windows \u8D70\u7EBF\u7A0B\u6267\u884C\u72B6\u6001\u3001Linux \u8D70 logind/GNOME \u4F1A\u8BDD\u6291\u5236\uFF09";
+var BACKEND_HEAD = /* @__PURE__ */ new Map([
+  ["caffeinate", "\u7184\u5C4F\u540E\u82E5\u8FD8\u6709\u4F1A\u8BDD\u5728\u8DD1\uFF0C\u58F3\u4F1A\u6301\u6709\u7CFB\u7EDF\u9632\u4F11\u7720\u65AD\u8A00\uFF08macOS \u8D70 IOKit / caffeinate\uFF09"],
+  ["execution-state", "\u7184\u5C4F\u540E\u82E5\u8FD8\u6709\u4F1A\u8BDD\u5728\u8DD1\uFF0C\u58F3\u4F1A\u6301\u6709\u7CFB\u7EDF\u9632\u4F11\u7720\u65AD\u8A00\uFF08Windows \u8D70\u7EBF\u7A0B\u6267\u884C\u72B6\u6001\uFF09"],
+  ["systemd-inhibit", "\u7184\u5C4F\u540E\u82E5\u8FD8\u6709\u4F1A\u8BDD\u5728\u8DD1\uFF0C\u58F3\u4F1A\u6301\u6709\u7CFB\u7EDF\u9632\u4F11\u7720\u65AD\u8A00\uFF08Linux \u8D70 logind \u6291\u5236\u9501\uFF0Csystemd-inhibit\uFF09"],
+  [
+    "gnome-session-inhibit",
+    "\u7184\u5C4F\u540E\u82E5\u8FD8\u6709\u4F1A\u8BDD\u5728\u8DD1\uFF0C\u58F3\u4F1A\u6301\u6709\u7CFB\u7EDF\u9632\u4F11\u7720\u65AD\u8A00\uFF08Linux \u8D70 GNOME \u4F1A\u8BDD\u6291\u5236\uFF0Cgnome-session-inhibit\uFF09"
+  ]
+]);
+function reasonText(reason) {
+  return typeof reason === "string" && reason.trim() !== "" ? reason.trim() : "\u539F\u56E0\u672A\u77E5";
+}
+function keepAwakeNote(capability) {
+  const cap = capability ?? {};
+  if (cap.available === false) {
+    return {
+      tone: "warn",
+      text: `\u672C\u73AF\u5883\u62FF\u4E0D\u5230\u9632\u4F11\u7720\u901A\u9053\uFF1A${reasonText(cap.reason)}\u3002\u5F00\u5173\u5C31\u7B97\u5F00\u7740\uFF0C\u8DD1\u4F1A\u8BDD\u671F\u95F4\u7CFB\u7EDF\u4ECD\u53EF\u80FD\u7A7A\u95F2\u4F11\u7720\uFF1B${NOTE_TAIL}`
+    };
+  }
+  if (cap.available === true) {
+    return { tone: "info", text: `${BACKEND_HEAD.get(cap.backend ?? "") ?? GENERIC_HEAD}\uFF0C${NOTE_TAIL}` };
+  }
+  return { tone: "info", text: `${GENERIC_HEAD}\uFF0C${NOTE_TAIL}` };
+}
+
+// src/client/desktop-settings/cards/power-card.tsx
+var import_jsx_runtime11 = require("react/jsx-runtime");
+function PowerCard({ desktop }) {
+  const [preventSleep, setPreventSleep] = (0, import_react11.useState)(true);
+  const [preventSleepNote, setPreventSleepNote] = (0, import_react11.useState)(null);
+  (0, import_react11.useEffect)(() => {
+    setPreventSleep(desktop.prevent_sleep !== false);
+  }, [desktop]);
+  const handleTogglePreventSleep = (next) => {
+    setPreventSleep(next);
+    void nsSave({ prevent_sleep: next }).then(
+      () => setPreventSleepNote(
+        next ? "\u5DF2\u4FDD\u5B58\uFF1A\u6709\u4F1A\u8BDD\u5728\u8DD1\u65F6\u963B\u6B62\u7CFB\u7EDF\u4F11\u7720\uFF08\u5C4F\u5E55\u4ECD\u4F1A\u7167\u5E38\u7184\u706D\uFF09\u3002" : "\u5DF2\u4FDD\u5B58\uFF1A\u4E0D\u518D\u963B\u6B62\u7CFB\u7EDF\u4F11\u7720\u3002"
+      )
+    ).catch((e) => setPreventSleepNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`));
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(SectionBox, { title: "\u7535\u6E90", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { style: ROW_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+        "input",
+        {
+          type: "checkbox",
+          "data-desktop-settings": "prevent-sleep",
+          checked: preventSleep,
+          onChange: (e) => handleTogglePreventSleep(e.target.checked)
+        }
+      ),
+      "\u6709\u4F1A\u8BDD\u5728\u8DD1\u65F6\u963B\u6B62\u7CFB\u7EDF\u4F11\u7720\uFF08\u7F3A\u7701\u5F00\uFF09"
+    ] }) }),
+    preventSleepNote && /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { style: NOTE_STYLE, children: preventSleepNote }),
+    (() => {
+      const note = keepAwakeNote(desktop.keep_awake);
+      return /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { style: note.tone === "warn" ? WARN_NOTE_STYLE : NOTE_STYLE, children: note.text });
+    })()
+  ] });
+}
+
+// src/client/desktop-settings/cards/profile-card.tsx
+var import_jsx_runtime12 = require("react/jsx-runtime");
+function ProfileCard({
+  desktop,
+  notify
+}) {
+  const activeProfile = desktop.profiles.find((p) => p.active);
+  const profileSelectValue = activeProfile?.name ?? desktop.profiles[0]?.name ?? "";
+  const handleSwitchProfile = (name) => {
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
+      notify({ ok: false, text: "Profile \u540D\u4E0D\u5408\u6CD5" });
+      return;
+    }
+    void (async () => {
+      try {
+        await nsSave({ active_profile: name });
+        await invoke2("restart_dsh_service");
+        notify({ ok: true, text: `\u5DF2\u5207\u6362\u5230 Profile\u300C${name}\u300D\uFF0C\u6B63\u5728\u91CD\u542F\u2026` });
+      } catch (err) {
+        notify({ ok: false, text: `\u5207\u6362 Profile \u5931\u8D25\uFF1A${String(err)}` });
+      }
+    })();
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(SectionBox, { title: "Profile", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+      ThemeSelect,
+      {
+        style: { marginBottom: 8 },
+        value: profileSelectValue,
+        onChange: handleSwitchProfile,
+        options: (desktop.profiles ?? []).map((p) => ({
+          value: p.name,
+          label: p.active ? `\u2713 ${p.name}` : p.name
+        }))
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { style: NOTE_STYLE, children: "\u5207\u6362 Profile \u4F1A\u4EE5\u76EE\u6807 profile \u91CD\u542F dsh web\u3002" })
+  ] });
+}
+
+// src/client/desktop-settings/cards/profile-ports-card.tsx
+var import_react12 = require("react");
+var import_jsx_runtime13 = require("react/jsx-runtime");
+function ProfilePortsCard({ loaded }) {
+  const [profilePorts, setProfilePorts] = (0, import_react12.useState)([]);
+  const [profilePortsStatus, setProfilePortsStatus] = (0, import_react12.useState)({ state: "loading", text: "\u52A0\u8F7D\u4E2D\u2026" });
+  const [profilePortInputs, setProfilePortInputs] = (0, import_react12.useState)({});
+  const [profileLaneInputs, setProfileLaneInputs] = (0, import_react12.useState)({});
+  const [profilePageInputs, setProfilePageInputs] = (0, import_react12.useState)({});
+  const [forwarderInput, setForwarderInput] = (0, import_react12.useState)("");
+  const [profilePortBoxNote, setProfilePortBoxNote] = (0, import_react12.useState)(null);
+  const inputsFilledRef = (0, import_react12.useRef)(false);
+  (0, import_react12.useEffect)(() => {
+    if (!loaded || inputsFilledRef.current) return;
+    inputsFilledRef.current = true;
+    setForwarderInput(loaded.forwarderInput);
+    setProfilePortInputs(loaded.profilePortInputs);
+    setProfileLaneInputs(loaded.profileLaneInputs);
+    setProfilePageInputs(loaded.profilePageInputs);
+  }, [loaded]);
+  (0, import_react12.useEffect)(() => {
+    let cancelled = false;
+    let attempt = 0;
+    const load = () => {
+      invoke2("list_profile_ports").then((rows) => {
+        if (cancelled) return;
+        setProfilePorts(rows);
+        setProfilePortsStatus({ state: "ok" });
+      }).catch((err) => {
+        if (cancelled) return;
+        if (attempt < 2) {
+          attempt += 1;
+          setProfilePortsStatus({ state: "loading", text: `\u52A0\u8F7D\u5931\u8D25\uFF0C\u91CD\u8BD5\u4E2D\uFF08${attempt}/2\uFF09\u2026` });
+          window.setTimeout(load, 800);
+        } else {
+          setProfilePortsStatus({
+            state: "error",
+            text: `\u7AEF\u53E3\u8868\u52A0\u8F7D\u5931\u8D25\uFF1A${String(err)}\uFF08\u8BF7\u91CD\u542F dsh \u540E\u91CD\u8BD5\uFF09`
+          });
+        }
+      });
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const parsePortInput = (raw) => {
+    const v = Number(raw);
+    return !raw || Number.isNaN(v) || v < 1 || v > 65535 ? null : v;
+  };
+  const savePortSetting = (key, v, note) => {
+    void nsSave({ [key]: v }).then(() => setProfilePortBoxNote(note)).catch((e) => setProfilePortBoxNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`));
+  };
+  const handleSaveProfilePort = (profile) => {
+    const v = parsePortInput(profilePortInputs[profile] ?? "");
+    if (v === null) return;
+    savePortSetting(`profile_ports.${profile}`, v, `${profile} \u4E0A\u6E38\u7AEF\u53E3\u5DF2\u6539\u4E3A ${v}\uFF1B\u91CD\u542F\u8BE5 profile \u751F\u6548\u3002`);
+  };
+  const handleSaveProfileLanePort = (profile) => {
+    const v = parsePortInput(profileLaneInputs[profile] ?? "");
+    if (v === null) return;
+    savePortSetting(`profile_lane_ports.${profile}`, v, `${profile} lane \u7AEF\u53E3\u5DF2\u6539\u4E3A ${v}\uFF1B\u91CD\u542F\u8BE5 profile \u751F\u6548\u3002`);
+  };
+  const handleSaveProfilePagePort = (profile) => {
+    const v = parsePortInput(profilePageInputs[profile] ?? "");
+    if (v === null) return;
+    const ok = window.confirm(
+      `${profile} \u9875\u9762\u53E3\u5C06\u6539\u4E3A ${v}\uFF1A\u6362\u53E3\uFF1D\u6362\u6D4F\u89C8\u5668\u672C\u5730\u5B58\u50A8\uFF08localStorage/IndexedDB \u7559\u5728\u65E7\u53E3\uFF09\u3002\u786E\u8BA4\u4FEE\u6539\uFF1F`
+    );
+    if (!ok) return;
+    savePortSetting(`profile_page_ports.${profile}`, v, `${profile} \u9875\u9762\u53E3\u5DF2\u6539\u4E3A ${v}\uFF1B\u91CD\u542F\u8BE5 profile \u751F\u6548\u3002`);
+  };
+  const handleSaveForwarderPort = () => {
+    const v = parsePortInput(forwarderInput.trim());
+    if (v === null) return;
+    savePortSetting("lane_forwarder_port", v, `lane \u8F6C\u53D1\u5668\u7AEF\u53E3\u5DF2\u6539\u4E3A ${v}\uFF1B\u91CD\u542F\u58F3\u751F\u6548\u3002`);
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)(SectionBox, { title: "Profile \u7AEF\u53E3", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { style: { ...ROW_STYLE, marginBottom: 10 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { style: LABEL_STYLE, children: "\u58F3 lane \u8F6C\u53D1\u5668\u53E3\uFF08\u91CD\u542F\u58F3\u751F\u6548\uFF09" }),
+      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+        "input",
+        {
+          style: { ...INPUT_BASE_STYLE, width: 84 },
+          "data-desktop-settings": "lane-forwarder-port",
+          placeholder: "3091",
+          value: forwarderInput,
+          onChange: (e) => setForwarderInput(e.target.value),
+          onKeyDown: (e) => {
+            if (e.key === "Enter") handleSaveForwarderPort();
+          }
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveForwarderPort, children: "\u4FDD\u5B58" })
+    ] }),
+    profilePortsStatus.state === "ok" ? /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("table", { style: { width: "100%", fontSize: 12, borderCollapse: "collapse" }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("tr", { children: ["Profile", "dsh \u7AEF\u53E3\uFF08\u4E0A\u6E38\uFF09", "\u9875\u9762\u53E3\uFF08loopback\uFF09", "Lane \u7AEF\u53E3", "\u72B6\u6001", ""].map((h) => /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("th", { style: { textAlign: "left" }, children: h }, h)) }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("tbody", { children: profilePorts.map((r) => /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("tr", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("td", { children: r.profile }),
+        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+          PortCell,
+          {
+            testId: `profile-port-${r.profile}`,
+            placeholder: String(r.upstream_port),
+            value: profilePortInputs[r.profile] ?? "",
+            onChange: (v) => setProfilePortInputs((prev) => ({ ...prev, [r.profile]: v })),
+            onEnter: () => handleSaveProfilePort(r.profile),
+            onSave: () => handleSaveProfilePort(r.profile)
+          }
+        ) }),
+        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+          PortCell,
+          {
+            testId: `profile-page-port-${r.profile}`,
+            placeholder: r.page_port > 0 ? String(r.page_port) : "\u542F\u52A8\u65F6\u5206\u914D",
+            value: profilePageInputs[r.profile] ?? "",
+            onChange: (v) => setProfilePageInputs((prev) => ({ ...prev, [r.profile]: v })),
+            onEnter: () => handleSaveProfilePagePort(r.profile),
+            onSave: () => handleSaveProfilePagePort(r.profile)
+          }
+        ) }),
+        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+          PortCell,
+          {
+            testId: `profile-lane-port-${r.profile}`,
+            placeholder: String(r.lane_port),
+            value: profileLaneInputs[r.profile] ?? "",
+            onChange: (v) => setProfileLaneInputs((prev) => ({ ...prev, [r.profile]: v })),
+            onEnter: () => handleSaveProfileLanePort(r.profile),
+            onSave: () => handleSaveProfileLanePort(r.profile)
+          }
+        ) }),
+        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+          "td",
+          {
+            style: {
+              color: r.running ? "var(--dsw-alias-state-success-primary,#2fbf71)" : "var(--dsw-alias-label-secondary,#9aa4b2)"
+            },
+            children: r.running ? "\u25CF \u8FD0\u884C\u4E2D" : "\u672A\u8FD0\u884C"
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("td", {})
+      ] }, r.profile)) })
+    ] }) : profilePortsStatus.state === "error" ? /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { style: DANGER_NOTE_STYLE, children: profilePortsStatus.text }) : /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { style: NOTE_STYLE, children: profilePortsStatus.text ?? "\u52A0\u8F7D\u4E2D\u2026" }),
+    profilePortBoxNote && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { style: NOTE_STYLE, children: profilePortBoxNote }),
+    /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { style: NOTE_STYLE, children: "\u4E0A\u6E38\uFF08dsh \u5B9E\u4F8B\uFF09\uFF1Aweb 3080 \xB7 desktop 3081 \xB7 \u5176\u4F59 3082 \u8D77\u6563\u5217\u907F\u8BA9\uFF1Blane\uFF08\u624B\u673A\u4EE3\u7406\uFF09\uFF1Aweb 3092 \xB7 desktop 3093 \xB7 \u5176\u4F59 3094 \u8D77\u6563\u5217\uFF1B\u9875\u9762\u53E3\uFF08loopback origin\uFF09\uFF1A6390 \u8D77 40 \u4E2A\u987A\u5EF6\u3002\u6539\u52A8\u540E\u91CD\u542F\u8BE5 profile \u751F\u6548\uFF1B \u8F93\u5165\u6846\u663E\u793A\u7684\u662F\u5DF2\u4FDD\u5B58\u7684\u671F\u671B\u503C\uFF0C\u7070\u5B57 placeholder \u662F\u5F53\u524D\u5B9E\u9645\u503C\u3002" }),
+    /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { style: DANGER_NOTE_STYLE, children: "\u26A0\uFE0F \u6539\u9875\u9762\u53E3\uFF1D\u6362\u6D4F\u89C8\u5668\u672C\u5730\u5B58\u50A8\uFF1AlocalStorage / IndexedDB / \u767B\u5F55\u6001\u7559\u5728\u65E7\u7AEF\u53E3\uFF0C\u4E0D\u4F1A\u8DDF\u968F\u5230\u65B0\u53E3\uFF1B\u8F6C\u53D1\u5668\u53E3\u6539\u52A8\u9700\u91CD\u542F\u58F3\u3002" })
+  ] });
+}
+
+// src/client/desktop-settings/cards/proxy-card.tsx
+var import_react13 = require("react");
+var import_jsx_runtime14 = require("react/jsx-runtime");
+function ProxyCard({
+  proxy,
+  proxyEffective,
+  loaded,
+  notify
+}) {
+  const [draft, setDraft] = (0, import_react13.useState)(proxy);
+  const [busy, setBusy] = (0, import_react13.useState)(false);
+  const [testResult, setTestResult] = (0, import_react13.useState)(null);
+  const [testBusy, setTestBusy] = (0, import_react13.useState)(false);
+  const filledRef = (0, import_react13.useRef)(false);
+  (0, import_react13.useEffect)(() => {
+    if (!loaded || filledRef.current) return;
+    filledRef.current = true;
+    setDraft(loaded.proxy);
+  }, [loaded]);
+  const set = (key, value) => {
+    setDraft((prev) => ({ ...prev, [key]: value }));
+  };
+  const handleSaveProxy = () => {
+    if (busy) return;
+    setBusy(true);
+    void (async () => {
+      try {
+        await nsSave({
+          proxy_mode: draft.proxy_mode,
+          proxy_url: draft.proxy_url,
+          no_proxy: draft.no_proxy,
+          proxy_user: draft.proxy_user,
+          proxy_pass: draft.proxy_pass
+        });
+        notify({ ok: true, text: "\u4EE3\u7406\u8BBE\u7F6E\u5DF2\u4FDD\u5B58\uFF1B\u4E0B\u6B21 dsh \u91CD\u542F\u540E\u751F\u6548\u3002" });
+      } catch (err) {
+        notify({ ok: false, text: `\u4FDD\u5B58\u5931\u8D25\uFF1A${String(err)}` });
+      } finally {
+        setBusy(false);
+      }
+    })();
+  };
+  const handleTestProxy = () => {
+    if (testBusy) return;
+    setTestBusy(true);
+    setTestResult(null);
+    void (async () => {
+      try {
+        const ms = await invoke2("test_proxy_connectivity", { url: draft.proxy_url });
+        setTestResult(`\u8FDE\u63A5\u6210\u529F\uFF08${ms}ms\uFF09`);
+      } catch (err) {
+        setTestResult(`\u8FDE\u63A5\u5931\u8D25\uFF1A${String(err)}`);
+      } finally {
+        setTestBusy(false);
+      }
+    })();
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(SectionBox, { title: "\u4EE3\u7406\u8BBE\u7F6E", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: LABEL_STYLE, children: "\u4EE3\u7406\u6A21\u5F0F" }),
+    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+      ThemeSelect,
+      {
+        style: { marginBottom: 10 },
+        value: draft.proxy_mode,
+        onChange: (v) => set("proxy_mode", v),
+        options: [
+          { value: "off", label: "\u4E0D\u4F7F\u7528\u4EE3\u7406" },
+          { value: "system", label: "\u8DDF\u968F\u7CFB\u7EDF\u4EE3\u7406" },
+          { value: "manual", label: "\u624B\u52A8\u6307\u5B9A\u4EE3\u7406" }
+        ]
+      }
+    ),
+    draft.proxy_mode === "manual" && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(import_jsx_runtime14.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: LABEL_STYLE, children: "\u4EE3\u7406 URL" }),
+      /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+        "input",
+        {
+          placeholder: "http/https/socks5://host:port",
+          value: draft.proxy_url,
+          className: "pf-input",
+          style: INPUT_FULL_STYLE,
+          "data-desktop-settings": "proxy-url",
+          onChange: (e) => set("proxy_url", e.target.value.trim())
+        }
+      )
+    ] }),
+    (draft.proxy_mode === "manual" || draft.proxy_mode === "system") && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(import_jsx_runtime14.Fragment, { children: [
+      draft.proxy_mode === "manual" && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(import_jsx_runtime14.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: LABEL_STYLE, children: "NO_PROXY\uFF08\u4E0D\u8D70\u4EE3\u7406\u7684\u5730\u5740\uFF0C\u9017\u53F7\u5206\u9694\uFF09" }),
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+          "input",
+          {
+            placeholder: "localhost,127.0.0.1,*.internal",
+            value: draft.no_proxy,
+            className: "pf-input",
+            style: INPUT_FULL_STYLE,
+            "data-desktop-settings": "no-proxy",
+            onChange: (e) => set("no_proxy", e.target.value.trim())
+          }
+        )
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { style: { display: "flex", gap: 8, marginTop: 8 }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { style: FLEX_1_STYLE, children: [
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: LABEL_STYLE, children: "\u7528\u6237\u540D\uFF08\u53EF\u9009\uFF09" }),
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+            "input",
+            {
+              value: draft.proxy_user,
+              className: "pf-input",
+              style: INPUT_FULL_STYLE,
+              "data-desktop-settings": "proxy-user",
+              onChange: (e) => set("proxy_user", e.target.value)
+            }
+          )
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { style: FLEX_1_STYLE, children: [
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: LABEL_STYLE, children: "\u5BC6\u7801\uFF08\u53EF\u9009\uFF09" }),
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+            "input",
+            {
+              type: "password",
+              value: draft.proxy_pass,
+              className: "pf-input",
+              style: INPUT_FULL_STYLE,
+              "data-desktop-settings": "proxy-pass",
+              onChange: (e) => set("proxy_pass", e.target.value)
+            }
+          )
+        ] })
+      ] })
+    ] }),
+    proxyEffective && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { style: NOTE_STYLE, children: [
+      "\u5F53\u524D\u751F\u6548\uFF1A",
+      JSON.stringify(proxyEffective)
+    ] }),
+    draft.proxy_mode === "system" && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: NOTE_STYLE, children: "\u7CFB\u7EDF\u4EE3\u7406\u6A21\u5F0F\u4E0B\uFF0C\u4EE3\u7406\u5730\u5740\u4E0E NO_PROXY \u6765\u81EA\u7CFB\u7EDF\u8BBE\u7F6E\uFF08\u5982 Windows \u6CE8\u518C\u8868 ProxyOverride\uFF09\uFF1B\u7528\u6237\u540D/\u5BC6\u7801\u4ECD\u53D6\u81EA\u8BBE\u7F6E\u5E76\u62FC\u5165\u4EE3\u7406\u5730\u5740\u3002" }),
+    draft.proxy_mode === "manual" && draft.proxy_url && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(import_jsx_runtime14.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: { marginTop: 8 }, children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(PfBtn, { variant: "ghost", onClick: handleTestProxy, children: testBusy ? "\u6D4B\u8BD5\u4E2D\u2026" : "\u6D4B\u8BD5\u8FDE\u63A5" }) }),
+      testResult && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: NOTE_STYLE, children: testResult })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: { marginTop: 10 }, children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(PfBtn, { variant: "primary", disabled: busy, onClick: handleSaveProxy, children: busy ? "\u4FDD\u5B58\u4E2D\u2026" : "\u4FDD\u5B58\u4EE3\u7406\u8BBE\u7F6E" }) })
+  ] });
+}
+
+// src/client/desktop-settings/cards/runtime-card.tsx
+var import_react14 = require("react");
 
 // src/client/runtime-download-ui.ts
 var IDLE = { progress: null, entry: null, toast: null };
@@ -1278,688 +2553,17 @@ function runtimeDownloadHint(entry) {
   return "cancelled" in entry ? "\u4E0B\u8F7D\u5DF2\u53D6\u6D88" : entry.failed;
 }
 
-// src/client/theme-select.tsx
-var import_react2 = require("react");
-var import_jsx_runtime2 = require("react/jsx-runtime");
-var TRIGGER_STYLE = {
-  minWidth: 0,
-  width: "100%",
-  height: 28,
-  color: "var(--dsw-alias-label-secondary)",
-  cursor: "pointer",
-  background: "transparent",
-  border: "none",
-  borderRadius: 24,
-  outline: "none",
-  alignItems: "center",
-  gap: 4,
-  padding: "0 4px 0 8px",
-  fontSize: 13,
-  fontWeight: 500,
-  lineHeight: "20px",
-  display: "flex"
-};
-var MENU_STYLE = {
-  zIndex: 1100,
-  background: "var(--dsw-specific-menu)",
-  boxShadow: "var(--dsw-elevation-prominent)",
-  color: "var(--dsw-alias-label-primary)",
-  minWidth: "min(240px, 100%)",
-  maxHeight: "min(360px, 60vh)",
-  borderRadius: 20,
-  padding: 4,
-  position: "absolute",
-  top: "calc(100% + 4px)",
-  left: 0,
-  right: 0,
-  overflowY: "auto",
-  overflowX: "hidden"
-};
-var OPTION_BASE = {
-  boxSizing: "border-box",
-  width: "100%",
-  minHeight: 38,
-  color: "inherit",
-  textAlign: "left",
-  cursor: "pointer",
-  background: "transparent",
-  border: "none",
-  borderRadius: 10,
-  outline: "none",
-  alignItems: "center",
-  gap: 8,
-  padding: "6px 8px",
-  display: "flex",
-  fontSize: 13
-};
-function ThemeSelect({ value, options, onChange, placeholder, style, disabled }) {
-  const [open, setOpen] = (0, import_react2.useState)(false);
-  const rootRef = (0, import_react2.useRef)(null);
-  const listRef = (0, import_react2.useRef)(null);
-  (0, import_react2.useEffect)(() => {
-    if (!open) return;
-    const onDown = (ev) => {
-      if (rootRef.current && !rootRef.current.contains(ev.target)) setOpen(false);
-    };
-    const onKey = (ev) => {
-      if (ev.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-  (0, import_react2.useEffect)(() => {
-    if (!open || !listRef.current) return;
-    const sel = listRef.current.querySelector('[data-selected="1"]');
-    sel?.scrollIntoView({ block: "nearest" });
-  }, [open]);
-  const pick = (0, import_react2.useCallback)(
-    (v) => {
-      setOpen(false);
-      if (v !== value) onChange(v);
-    },
-    [onChange, value]
-  );
-  const onMenuKey = (0, import_react2.useCallback)(
-    (ev) => {
-      const idx = options.findIndex((o) => o.value === value);
-      if (ev.key === "ArrowDown") {
-        ev.preventDefault();
-        const next = options[Math.min(idx + 1, options.length - 1)];
-        if (next) onChange(next.value);
-      } else if (ev.key === "ArrowUp") {
-        ev.preventDefault();
-        const next = options[Math.max(idx - 1, 0)];
-        if (next) onChange(next.value);
-      } else if (ev.key === "Enter") {
-        ev.preventDefault();
-        if (value) onChange(value);
-      }
-    },
-    [options, onChange, value]
-  );
-  const current = options.find((o) => o.value === value);
-  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { ref: rootRef, style: { minWidth: 0, position: "relative", ...style ?? {} }, onKeyDown: onMenuKey, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
-      "button",
-      {
-        type: "button",
-        "data-theme-select-trigger": "1",
-        disabled,
-        onClick: () => setOpen((v) => !v),
-        style: { ...TRIGGER_STYLE, opacity: disabled ? 0.5 : 1 },
-        children: [
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
-            "span",
-            {
-              style: {
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                minWidth: 0,
-                overflow: "hidden",
-                flex: 1,
-                textAlign: "left"
-              },
-              children: current?.label ?? placeholder ?? ""
-            }
-          ),
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
-            "span",
-            {
-              style: {
-                color: "var(--dsw-alias-label-caption)",
-                flex: "none",
-                transition: "transform .12s",
-                transform: open ? "rotate(180deg)" : void 0
-              },
-              children: "\u25BE"
-            }
-          )
-        ]
-      }
-    ),
-    open && /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { ref: listRef, style: MENU_STYLE, role: "listbox", children: [
-      options.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { style: { color: "var(--dsw-alias-label-tertiary)", padding: 10, fontSize: 13, lineHeight: "20px" }, children: "\u65E0\u9009\u9879" }),
-      options.map((o) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
-        "button",
-        {
-          type: "button",
-          "data-theme-select-option": "1",
-          "data-selected": o.value === value ? "1" : void 0,
-          onClick: () => {
-            setOpen(false);
-            onChange(o.value);
-          },
-          style: {
-            ...OPTION_BASE,
-            background: o.value === value ? "var(--dsw-alias-interactive-bg-hover)" : "transparent"
-          },
-          children: o.label
-        },
-        o.value
-      ))
-    ] })
-  ] });
-}
-
-// src/client/devtools-toggle.ts
-function planDevToolsUi(current, next) {
-  if (current === next) return { action: "idle" };
-  return { action: next ? "confirm-on" : "confirm-off" };
-}
-function devToolsConfirmCopy() {
-  return {
-    title: "\u5F00\u542F\u5F00\u53D1\u8005\u5DE5\u5177\uFF1F",
-    lines: [
-      "\u5F00\u542F\u540E\uFF0C\u684C\u9762\u58F3\u4F1A\u5728\u672C\u673A\u56DE\u73AF\u5730\u5740\u76D1\u542C\u4E00\u4E2A\u8FDC\u7A0B\u8C03\u8BD5\u53E3\uFF0C\u53F3\u952E\u83DC\u5355\u51FA\u73B0\u300C\u6253\u5F00 DevTools\u300D\u3002",
-      "\u672C\u673A\u4E0A\u7684\u4EFB\u4F55\u7A0B\u5E8F\u90FD\u80FD\u501F\u8FD9\u4E2A\u53E3\u5728\u9875\u9762\u91CC\u6267\u884C\u4EFB\u610F\u4EE3\u7801\u3001\u8BFB\u53D6\u4F1A\u8BDD\u5185\u5BB9\uFF08\u542B\u767B\u5F55\u51ED\u636E\uFF09\u3002",
-      "\u53EA\u5728\u81EA\u5DF1\u9700\u8981\u6392\u67E5\u95EE\u9898\u65F6\u5F00\u542F\uFF1B\u7528\u5B8C\u5728\u8BBE\u7F6E\u91CC\u5173\u6389\u5E76\u91CD\u542F\u684C\u9762\u58F3\u3002"
-    ],
-    confirm: "\u786E\u8BA4\u5F00\u542F\u5E76\u91CD\u542F",
-    cancel: "\u53D6\u6D88"
-  };
-}
-function devToolsDisableCopy() {
-  return {
-    title: "\u5173\u95ED\u5F00\u53D1\u8005\u5DE5\u5177\uFF1F",
-    lines: [
-      "\u786E\u8BA4\u540E\u684C\u9762\u58F3\u5C06\u91CD\u542F\uFF1A\u8FDC\u7A0B\u8C03\u8BD5\u53E3\u5173\u95ED\u3001\u53F3\u952E\u83DC\u5355\u300C\u6253\u5F00 DevTools\u300D\u6D88\u5931\u3002",
-      "\u91CD\u542F\u671F\u95F4\u9875\u9762\u4F1A\u77ED\u6682\u4E2D\u65AD\u3002"
-    ],
-    confirm: "\u786E\u8BA4\u5173\u95ED\u5E76\u91CD\u542F",
-    cancel: "\u53D6\u6D88"
-  };
-}
-function devToolsSavedNote(on) {
-  return on ? "\u5DF2\u5F00\u542F\uFF1A\u6B63\u5728\u91CD\u542F\u684C\u9762\u58F3\uFF0C\u91CD\u542F\u540E\u8C03\u8BD5\u53E3\u4E0E\u53F3\u952E\u83DC\u5355\u300C\u6253\u5F00 DevTools\u300D\u751F\u6548\u3002" : "\u5DF2\u5173\u95ED\uFF1A\u6B63\u5728\u91CD\u542F\u684C\u9762\u58F3\uFF0C\u91CD\u542F\u540E\u8C03\u8BD5\u53E3\u5173\u95ED\u3001\u83DC\u5355\u6D88\u5931\u3002";
-}
-
-// src/client/desktop-settings.tsx
-var import_jsx_runtime3 = require("react/jsx-runtime");
-var nsRpc = null;
-function invoke2(cmd, args, options) {
-  return shellRpc.invoke(cmd, args, options);
-}
-function fmtBytes2(bytes) {
-  if (bytes === null || !Number.isFinite(bytes) || bytes <= 0) return "";
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
-}
-var PANEL_CSS = `
-[data-desktop-settings] .pf-btn { background:var(--dsw-alias-brand-primary-new-color,#4176e6); border:none; color:#fff; border-radius:8px; padding:6px 13px; font-size:12px; cursor:pointer; transition:filter .12s, transform .06s; }
-[data-desktop-settings] .pf-btn:hover { filter:brightness(1.12); }
-[data-desktop-settings] .pf-btn:active { transform:translateY(1px); }
-[data-desktop-settings] .pf-btn.ghost { background:transparent; border:1px solid var(--dsw-alias-border-l,#ffffff1f); color:var(--dsw-alias-label-primary,#e7eaf0); }
-[data-desktop-settings] .pf-btn.ghost:hover { background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); filter:none; }
-[data-desktop-settings] .pf-btn.ghost:active { background:var(--dsw-alias-interactive-bg-active,rgba(255,255,255,.12)); transform:translateY(1px); filter:none; }
-[data-desktop-settings] .pf-btn.danger { background:transparent; border:1px solid var(--dsw-alias-state-danger-primary,#e5534b); color:var(--dsw-alias-state-danger-primary,#e5534b); }
-[data-desktop-settings] .pf-btn.danger:hover { background:rgba(229,83,75,.12); filter:none; }
-[data-desktop-settings] .pf-btn:disabled { opacity:.5; cursor:not-allowed; }
-[data-desktop-settings] input, [data-desktop-settings] select { padding:6px 8px; border-radius:8px; border:1px solid var(--dsw-alias-border-l,#ffffff1f); background:var(--dsw-alias-bg-base,#151517); color:inherit; font-size:12px; }
-[data-desktop-settings] .pf-label { font-size:11px; color:var(--dsw-alias-label-secondary,#9aa4b2); margin-bottom:4px; }
-[data-desktop-settings] .pf-input { width:100%; box-sizing:border-box; }
-[data-desktop-settings] .pf-title { font-weight:600; font-size:13px; margin-bottom:10px; }
-[data-desktop-settings] .pf-row { display:flex; gap:8px; align-items:center; }
-[data-desktop-settings] .pf-note { font-size:11px; color:var(--dsw-alias-label-secondary,#9aa4b2); margin-top:8px; word-break:break-all; }
-`;
-var stylesInstalled = false;
-function ensureStyles() {
-  if (stylesInstalled) return;
-  stylesInstalled = true;
-  const style = document.createElement("style");
-  style.dataset.desktopSettings = "styles";
-  style.textContent = PANEL_CSS;
-  document.head.appendChild(style);
-}
-var ROOT_STYLE = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 14,
-  maxWidth: 680,
-  fontSize: 13
-};
-var SECTION_STYLE = {
-  border: "1px solid var(--dsw-alias-border-l,#ffffff1f)",
-  borderRadius: 12,
-  padding: "14px 16px"
-};
-var TITLE_STYLE = {
-  fontWeight: 600,
-  fontSize: 13,
-  marginBottom: 10
-};
-var LABEL_STYLE = {
-  fontSize: 11,
-  color: "var(--dsw-alias-label-secondary,#9aa4b2)",
-  marginBottom: 4
-};
-var NOTE_STYLE = {
-  fontSize: 11,
-  color: "var(--dsw-alias-label-secondary,#9aa4b2)",
-  marginTop: 8,
-  wordBreak: "break-all"
-};
-var INPUT_BASE_STYLE = {
-  padding: "6px 8px",
-  borderRadius: 8,
-  border: "1px solid var(--dsw-alias-border-l,#ffffff1f)",
-  background: "var(--dsw-alias-bg-base,#151517)",
-  color: "inherit",
-  fontSize: 12
-};
-var INPUT_FULL_STYLE = { ...INPUT_BASE_STYLE, width: "100%", boxSizing: "border-box" };
-var ROW_STYLE = { display: "flex", gap: 8, alignItems: "center" };
-var FLEX_1_STYLE = { flex: 1 };
-var DEV_TOOLS_OVERLAY_STYLE = {
-  position: "fixed",
-  inset: 0,
-  zIndex: 2147483e3,
-  background: "rgba(0,0,0,0.45)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center"
-};
-var DEV_TOOLS_MODAL_STYLE = {
-  background: "var(--dsw-alias-bg-layer-1,#1e1e1e)",
-  border: "1px solid var(--dsw-alias-border-l2,#444)",
-  borderRadius: 12,
-  padding: "18px 20px",
-  minWidth: 320,
-  maxWidth: "80vw",
-  boxShadow: "0 12px 40px rgba(0,0,0,0.4)",
-  color: "var(--dsw-alias-label-primary,#eee)"
-};
-var DEV_TOOLS_TITLE_STYLE = { fontSize: 14, fontWeight: 600, marginBottom: 10 };
-var DEV_TOOLS_BODY_STYLE = { fontSize: 12.5, lineHeight: 1.6, color: "var(--dsw-alias-label-secondary,#bbb)" };
-var DEV_TOOLS_ACTIONS_STYLE = { display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 };
-var DEV_TOOLS_CONFIRM = devToolsConfirmCopy();
-var DEV_TOOLS_DISABLE = devToolsDisableCopy();
-var BTN_PRIMARY_STYLE = {
-  background: "var(--dsw-alias-brand-primary-new-color,#4176e6)",
-  border: "none",
-  color: "#fff",
-  borderRadius: 8,
-  padding: "6px 13px",
-  fontSize: 12,
-  cursor: "pointer"
-};
-var BTN_GHOST_STYLE = {
-  ...BTN_PRIMARY_STYLE,
-  background: "transparent",
-  border: "1px solid var(--dsw-alias-border-l,#ffffff1f)",
-  color: "var(--dsw-alias-label-primary,#e7eaf0)"
-};
-var BTN_DANGER_STYLE = {
-  ...BTN_PRIMARY_STYLE,
-  background: "transparent",
-  border: "1px solid var(--dsw-alias-state-danger-primary,#e5534b)",
-  color: "var(--dsw-alias-state-danger-primary,#e5534b)"
-};
-var DANGER_NOTE_STYLE = {
-  ...NOTE_STYLE,
-  color: "var(--dsw-alias-state-danger-primary,#e5534b)"
-};
-async function nsSave(patch) {
-  await invoke2("save_desktop_settings", { patch });
-}
-async function nsGet() {
-  const d = await invoke2("get_desktop_settings_data");
-  return d.settings && typeof d.settings === "object" ? d.settings : {};
-}
-function normalizeRemote(input) {
-  const t = input.trim();
-  if (!t) return null;
-  if (/^https?:\/\//.test(t)) return t;
-  if (/^socks5:\/\//.test(t)) return t;
-  if (/^[A-Za-z0-9.-]+(:\d+)?$/.test(t)) return `https://${t}`;
-  return null;
-}
-function SectionBox({ title, children }) {
-  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: SECTION_STYLE, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: TITLE_STYLE, children: title }),
-    children
-  ] });
-}
-function PfBtn({
-  variant = "primary",
-  disabled = false,
-  onClick,
-  children,
-  style,
-  title
-}) {
-  const baseStyle = variant === "primary" ? BTN_PRIMARY_STYLE : variant === "ghost" ? BTN_GHOST_STYLE : BTN_DANGER_STYLE;
-  const cls = variant === "primary" ? "pf-btn" : `pf-btn ${variant}`;
-  return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-    "button",
-    {
-      type: "button",
-      className: cls,
-      disabled,
-      title,
-      onClick,
-      style: { ...baseStyle, ...style ?? {} },
-      children
-    }
-  );
-}
-function PortCell({
-  testId,
-  placeholder,
-  value,
-  onChange,
-  onEnter,
-  onSave
-}) {
-  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-      "input",
-      {
-        placeholder,
-        style: { ...INPUT_BASE_STYLE, width: 84 },
-        "data-desktop-settings": testId,
-        value,
-        onChange: (e) => onChange(e.target.value),
-        onKeyDown: (e) => {
-          if (e.key === "Enter") onEnter();
-        }
-      }
-    ),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", style: { marginLeft: 6 }, onClick: onSave, children: "\u4FDD\u5B58" })
-  ] });
-}
-function showToast(text, ok, tone = ok ? "ok" : "error") {
-  const palette = tone === "info" ? "background:rgba(96,165,250,.15);border:1px solid rgba(96,165,250,.6);color:#93c5fd" : tone === "ok" ? "background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.6);color:#4ade80" : "background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.6);color:#f87171";
-  const el = document.createElement("div");
-  el.style.cssText = `position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:999999;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:500;max-width:480px;box-shadow:0 4px 12px rgba(0,0,0,.4);cursor:pointer;backdrop-filter:blur(8px);${palette}`;
-  el.textContent = text;
-  el.addEventListener("click", () => el.remove());
-  document.body.appendChild(el);
-  if (ok) window.setTimeout(() => el.remove(), 5e3);
-}
-function DesktopSettingsPanel() {
-  const [proxy, setProxy] = (0, import_react3.useState)({
-    proxy_mode: "off",
-    proxy_url: "",
-    no_proxy: "",
-    proxy_user: "",
-    proxy_pass: ""
-  });
-  const [proxyEffective, setProxyEffective] = (0, import_react3.useState)(void 0);
-  const [desktop, setDesktop] = (0, import_react3.useState)({
-    remote_addr: null,
-    remote_list: [],
-    port: 3080,
-    profiles: []
-  });
-  const [msg, setMsg] = (0, import_react3.useState)(null);
-  const [busy, setBusy] = (0, import_react3.useState)(false);
-  (0, import_react3.useEffect)(() => {
-    if (msg && msg.ok) {
-      const t = window.setTimeout(() => setMsg(null), 4e3);
-      return () => window.clearTimeout(t);
-    }
-  }, [msg]);
-  const [sourceState, setSourceState] = (0, import_react3.useState)(null);
-  const [sourceError, setSourceError] = (0, import_react3.useState)(null);
-  const [newRemoteUrl, setNewRemoteUrl] = (0, import_react3.useState)("");
-  const [concurrencyInput, setConcurrencyInput] = (0, import_react3.useState)("3");
-  const concurrencyTouchedRef = (0, import_react3.useRef)(false);
-  const [muxHeartbeatInput, setMuxHeartbeatInput] = (0, import_react3.useState)("30000");
-  const [desktopLayoutOnPhones, setDesktopLayoutOnPhones] = (0, import_react3.useState)(false);
-  const [devToolsConfirmKind, setDevToolsConfirmKind] = (0, import_react3.useState)(null);
-  const [devTools, setDevTools] = (0, import_react3.useState)(false);
-  const [devToolsNote, setDevToolsNote] = (0, import_react3.useState)(null);
-  const [preventSleep, setPreventSleep] = (0, import_react3.useState)(true);
-  const [preventSleepNote, setPreventSleepNote] = (0, import_react3.useState)(null);
-  (0, import_react3.useEffect)(() => {
-    setDesktopLayoutOnPhones(desktop.desktop_layout_on_phones === true);
-    setPreventSleep(desktop.prevent_sleep !== false);
-    setDevTools(desktop.dev_tools === true);
-    const hb = desktop.mux_heartbeat_ms;
-    setMuxHeartbeatInput(typeof hb === "number" ? String(hb) : "30000");
-  }, [desktop]);
-  const handleToggleDevTools = (next) => {
-    const plan = planDevToolsUi(devTools, next);
-    if (plan.action === "idle") return;
-    setDevToolsConfirmKind(plan.action === "confirm-on" ? "on" : "off");
-  };
-  const saveDevToolsSetting = (on) => {
-    setDevToolsConfirmKind(null);
-    setDevTools(on);
-    void nsSave({ dev_tools: on }).then(() => invoke2("restart_dsh_service").catch(() => void 0)).then(() => setDevToolsNote(devToolsSavedNote(on))).catch((e) => {
-      setDevTools(!on);
-      setDevToolsNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`);
-    });
-  };
-  (0, import_react3.useEffect)(() => {
-    if (devToolsConfirmKind === null) return;
-    const onKey = (e) => {
-      if (e.key === "Escape") setDevToolsConfirmKind(null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [devToolsConfirmKind]);
-  const devToolsActiveConfirm = devToolsConfirmKind === "off" ? DEV_TOOLS_DISABLE : DEV_TOOLS_CONFIRM;
-  const [testResult, setTestResult] = (0, import_react3.useState)(null);
-  const [testBusy, setTestBusy] = (0, import_react3.useState)(false);
-  const [profilePorts, setProfilePorts] = (0, import_react3.useState)([]);
-  const [profilePortsStatus, setProfilePortsStatus] = (0, import_react3.useState)({ state: "loading", text: "\u52A0\u8F7D\u4E2D\u2026" });
-  const [profilePortInputs, setProfilePortInputs] = (0, import_react3.useState)({});
-  const [profilePortBoxNote, setProfilePortBoxNote] = (0, import_react3.useState)(null);
-  const [profileLaneInputs, setProfileLaneInputs] = (0, import_react3.useState)({});
-  const [profilePageInputs, setProfilePageInputs] = (0, import_react3.useState)({});
-  const [forwarderInput, setForwarderInput] = (0, import_react3.useState)("");
-  const [migrationSource, setMigrationSource] = (0, import_react3.useState)("");
-  const [migrationDest, setMigrationDest] = (0, import_react3.useState)("");
-  const [migrationRunning, setMigrationRunning] = (0, import_react3.useState)(false);
-  const [migrationProgress, setMigrationProgress] = (0, import_react3.useState)(null);
-  const [runtimeSource, setRuntimeSource] = (0, import_react3.useState)("github");
-  const [runtimeStatus, setRuntimeStatus] = (0, import_react3.useState)({ state: "loading", text: "\u8BFB\u53D6\u4E2D\u2026" });
-  const [runtimeCatalog, setRuntimeCatalog] = (0, import_react3.useState)(null);
-  const [runtimeDownloading, setRuntimeDownloading] = (0, import_react3.useState)({});
-  const [depProfiles, setDepProfiles] = (0, import_react3.useState)(null);
-  const [depRebuilding, setDepRebuilding] = (0, import_react3.useState)(null);
-  const [depNote, setDepNote] = (0, import_react3.useState)("");
-  const [depError, setDepError] = (0, import_react3.useState)(null);
-  const refreshDepStatus = (0, import_react3.useCallback)(async () => {
-    try {
-      const r = await invoke2("list_profile_dependency_status");
-      setDepProfiles(r?.profiles ?? []);
-    } catch (err) {
-      console.error("[desktop-settings] list_profile_dependency_status \u5931\u8D25\uFF1A", err);
-      setDepError(String(err));
-      setDepProfiles(null);
-    }
-  }, []);
-  import_react3.default.useEffect(() => {
-    void refreshDepStatus();
-  }, [refreshDepStatus]);
-  const handleRebuildDeps = (profile) => {
-    if (depRebuilding) return;
-    setDepRebuilding(profile);
-    setDepNote(`${profile}\uFF1A\u4F9D\u8D56\u91CD\u5EFA\u4E2D\uFF08\u7528\u5185\u7F6E pnpm \u91CD\u88C5\uFF0C\u53EF\u80FD\u9700\u8981\u51E0\u5206\u949F\uFF09\u2026`);
-    void invoke2("rebuild_profile_dependencies", { profile }).then(() => {
-      setDepNote(`${profile}\uFF1A\u4F9D\u8D56\u5DF2\u91CD\u5EFA\uFF0C\u91CD\u542F\u8BE5 profile \u540E\u751F\u6548\u3002`);
-      return refreshDepStatus();
-    }).catch((err) => setDepNote(`${profile}\uFF1A\u91CD\u5EFA\u5931\u8D25 \u2014\u2014 ${String(err)}`)).finally(() => setDepRebuilding(null));
-  };
-  const [removingVersion, setRemovingVersion] = (0, import_react3.useState)(null);
-  const [diagSummary, setDiagSummary] = (0, import_react3.useState)(null);
-  const [diagLogPath, setDiagLogPath] = (0, import_react3.useState)(null);
-  const [diagExport, setDiagExport] = (0, import_react3.useState)(null);
-  const [updateState, setUpdateState] = (0, import_react3.useState)(null);
-  const updateBusy = updateState !== null && (updateState.view.phase === "checking" || updateState.view.phase === "downloading" || updateState.view.phase === "preparing");
-  const runUpdate = (cmd) => {
-    void invoke2(cmd).then((snapshot) => {
-      setUpdateState(snapshot);
-      showToast(snapshot.view.label, snapshot.view.phase !== "error");
-    }).catch((e) => showToast(`\u66F4\u65B0\u5931\u8D25\uFF1A${String(e)}`, false));
-  };
-  (0, import_react3.useEffect)(() => {
-    let cancelled = false;
-    void invoke2("get_update_state").then((snapshot) => {
-      if (!cancelled) setUpdateState(snapshot);
-    }).catch(() => {
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  (0, import_react3.useEffect)(() => {
-    if (!updateBusy) return;
-    const timer = setInterval(() => {
-      void invoke2("get_update_state").then(setUpdateState).catch(() => {
-      });
-    }, 1e3);
-    return () => clearInterval(timer);
-  }, [updateBusy]);
-  const [dlProgress, setDlProgress] = (0, import_react3.useState)(null);
-  const [runtimeExpanded, setRuntimeExpanded] = (0, import_react3.useState)(false);
-  const [downloadBoxNote, setDownloadBoxNote] = (0, import_react3.useState)(null);
-  const [taskInfo, setTaskInfo] = (0, import_react3.useState)(null);
-  (0, import_react3.useEffect)(() => {
-    const timer = setInterval(() => {
-      void invoke2("task_status").then((t) => {
-        if (t.running || t.finished) setTaskInfo(t);
-      }).catch(() => {
-      });
-    }, 600);
-    return () => clearInterval(timer);
-  }, []);
-  (0, import_react3.useEffect)(() => {
-    ensureStyles();
-  }, []);
-  (0, import_react3.useEffect)(() => {
-    void invoke2("runtime_download_status").then((s) => {
-      if (s.active && s.version) {
-        setRuntimeDownloading((prev) => ({ ...prev, [s.version]: "downloading" }));
-      }
-    }).catch(() => {
-    });
-  }, []);
-  (0, import_react3.useEffect)(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const [ns, p, d] = await Promise.all([
-          nsGet(),
-          invoke2("get_proxy_settings"),
-          invoke2("get_desktop_settings_data")
-        ]);
-        if (cancelled) return;
-        void invoke2("get_diagnostics").then((r) => {
-          if (cancelled) return;
-          const summary = r.diagnostics?.summary;
-          if (typeof summary === "string" && summary !== "") setDiagSummary(summary);
-          const path = r.diagnostics?.logs?.shell?.path;
-          if (typeof path === "string" && path !== "") setDiagLogPath(path);
-        }).catch(() => {
-        });
-        setProxy({
-          proxy_mode: ns.proxy_mode || p.proxy_mode || "off",
-          proxy_url: ns.proxy_url || p.proxy_url || "",
-          no_proxy: ns.no_proxy || p.no_proxy || "",
-          proxy_user: ns.proxy_user || p.proxy_user || "",
-          proxy_pass: ns.proxy_pass || p.proxy_pass || ""
-        });
-        setProxyEffective(p.effective);
-        setDesktop({
-          ...d,
-          remote_addr: ns.remote_addr ?? d.remote_addr ?? null,
-          remote_list: ns.remote_list ?? d.remote_list ?? [],
-          port: ns.port || d.port || 3080,
-          mux_heartbeat_ms: d.mux_heartbeat_ms ?? null,
-          desktop_layout_on_phones: d.desktop_layout_on_phones ?? null,
-          prevent_sleep: d.prevent_sleep ?? null
-        });
-        const forwarderSaved = ns.lane_forwarder_port;
-        setForwarderInput(typeof forwarderSaved === "number" && forwarderSaved > 0 ? String(forwarderSaved) : "");
-        const savedInputs = (key) => {
-          const raw = ns[key];
-          const out = {};
-          if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-            for (const [k, n] of Object.entries(raw)) {
-              if (typeof n === "number" && n > 0) out[k] = String(n);
-            }
-          }
-          return out;
-        };
-        setProfilePortInputs(savedInputs("profile_ports"));
-        setProfileLaneInputs(savedInputs("profile_lane_ports"));
-        setProfilePageInputs(savedInputs("profile_page_ports"));
-        if (d.profiles.length > 0) {
-          const first = d.profiles[0];
-          if (first) {
-            setMigrationSource(first.name);
-            const other = d.profiles.find((pp) => pp.name !== first.name);
-            if (other) setMigrationDest(other.name);
-          }
-        }
-      } catch (err) {
-        if (cancelled) return;
-        setMsg({ ok: false, text: `\u8BFB\u53D6\u8BBE\u7F6E\u5931\u8D25\uFF1A${String(err)}` });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  const refreshSource = (0, import_react3.useCallback)(async () => {
-    setSourceError(null);
-    try {
-      const s = await invoke2("get_dsh_source");
-      setSourceState(s);
-    } catch (err) {
-      setSourceError(String(err));
-    }
-  }, []);
-  (0, import_react3.useEffect)(() => {
-    void refreshSource();
-  }, [refreshSource]);
-  (0, import_react3.useEffect)(() => {
-    invoke2("get_download_settings").then((s) => {
-      if (!concurrencyTouchedRef.current) setConcurrencyInput(String(s.concurrency));
-    }).catch(() => {
-    });
-  }, []);
-  (0, import_react3.useEffect)(() => {
-    let cancelled = false;
-    let attempt = 0;
-    const load = () => {
-      invoke2("list_profile_ports").then((rows) => {
-        if (cancelled) return;
-        setProfilePorts(rows);
-        setProfilePortsStatus({ state: "ok" });
-      }).catch((err) => {
-        if (cancelled) return;
-        if (attempt < 2) {
-          attempt += 1;
-          setProfilePortsStatus({ state: "loading", text: `\u52A0\u8F7D\u5931\u8D25\uFF0C\u91CD\u8BD5\u4E2D\uFF08${attempt}/2\uFF09\u2026` });
-          window.setTimeout(load, 800);
-        } else {
-          setProfilePortsStatus({
-            state: "error",
-            text: `\u7AEF\u53E3\u8868\u52A0\u8F7D\u5931\u8D25\uFF1A${String(err)}\uFF08\u8BF7\u91CD\u542F dsh \u540E\u91CD\u8BD5\uFF09`
-          });
-        }
-      });
-    };
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  const refreshRuntimes = (0, import_react3.useCallback)(async () => {
+// src/client/desktop-settings/cards/runtime-card.tsx
+var import_jsx_runtime15 = require("react/jsx-runtime");
+function RuntimeCard({ notify }) {
+  const [runtimeSource, setRuntimeSource] = (0, import_react14.useState)("github");
+  const [runtimeStatus, setRuntimeStatus] = (0, import_react14.useState)({ state: "loading", text: "\u8BFB\u53D6\u4E2D\u2026" });
+  const [runtimeCatalog, setRuntimeCatalog] = (0, import_react14.useState)(null);
+  const [runtimeDownloading, setRuntimeDownloading] = (0, import_react14.useState)({});
+  const [dlProgress, setDlProgress] = (0, import_react14.useState)(null);
+  const [runtimeExpanded, setRuntimeExpanded] = (0, import_react14.useState)(false);
+  const [removingVersion, setRemovingVersion] = (0, import_react14.useState)(null);
+  const refreshRuntimes = (0, import_react14.useCallback)(async () => {
     setRuntimeStatus({ state: "loading", text: "\u8BFB\u53D6\u7248\u672C\u76EE\u5F55\u4E2D\u2026" });
     try {
       const s = await invoke2("list_runtime_catalog", { source: runtimeSource });
@@ -1972,219 +2576,17 @@ function DesktopSettingsPanel() {
       setRuntimeStatus({ state: "error", text: `\u7248\u672C\u76EE\u5F55\u8BFB\u53D6\u5931\u8D25\uFF1A${String(err)}` });
     }
   }, [runtimeSource]);
-  (0, import_react3.useEffect)(() => {
+  (0, import_react14.useEffect)(() => {
+    void invoke2("runtime_download_status").then((s) => {
+      if (s.active && s.version) {
+        setRuntimeDownloading((prev) => ({ ...prev, [s.version]: "downloading" }));
+      }
+    }).catch(() => {
+    });
+  }, []);
+  (0, import_react14.useEffect)(() => {
     void refreshRuntimes();
   }, [refreshRuntimes]);
-  (0, import_react3.useEffect)(() => {
-    if (!migrationRunning) return;
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const st = await invoke2("migration_status");
-        if (cancelled) return;
-        if (st.running) {
-          setMigrationProgress({ copied: st.copied, total: st.total });
-          window.setTimeout(tick, 300);
-        } else {
-          window.setTimeout(tick, 300);
-        }
-      } catch {
-      }
-    };
-    void tick();
-    return () => {
-      cancelled = true;
-    };
-  }, [migrationRunning]);
-  const handleSelectRemote = (addr) => {
-    void (async () => {
-      try {
-        await nsSave({ remote_addr: addr });
-        await invoke2("restart_dsh_service");
-        setMsg({ ok: true, text: "\u5DF2\u5207\u6362 dsh \u670D\u52A1\u6765\u6E90\uFF0C\u6B63\u5728\u91CD\u542F\u2026" });
-      } catch (err) {
-        setMsg({ ok: false, text: `\u5207\u6362\u5931\u8D25\uFF1A${String(err)}` });
-      }
-    })();
-  };
-  const handleAddRemote = () => {
-    const addr = normalizeRemote(newRemoteUrl);
-    if (!addr) {
-      setMsg({ ok: false, text: "\u5730\u5740\u975E\u6CD5\uFF1A\u9700 dsh web \u5B8C\u6574 URL\uFF08\u542B token\uFF09\u6216 host[:port]" });
-      return;
-    }
-    void (async () => {
-      try {
-        const list = Array.isArray(desktop.remote_list) ? [...desktop.remote_list] : [];
-        if (!list.includes(addr)) list.push(addr);
-        await nsSave({ remote_list: list });
-        setNewRemoteUrl("");
-        setMsg({ ok: true, text: `\u5DF2\u65B0\u589E\u5730\u5740\uFF1A${addr}\uFF08\u672A\u5207\u6362\uFF0C\u8BF7\u5728\u4E0B\u62C9\u6846\u9009\u62E9\uFF09` });
-        await refreshData();
-      } catch (err) {
-        setMsg({ ok: false, text: `\u65B0\u589E\u5931\u8D25\uFF1A${String(err)}` });
-      }
-    })();
-  };
-  const handleRemoveRemote = (addr) => {
-    void (async () => {
-      try {
-        const list = (desktop.remote_list ?? []).filter((a) => a !== addr);
-        const patch = { remote_list: list };
-        if (desktop.remote_addr === addr) patch.remote_addr = null;
-        await nsSave(patch);
-        setMsg({ ok: true, text: `\u5DF2\u5220\u9664\uFF1A${addr}` });
-      } catch (err) {
-        setMsg({ ok: false, text: `\u5220\u9664\u5931\u8D25\uFF1A${String(err)}` });
-      }
-      await refreshData();
-    })();
-  };
-  const handleSwitchProfile = (name) => {
-    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
-      setMsg({ ok: false, text: "Profile \u540D\u4E0D\u5408\u6CD5" });
-      return;
-    }
-    void (async () => {
-      try {
-        await nsSave({ active_profile: name });
-        await invoke2("restart_dsh_service");
-        setMsg({ ok: true, text: `\u5DF2\u5207\u6362\u5230 Profile\u300C${name}\u300D\uFF0C\u6B63\u5728\u91CD\u542F\u2026` });
-      } catch (err) {
-        setMsg({ ok: false, text: `\u5207\u6362 Profile \u5931\u8D25\uFF1A${String(err)}` });
-      }
-    })();
-  };
-  const parsePortInput = (raw) => {
-    const v = Number(raw);
-    return !raw || Number.isNaN(v) || v < 1 || v > 65535 ? null : v;
-  };
-  const savePortSetting = (key, v, note) => {
-    void nsSave({ [key]: v }).then(() => setProfilePortBoxNote(note)).catch((e) => setProfilePortBoxNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`));
-  };
-  const handleSaveProfilePort = (profile) => {
-    const v = parsePortInput(profilePortInputs[profile] ?? "");
-    if (v === null) return;
-    savePortSetting(`profile_ports.${profile}`, v, `${profile} \u4E0A\u6E38\u7AEF\u53E3\u5DF2\u6539\u4E3A ${v}\uFF1B\u91CD\u542F\u8BE5 profile \u751F\u6548\u3002`);
-  };
-  const handleSaveProfileLanePort = (profile) => {
-    const v = parsePortInput(profileLaneInputs[profile] ?? "");
-    if (v === null) return;
-    savePortSetting(`profile_lane_ports.${profile}`, v, `${profile} lane \u7AEF\u53E3\u5DF2\u6539\u4E3A ${v}\uFF1B\u91CD\u542F\u8BE5 profile \u751F\u6548\u3002`);
-  };
-  const handleSaveProfilePagePort = (profile) => {
-    const v = parsePortInput(profilePageInputs[profile] ?? "");
-    if (v === null) return;
-    const ok = window.confirm(
-      `${profile} \u9875\u9762\u53E3\u5C06\u6539\u4E3A ${v}\uFF1A\u6362\u53E3\uFF1D\u6362\u6D4F\u89C8\u5668\u672C\u5730\u5B58\u50A8\uFF08localStorage/IndexedDB \u7559\u5728\u65E7\u53E3\uFF09\u3002\u786E\u8BA4\u4FEE\u6539\uFF1F`
-    );
-    if (!ok) return;
-    savePortSetting(`profile_page_ports.${profile}`, v, `${profile} \u9875\u9762\u53E3\u5DF2\u6539\u4E3A ${v}\uFF1B\u91CD\u542F\u8BE5 profile \u751F\u6548\u3002`);
-  };
-  const handleSaveForwarderPort = () => {
-    const v = parsePortInput(forwarderInput.trim());
-    if (v === null) return;
-    savePortSetting("lane_forwarder_port", v, `lane \u8F6C\u53D1\u5668\u7AEF\u53E3\u5DF2\u6539\u4E3A ${v}\uFF1B\u91CD\u542F\u58F3\u751F\u6548\u3002`);
-  };
-  const handleSaveConcurrency = () => {
-    const v = Math.max(1, Math.min(32, parseInt(concurrencyInput, 10) || 3));
-    void nsSave({ download_concurrency: v }).then(() => invoke2("set_download_concurrency", { value: v })).then(() => setDownloadBoxNote(`\u5DF2\u4FDD\u5B58\uFF1A\u5E76\u53D1\u4E0A\u9650 ${v}`)).catch(() => setDownloadBoxNote("\u4FDD\u5B58\u5931\u8D25\uFF08\u65E0 Tauri IPC\uFF1F\uFF09"));
-  };
-  const handleSaveMuxHeartbeat = () => {
-    const raw = muxHeartbeatInput.trim();
-    const parsed = raw === "" ? 3e4 : parseInt(raw, 10);
-    if (Number.isNaN(parsed) || parsed < 0) {
-      setDownloadBoxNote("\u5FC3\u8DF3\u95F4\u9694\u9700\u4E3A\u6574\u6570\u6BEB\u79D2\uFF080 = \u4E0D\u8986\u76D6\uFF0C\u56DE\u9000 dsh \u9ED8\u8BA4 2s\uFF09");
-      return;
-    }
-    const v = Math.min(6e5, parsed);
-    void nsSave({ mux_heartbeat_ms: v }).then(
-      () => setDownloadBoxNote(
-        v === 0 ? "\u5DF2\u4FDD\u5B58\uFF1A\u4E0D\u8986\u76D6\u5FC3\u8DF3\uFF08dsh \u9ED8\u8BA4 2s\uFF09\uFF0C\u91CD\u542F dsh \u751F\u6548\u3002" : `\u5DF2\u4FDD\u5B58\uFF1Amux \u5FC3\u8DF3 ${v}ms\uFF08dsh \u539F\u751F 2s\uFF09\uFF0C\u91CD\u542F dsh \u751F\u6548\u3002`
-      )
-    ).catch((e) => setDownloadBoxNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`));
-  };
-  const handleTogglePreventSleep = (next) => {
-    setPreventSleep(next);
-    void nsSave({ prevent_sleep: next }).then(
-      () => setPreventSleepNote(
-        next ? "\u5DF2\u4FDD\u5B58\uFF1A\u6709\u4F1A\u8BDD\u5728\u8DD1\u65F6\u963B\u6B62\u7CFB\u7EDF\u4F11\u7720\uFF08\u5C4F\u5E55\u4ECD\u4F1A\u7167\u5E38\u7184\u706D\uFF09\u3002" : "\u5DF2\u4FDD\u5B58\uFF1A\u4E0D\u518D\u963B\u6B62\u7CFB\u7EDF\u4F11\u7720\u3002"
-      )
-    ).catch((e) => setPreventSleepNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`));
-  };
-  const handleSaveMobileLayout = () => {
-    void nsSave({ desktop_layout_on_phones: desktopLayoutOnPhones }).then(
-      () => setDownloadBoxNote(
-        desktopLayoutOnPhones ? "\u5DF2\u4FDD\u5B58\uFF1A\u624B\u673A\u4F7F\u7528\u684C\u9762\u5E03\u5C40\uFF08\u4E0D\u52A0\u8F7D\u79FB\u52A8\u5E03\u5C40\u63D2\u4EF6\uFF09\uFF0C\u91CD\u542F dsh \u751F\u6548\u3002" : "\u5DF2\u4FDD\u5B58\uFF1A\u624B\u673A\u4F7F\u7528\u79FB\u52A8\u5E03\u5C40\uFF0C\u91CD\u542F dsh \u751F\u6548\u3002"
-      )
-    ).catch((e) => setDownloadBoxNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`));
-  };
-  const handleSaveProxy = () => {
-    if (busy) return;
-    setBusy(true);
-    void (async () => {
-      try {
-        await nsSave({
-          proxy_mode: proxy.proxy_mode,
-          proxy_url: proxy.proxy_url,
-          no_proxy: proxy.no_proxy,
-          proxy_user: proxy.proxy_user,
-          proxy_pass: proxy.proxy_pass
-        });
-        setMsg({ ok: true, text: "\u4EE3\u7406\u8BBE\u7F6E\u5DF2\u4FDD\u5B58\uFF1B\u4E0B\u6B21 dsh \u91CD\u542F\u540E\u751F\u6548\u3002" });
-      } catch (err) {
-        setMsg({ ok: false, text: `\u4FDD\u5B58\u5931\u8D25\uFF1A${String(err)}` });
-      } finally {
-        setBusy(false);
-      }
-    })();
-  };
-  const handleTestProxy = () => {
-    if (testBusy) return;
-    setTestBusy(true);
-    setTestResult(null);
-    void (async () => {
-      try {
-        const ms = await invoke2("test_proxy_connectivity", { url: proxy.proxy_url });
-        setTestResult(`\u8FDE\u63A5\u6210\u529F\uFF08${ms}ms\uFF09`);
-      } catch (err) {
-        setTestResult(`\u8FDE\u63A5\u5931\u8D25\uFF1A${String(err)}`);
-      } finally {
-        setTestBusy(false);
-      }
-    })();
-  };
-  const handleMigrate = () => {
-    if (!migrationDest) {
-      setMsg({ ok: false, text: "\u6CA1\u6709\u53EF\u9009\u7684\u76EE\u6807 profile\uFF08\u8BF7\u5148\u65B0\u5EFA\u4E00\u4E2A\uFF09" });
-      return;
-    }
-    const start = (overwrite) => {
-      setMigrationRunning(true);
-      setMigrationProgress({ copied: 0, total: 0 });
-      invoke2("migrate_profile", {
-        source: migrationSource,
-        dest: migrationDest,
-        overwrite
-      }).then((s) => {
-        setMigrationRunning(false);
-        setMigrationProgress(null);
-        showToast(s, true);
-      }).catch((e) => {
-        const m = String(e);
-        if (!overwrite && m.includes("\u9700\u786E\u8BA4\u8986\u76D6")) {
-          console.error("[migrate] \u9700\u786E\u8BA4\u8986\u76D6\uFF0C\u91CD\u8BD5 overwrite=true");
-          start(true);
-          return;
-        }
-        setMigrationRunning(false);
-        setMigrationProgress(null);
-        console.error("[migrate] \u5931\u8D25\uFF1A", m);
-        showToast(`\u8FC1\u79FB\u5931\u8D25\uFF1A${m}`, false);
-      });
-    };
-    start(false);
-  };
   const handleDownloadRuntime = (version) => {
     setRuntimeDownloading((prev) => ({ ...prev, [version]: "downloading" }));
     void invoke2("download_runtime", { source: runtimeSource, version }, { noTimeout: true }).then(() => {
@@ -2209,7 +2611,7 @@ function DesktopSettingsPanel() {
       if (r.cancelled) showToast(`\u6B63\u5728\u53D6\u6D88 dsh ${version} \u4E0B\u8F7D\u2026`, true, "info");
     }).catch((err) => showToast(`\u53D6\u6D88\u5931\u8D25\uFF1A${String(err)}`, false));
   };
-  (0, import_react3.useEffect)(() => {
+  (0, import_react14.useEffect)(() => {
     let sawActive = false;
     const timer = setInterval(() => {
       void invoke2("runtime_download_status").then((s) => {
@@ -2249,46 +2651,558 @@ function DesktopSettingsPanel() {
   }, [refreshRuntimes]);
   const handleSwitchRuntime = (version) => {
     void nsSave({ dsh_runtime: version, dsh_mode: "builtin" }).then(() => invoke2("restart_dsh_service")).then(() => {
-      setMsg({ ok: true, text: `\u5DF2\u5207\u6362\u5230 dsh ${version}\uFF0C\u6B63\u5728\u91CD\u542F\u2026` });
+      notify({ ok: true, text: `\u5DF2\u5207\u6362\u5230 dsh ${version}\uFF0C\u6B63\u5728\u91CD\u542F\u2026` });
       void refreshRuntimes();
-    }).catch((err) => setMsg({ ok: false, text: `\u5207\u6362\u5931\u8D25\uFF1A${String(err)}` }));
+    }).catch((err) => notify({ ok: false, text: `\u5207\u6362\u5931\u8D25\uFF1A${String(err)}` }));
   };
   const handleRemoveRuntime = (version) => {
     if (removingVersion) return;
     if (!window.confirm(`\u5378\u8F7D\u8FD0\u884C\u65F6 dsh ${version}\uFF1F\u5C06\u5220\u9664\u672C\u5730\u5DF2\u4E0B\u8F7D\u6587\u4EF6\uFF0C\u4E0D\u53EF\u6062\u590D\u3002`)) return;
     setRemovingVersion(version);
     invoke2("remove_runtime", { version }).then(() => {
-      setMsg({ ok: true, text: `\u5DF2\u5378\u8F7D\u8FD0\u884C\u65F6 dsh ${version}` });
+      notify({ ok: true, text: `\u5DF2\u5378\u8F7D\u8FD0\u884C\u65F6 dsh ${version}` });
       void refreshRuntimes();
-    }).catch((err) => setMsg({ ok: false, text: `\u5378\u8F7D\u5931\u8D25\uFF1A${String(err)}` })).finally(() => setRemovingVersion(null));
+    }).catch((err) => notify({ ok: false, text: `\u5378\u8F7D\u5931\u8D25\uFF1A${String(err)}` })).finally(() => setRemovingVersion(null));
   };
-  const refreshData = (0, import_react3.useCallback)(async () => {
+  return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(SectionBox, { title: "dsh \u8FD0\u884C\u65F6\uFF08\u7248\u672C\u4E0B\u8F7D / \u5207\u6362\uFF09", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+      ThemeSelect,
+      {
+        style: { marginBottom: 8 },
+        value: runtimeSource,
+        onChange: (v) => setRuntimeSource(v),
+        options: [
+          { value: "github", label: "\u4E0B\u8F7D\u6E90\uFF1AGitHub Releases" },
+          { value: "npm", label: "\u4E0B\u8F7D\u6E90\uFF1Anpm registry" }
+        ]
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(PfBtn, { variant: "ghost", onClick: () => void refreshRuntimes(), children: "\u5237\u65B0\u7248\u672C\u76EE\u5F55" }),
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { style: { marginTop: 8 }, children: [
+      runtimeStatus.state === "error" && runtimeStatus.text && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: DANGER_NOTE_STYLE, children: runtimeStatus.text }),
+      runtimeCatalog && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(import_jsx_runtime15.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: { marginBottom: 6 }, children: currentRuntimeLine({
+          selected: runtimeCatalog.selected,
+          builtin: runtimeCatalog.builtin,
+          running: runtimeCatalog.running
+        }) }),
+        runtimeCatalog.note && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: { ...DANGER_NOTE_STYLE, marginBottom: 6, whiteSpace: "pre-wrap" }, children: `\u26A0 ${runtimeCatalog.note}` }),
+        (() => {
+          const seen = /* @__PURE__ */ new Set();
+          const heads = [];
+          for (const ch of ["latest", "alpha", "rc"]) {
+            const e = runtimeCatalog.catalog.find((c) => c.channel === ch);
+            if (e && !seen.has(e.version)) {
+              seen.add(e.version);
+              heads.push(e);
+            }
+          }
+          const installedPinned = runtimeCatalog.catalog.filter(
+            (c) => !seen.has(c.version) && runtimeCatalog.installed.some((i) => i.version === c.version)
+          );
+          const rest = runtimeCatalog.catalog.filter((c) => !seen.has(c.version));
+          const installedOnly = runtimeCatalog.installed.filter((i) => !runtimeCatalog.catalog.some((c) => c.version === i.version)).map((i) => ({ version: i.version, channel: "" }));
+          if (runtimeCatalog.builtin && !runtimeCatalog.catalog.some((c) => c.version === runtimeCatalog.builtin) && !installedOnly.some((i) => i.version === runtimeCatalog.builtin)) {
+            installedOnly.unshift({ version: runtimeCatalog.builtin, channel: "" });
+          }
+          const visible = runtimeExpanded ? [...runtimeCatalog.catalog, ...installedOnly] : [...heads, ...installedPinned, ...installedOnly.filter((i) => !seen.has(i.version))];
+          return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(import_jsx_runtime15.Fragment, { children: [
+            visible.map((c) => {
+              const installed = runtimeCatalog.installed.some((i) => i.version === c.version);
+              const isBuiltin = runtimeCatalog.builtin === c.version;
+              const isRunning = runtimeCatalog.running?.version !== null && runtimeCatalog.running?.version !== void 0 && runtimeCatalog.running.version === c.version;
+              const available = installed || isBuiltin || isRunning;
+              const isCurrent = isRuntimeInUse(
+                {
+                  selected: runtimeCatalog.selected,
+                  builtin: runtimeCatalog.builtin,
+                  running: runtimeCatalog.running
+                },
+                c.version
+              );
+              const tags = [];
+              if (c.channel) tags.push(c.channel);
+              if (isBuiltin) tags.push("\u5185\u7F6E");
+              else if (installed) tags.push("\u5DF2\u4E0B\u8F7D");
+              if (isRunning) tags.push("\u8FD0\u884C\u4E2D");
+              const downloadState = runtimeDownloading[c.version];
+              const failedReason = runtimeDownloadHint(downloadState);
+              const pct = dlProgress && dlProgress.version === c.version && dlProgress.resolved > 0 ? Math.min(100, Math.round(dlProgress.downloaded / dlProgress.resolved * 100)) : 0;
+              return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { style: { margin: "4px 0" }, children: [
+                /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(
+                  "div",
+                  {
+                    style: {
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center"
+                    },
+                    children: [
+                      /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { children: `${c.version}${tags.length ? "\uFF08" + tags.join(" \xB7 ") + "\uFF09" : ""}` }),
+                      !available ? /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { style: { display: "flex", gap: 6, alignItems: "center" }, children: [
+                        /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+                          PfBtn,
+                          {
+                            variant: "ghost",
+                            disabled: downloadState === "downloading",
+                            onClick: () => handleDownloadRuntime(c.version),
+                            children: runtimeDownloadButtonLabel(downloadState)
+                          }
+                        ),
+                        downloadState === "downloading" && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(PfBtn, { variant: "ghost", onClick: () => handleCancelRuntimeDownload(c.version), children: "\u53D6\u6D88" })
+                      ] }) : /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { style: { display: "flex", gap: 6, alignItems: "center" }, children: [
+                        /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+                          PfBtn,
+                          {
+                            variant: "ghost",
+                            disabled: isCurrent,
+                            onClick: () => handleSwitchRuntime(c.version),
+                            children: isCurrent ? "\u4F7F\u7528\u4E2D" : "\u5207\u6362\u5230\u6B64\u7248\u672C"
+                          }
+                        ),
+                        !isBuiltin && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+                          PfBtn,
+                          {
+                            variant: "danger",
+                            disabled: removingVersion !== null || isRunning || runtimeCatalog.selected === c.version,
+                            title: isRunning ? "\u6B63\u5728\u8FD0\u884C\u7684\u7248\u672C\u4E0D\u53EF\u5378\u8F7D" : runtimeCatalog.selected === c.version ? "\u4F7F\u7528\u4E2D\u7684\u7248\u672C\u4E0D\u53EF\u5378\u8F7D\uFF0C\u8BF7\u5148\u5207\u6362" : "\u5220\u9664\u672C\u5730\u5DF2\u4E0B\u8F7D\u7684\u8FD0\u884C\u65F6",
+                            onClick: () => handleRemoveRuntime(c.version),
+                            children: removingVersion === c.version ? "\u5378\u8F7D\u4E2D\u2026" : "\u5378\u8F7D"
+                          }
+                        )
+                      ] })
+                    ]
+                  }
+                ),
+                downloadState === "downloading" && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { style: { marginTop: 4 }, children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+                    "div",
+                    {
+                      style: {
+                        height: 6,
+                        borderRadius: 4,
+                        background: "var(--dsw-alias-bg-base,#111)",
+                        overflow: "hidden"
+                      },
+                      children: /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+                        "div",
+                        {
+                          style: {
+                            height: "100%",
+                            width: `${pct}%`,
+                            background: "var(--dsw-alias-state-accent-primary,#3b82f6)",
+                            transition: "width .3s"
+                          }
+                        }
+                      )
+                    }
+                  ),
+                  /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: NOTE_STYLE, children: dlProgress && dlProgress.version === c.version ? `\u5B89\u88C5\u4F9D\u8D56\uFF1A\u5DF2\u4E0B\u8F7D ${dlProgress.downloaded} / ${dlProgress.resolved || "\u2026"} \u4E2A\u5305${dlProgress.resolved > 0 ? `\uFF08${pct}%\uFF09` : ""}` : "\u51C6\u5907\u4E2D\u2026" })
+                ] }),
+                failedReason && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+                  "div",
+                  {
+                    style: {
+                      // #97：取消是中性终态，不能穿红色警告色、也不能顶着「下载失败：」的前缀
+                      ...downloadState !== void 0 && typeof downloadState === "object" && "cancelled" in downloadState ? NOTE_STYLE : DANGER_NOTE_STYLE,
+                      marginTop: 4,
+                      whiteSpace: "pre-wrap"
+                    },
+                    children: failedReason
+                  }
+                )
+              ] }, c.version);
+            }),
+            rest.length > 0 && !runtimeExpanded && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(PfBtn, { variant: "ghost", style: { marginTop: 4 }, onClick: () => setRuntimeExpanded(true), children: [
+              "\u5C55\u5F00\u5168\u90E8 ",
+              runtimeCatalog.catalog.length,
+              " \u4E2A\u7248\u672C \u25BE"
+            ] }),
+            runtimeExpanded && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(PfBtn, { variant: "ghost", style: { marginTop: 4 }, onClick: () => setRuntimeExpanded(false), children: "\u6536\u8D77\u7248\u672C\u5217\u8868 \u25B4" })
+          ] });
+        })()
+      ] })
+    ] })
+  ] });
+}
+
+// src/client/desktop-settings/cards/service-address-card.tsx
+var import_react15 = require("react");
+
+// src/client/desktop-settings/format.ts
+function fmtBytes2(bytes) {
+  if (bytes === null || !Number.isFinite(bytes) || bytes <= 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+function normalizeRemote(input) {
+  const t = input.trim();
+  if (!t) return null;
+  if (/^https?:\/\//.test(t)) return t;
+  if (/^socks5:\/\//.test(t)) return t;
+  if (/^[A-Za-z0-9.-]+(:\d+)?$/.test(t)) return `https://${t}`;
+  return null;
+}
+
+// src/client/desktop-settings/cards/service-address-card.tsx
+var import_jsx_runtime16 = require("react/jsx-runtime");
+function ServiceAddressCard({
+  desktop,
+  refreshData,
+  notify
+}) {
+  const [newRemoteUrl, setNewRemoteUrl] = (0, import_react15.useState)("");
+  const handleSelectRemote = (addr) => {
+    void (async () => {
+      try {
+        await nsSave({ remote_addr: addr });
+        await invoke2("restart_dsh_service");
+        notify({ ok: true, text: "\u5DF2\u5207\u6362 dsh \u670D\u52A1\u6765\u6E90\uFF0C\u6B63\u5728\u91CD\u542F\u2026" });
+      } catch (err) {
+        notify({ ok: false, text: `\u5207\u6362\u5931\u8D25\uFF1A${String(err)}` });
+      }
+    })();
+  };
+  const handleAddRemote = () => {
+    const addr = normalizeRemote(newRemoteUrl);
+    if (!addr) {
+      notify({ ok: false, text: "\u5730\u5740\u975E\u6CD5\uFF1A\u9700 dsh web \u5B8C\u6574 URL\uFF08\u542B token\uFF09\u6216 host[:port]" });
+      return;
+    }
+    void (async () => {
+      try {
+        const list = Array.isArray(desktop.remote_list) ? [...desktop.remote_list] : [];
+        if (!list.includes(addr)) list.push(addr);
+        await nsSave({ remote_list: list });
+        setNewRemoteUrl("");
+        notify({ ok: true, text: `\u5DF2\u65B0\u589E\u5730\u5740\uFF1A${addr}\uFF08\u672A\u5207\u6362\uFF0C\u8BF7\u5728\u4E0B\u62C9\u6846\u9009\u62E9\uFF09` });
+        await refreshData();
+      } catch (err) {
+        notify({ ok: false, text: `\u65B0\u589E\u5931\u8D25\uFF1A${String(err)}` });
+      }
+    })();
+  };
+  const handleRemoveRemote = (addr) => {
+    void (async () => {
+      try {
+        const list = (desktop.remote_list ?? []).filter((a) => a !== addr);
+        const patch = { remote_list: list };
+        if (desktop.remote_addr === addr) patch.remote_addr = null;
+        await nsSave(patch);
+        notify({ ok: true, text: `\u5DF2\u5220\u9664\uFF1A${addr}` });
+      } catch (err) {
+        notify({ ok: false, text: `\u5220\u9664\u5931\u8D25\uFF1A${String(err)}` });
+      }
+      await refreshData();
+    })();
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)(SectionBox, { title: "dsh \u670D\u52A1\u5730\u5740", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+      ThemeSelect,
+      {
+        style: { marginBottom: 8 },
+        value: desktop.remote_addr ?? "",
+        onChange: (v) => handleSelectRemote(v || null),
+        options: [
+          { value: "", label: "\u672C\u5730\uFF08127.0.0.1\uFF09" },
+          ...(desktop.remote_list ?? []).map((addr) => ({ value: addr, label: addr }))
+        ]
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { style: ROW_STYLE, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+        "input",
+        {
+          placeholder: "\u65B0\u589E\uFF1Adsh web \u6253\u5370\u7684\u5B8C\u6574 URL\uFF08\u542B token\uFF09\u6216 host[:port]",
+          className: "pf-input",
+          style: FLEX_1_STYLE,
+          "data-desktop-settings": "remote-add",
+          value: newRemoteUrl,
+          onChange: (e) => setNewRemoteUrl(e.target.value.trim())
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(PfBtn, { variant: "ghost", onClick: handleAddRemote, children: "\u65B0\u589E" })
+    ] }),
+    desktop.remote_list.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }, children: desktop.remote_list.map((addr) => /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)(
+      PfBtn,
+      {
+        variant: "danger",
+        style: { fontSize: 11 },
+        onClick: () => handleRemoveRemote(addr),
+        children: [
+          "\u5220\u9664\uFF1A",
+          addr
+        ]
+      },
+      addr
+    )) }),
+    /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { style: NOTE_STYLE, children: "\u9009\u62E9\u8FDC\u7A0B\u5730\u5740\u540E\u7ACB\u5373\u6309\u5F53\u524D\u6A21\u5F0F\u91CD\u542F dsh\uFF1B\u65B0\u589E/\u5220\u9664\u4EC5\u6539\u5217\u8868\uFF0C\u91CD\u542F\u540E\u751F\u6548\u3002" }),
+    /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { style: NOTE_STYLE, children: "\u6B64\u5904\u7684\u5730\u5740\u662F\u684C\u9762\u58F3\u8FDE\u63A5\u7684 dsh \u670D\u52A1\u6765\u6E90\uFF08\u58F3\u5C06\u76F4\u8FDE\u8BE5\u5730\u5740\uFF0C\u4E0D\u518D\u62C9\u8D77\u672C\u5730\u670D\u52A1\uFF09\uFF1B\u82E5\u8981\u7ED9\u624B\u673A/\u5176\u5B83\u8BBE\u5907\u8FDE\u63A5\u672C\u673A\uFF0C\u8BF7\u7528\u300C\u624B\u673A\u8BBF\u95EE \u2192 \u8FDC\u7A0B\u8BBF\u95EE\u300D\u3002" })
+  ] });
+}
+
+// src/client/desktop-settings/cards/source-card.tsx
+var import_react16 = require("react");
+var import_jsx_runtime17 = require("react/jsx-runtime");
+function SourceCard() {
+  const [sourceState, setSourceState] = (0, import_react16.useState)(null);
+  const [sourceError, setSourceError] = (0, import_react16.useState)(null);
+  const refreshSource = (0, import_react16.useCallback)(async () => {
+    setSourceError(null);
     try {
-      const d = await invoke2("get_desktop_settings_data");
-      setDesktop(d);
-    } catch {
+      const s = await invoke2("get_dsh_source");
+      setSourceState(s);
+    } catch (err) {
+      setSourceError(String(err));
     }
   }, []);
+  (0, import_react16.useEffect)(() => {
+    void refreshSource();
+  }, [refreshSource]);
   const sourceInfoText = (() => {
     if (!sourceState) return "";
     const parts = [];
     if (sourceState.running) {
       const runVer = sourceState.running.version || (sourceState.builtin?.dsh_version ?? "");
       const origin = sourceState.running.origin === "shell" ? "\u672C\u58F3 spawn" : "\u590D\u7528\u63A5\u5165";
-      parts.push(
-        `\u5F53\u524D\u8FD0\u884C\uFF1A\u5185\u7F6E dsh ${runVer}\uFF08${origin} \xB7 port ${sourceState.running.port}\uFF09`
-      );
+      parts.push(`\u5F53\u524D\u8FD0\u884C\uFF1A\u5185\u7F6E dsh ${runVer}\uFF08${origin} \xB7 port ${sourceState.running.port}\uFF09`);
     } else {
       parts.push("\u5F53\u524D\u65E0\u8FD0\u884C\u4E2D\u7684 dsh \u5B9E\u4F8B\uFF1B\u4E0B\u6B21\u542F\u52A8\u5C06\u4F7F\u7528\u5185\u7F6E\u6811");
     }
     if (sourceState.builtin) parts.push(`\u5185\u7F6E\u53EF\u7528\uFF1Adsh ${sourceState.builtin.dsh_version}`);
     return parts.join(" \xB7 ");
   })();
-  const migrationDestOptions = desktop.profiles.filter((p) => p.name !== migrationSource);
-  const activeProfile = desktop.profiles.find((p) => p.active);
-  const profileSelectValue = activeProfile?.name ?? desktop.profiles[0]?.name ?? "";
-  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { "data-desktop-settings": "", style: ROOT_STYLE, children: [
-    taskInfo && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(SectionBox, { title: "dsh \u6765\u6E90", children: [
+    sourceState ? /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { style: NOTE_STYLE, children: sourceInfoText }) : sourceError ? /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { style: DANGER_NOTE_STYLE, children: [
+      "\u68C0\u6D4B\u5931\u8D25\uFF1A",
+      sourceError
+    ] }) : /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { style: NOTE_STYLE, children: "\u68C0\u6D4B\u4E2D\u2026" }),
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { style: { marginTop: 8 }, children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(PfBtn, { variant: "ghost", onClick: () => void refreshSource(), children: "\u91CD\u65B0\u68C0\u6D4B" }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { style: NOTE_STYLE, children: "\u5185\u7F6E\uFF1A\u968F\u5E94\u7528\u5206\u53D1\u7684 dsh \u4F9D\u8D56\u6811 + Node\uFF0C\u76F4\u8C03\u5185\u90E8\u542F\u52A8\u63A5\u53E3\uFF08\u4E0D\u4F9D\u8D56\u7CFB\u7EDF\u73AF\u5883\uFF09\u3002" })
+  ] });
+}
+
+// src/client/desktop-settings/cards/update-card.tsx
+var import_react17 = require("react");
+
+// src/client/update-notice-settings.ts
+var KIND_LABELS = {
+  shell: "\u684C\u9762\u58F3",
+  runtime: "DSH \u8FD0\u884C\u65F6"
+};
+var isRecord2 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var versionOrNull = (value) => typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+function parseUpdateNoticeState(raw) {
+  if (!isRecord2(raw)) return null;
+  const ignored = Array.isArray(raw.ignored) ? [...new Set(raw.ignored.filter((v) => typeof v === "string" && v.trim() !== "").map((v) => v.trim()))] : [];
+  const last = isRecord2(raw.lastNotified) ? raw.lastNotified : {};
+  return {
+    enabled: raw.enabled !== false,
+    ignored,
+    lastNotified: { shell: versionOrNull(last.shell), runtime: versionOrNull(last.runtime) }
+  };
+}
+function parseIgnoredKey(key) {
+  const at = key.indexOf(":");
+  if (at <= 0) return { kind: null, version: key };
+  const prefix = key.slice(0, at);
+  const version = key.slice(at + 1).trim();
+  if (version === "") return { kind: null, version: key };
+  return prefix === "shell" || prefix === "runtime" ? { kind: prefix, version } : { kind: null, version: key };
+}
+function ignoredRows(ignored) {
+  const rows = [...new Set(ignored)].map((key) => {
+    const { kind, version } = parseIgnoredKey(key);
+    return { key, kind, version, label: kind === null ? key : `${KIND_LABELS[kind]} ${version}` };
+  });
+  const rank = (row) => row.kind === "shell" ? 0 : row.kind === "runtime" ? 1 : 2;
+  return rows.sort((a, b) => rank(a) - rank(b) || b.version.localeCompare(a.version, void 0, { numeric: true }));
+}
+function updateNoticeEnabledHint(enabled) {
+  return enabled ? "\u5E94\u7528\u542F\u52A8\u540E\u4F1A\u68C0\u67E5\u684C\u9762\u58F3\u4E0E DSH \u8FD0\u884C\u65F6\u7248\u672C\uFF0C\u6709\u65B0\u7248\u672C\u65F6\u5728\u5E94\u7528\u5185\u5F39\u7A97\u63D0\u9192\uFF08\u540C\u4E00\u7248\u672C\u53EA\u63D0\u9192\u4E00\u6B21\uFF0C\u51FA\u73B0\u66F4\u9AD8\u7248\u672C\u624D\u518D\u5F39\uFF09\u3002\u6258\u76D8\u91CC\u7684\u300C\u68C0\u67E5\u66F4\u65B0\u300D\u968F\u65F6\u53EF\u7528\u3002" : "\u5173\u6389\u540E\u542F\u52A8\u4E0D\u518D\u5F39\u63D0\u9192\u3002\u6258\u76D8\u91CC\u7684\u300C\u68C0\u67E5\u66F4\u65B0\u300D\u968F\u65F6\u53EF\u7528\u2014\u2014\u624B\u52A8\u68C0\u67E5\u4E0D\u53D7\u8FD9\u4E2A\u5F00\u5173\u7EA6\u675F\u3002";
+}
+function ignoredEmptyHint() {
+  return "\u6CA1\u6709\u88AB\u5FFD\u7565\u7684\u7248\u672C\u3002";
+}
+
+// src/client/desktop-settings/cards/update-card.tsx
+var import_jsx_runtime18 = require("react/jsx-runtime");
+function UpdateCard() {
+  const [updateState, setUpdateState] = (0, import_react17.useState)(null);
+  const updateBusy = updateState !== null && (updateState.view.phase === "checking" || updateState.view.phase === "downloading" || updateState.view.phase === "preparing");
+  const runUpdate = (cmd) => {
+    void invoke2(cmd).then((snapshot) => {
+      setUpdateState(snapshot);
+      showToast(snapshot.view.label, snapshot.view.phase !== "error");
+    }).catch((e) => showToast(`\u66F4\u65B0\u5931\u8D25\uFF1A${String(e)}`, false));
+  };
+  (0, import_react17.useEffect)(() => {
+    let cancelled = false;
+    void invoke2("get_update_state").then((snapshot) => {
+      if (!cancelled) setUpdateState(snapshot);
+    }).catch(() => {
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  (0, import_react17.useEffect)(() => {
+    if (!updateBusy) return;
+    const timer = setInterval(() => {
+      void invoke2("get_update_state").then(setUpdateState).catch(() => {
+      });
+    }, 1e3);
+    return () => clearInterval(timer);
+  }, [updateBusy]);
+  const [updateNotice, setUpdateNotice] = (0, import_react17.useState)(null);
+  const [updateNoticeError, setUpdateNoticeError] = (0, import_react17.useState)(null);
+  const refreshUpdateNotice = () => {
+    void invoke2("get_update_notice_state").then((raw) => {
+      setUpdateNotice(parseUpdateNoticeState(raw));
+      setUpdateNoticeError(null);
+    }).catch((e) => setUpdateNoticeError(String(e)));
+  };
+  (0, import_react17.useEffect)(() => {
+    refreshUpdateNotice();
+  }, []);
+  const afterUpdateNoticeWrite = (raw) => {
+    setUpdateNotice(parseUpdateNoticeState(raw));
+    setUpdateNoticeError(null);
+  };
+  const failUpdateNoticeWrite = (e) => setUpdateNoticeError(String(e));
+  const handleToggleUpdateNotice = (enabled) => {
+    setUpdateNotice((prev) => prev === null ? prev : { ...prev, enabled });
+    void invoke2("set_update_notice_enabled", { enabled }).then(afterUpdateNoticeWrite).catch((e) => {
+      failUpdateNoticeWrite(e);
+      refreshUpdateNotice();
+    });
+  };
+  const handleRestoreIgnored = (row) => {
+    if (row.kind === null) return;
+    void invoke2("restore_update_notice", {
+      targets: [{ kind: row.kind, version: row.version }]
+    }).then(afterUpdateNoticeWrite).catch(failUpdateNoticeWrite);
+  };
+  const handleClearIgnored = () => {
+    void invoke2("clear_update_notice_ignored").then(afterUpdateNoticeWrite).catch(failUpdateNoticeWrite);
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(SectionBox, { title: "\u5E94\u7528\u66F4\u65B0", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: updateState === null ? "\u8BFB\u53D6\u4E2D\u2026" : `\u5F53\u524D\u7248\u672C ${updateState.view.current || "\u672A\u77E5"}${updateState.view.channel ? `\uFF08${updateState.view.channel}\uFF09` : ""} \xB7 ${updateState.view.label}` }),
+    updateState !== null && updateState.view.message !== "" && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: updateState.view.message }),
+    updateState !== null && updateState.actions.hint !== "" && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: updateState.actions.hint }),
+    updateState !== null && !updateState.available && updateState.reason !== "" && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: updateState.reason }),
+    updateState !== null && updateState.view.error !== "" && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: DANGER_NOTE_STYLE, children: updateState.view.error }),
+    updateBusy && updateState !== null && updateState.view.progress !== null && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { style: NOTE_STYLE, children: [
+      "\u8FDB\u5EA6 ",
+      updateState.view.progress,
+      "%",
+      updateState.view.totalBytes !== null ? `\uFF08${fmtBytes2(updateState.view.bytesDownloaded)} / ${fmtBytes2(updateState.view.totalBytes)}\uFF09` : ""
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { style: { display: "flex", gap: 8, marginTop: 8 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
+        PfBtn,
+        {
+          variant: "ghost",
+          disabled: updateState === null || !updateState.actions.canCheck,
+          onClick: () => runUpdate("check_update"),
+          children: "\u68C0\u67E5\u66F4\u65B0"
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
+        PfBtn,
+        {
+          variant: "ghost",
+          disabled: updateState === null || !updateState.actions.canDownload,
+          onClick: () => runUpdate("download_update"),
+          children: "\u4E0B\u8F7D\u66F4\u65B0"
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
+        PfBtn,
+        {
+          variant: "ghost",
+          disabled: updateState === null || !updateState.actions.canApply,
+          onClick: () => runUpdate("apply_update"),
+          children: "\u91CD\u542F\u5E76\u5B89\u88C5"
+        }
+      )
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: { ...ROW_STYLE, marginTop: 16 }, children: /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
+        "input",
+        {
+          type: "checkbox",
+          "data-desktop-settings": "update-notice-enabled",
+          checked: updateNotice?.enabled ?? false,
+          disabled: updateNotice === null,
+          onChange: (e) => handleToggleUpdateNotice(e.target.checked)
+        }
+      ),
+      "\u542F\u52A8\u65F6\u6709\u65B0\u7248\u672C\u5C31\u63D0\u9192\uFF08\u7F3A\u7701\u5F00\uFF09"
+    ] }) }),
+    updateNoticeError !== null && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: DANGER_NOTE_STYLE, children: updateNoticeError }),
+    updateNotice !== null && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: updateNoticeEnabledHint(updateNotice.enabled) }),
+    updateNotice !== null && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { style: { marginTop: 8 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: { fontWeight: 600, marginBottom: 4 }, children: "\u5DF2\u5FFD\u7565\u7684\u7248\u672C" }),
+      (() => {
+        const rows = ignoredRows(updateNotice.ignored);
+        if (rows.length === 0) return /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: ignoredEmptyHint() });
+        return /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { children: [
+          rows.map((row) => /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { style: { ...ROW_STYLE, marginBottom: 4 }, children: [
+            /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { style: FLEX_1_STYLE, children: row.label }),
+            /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
+              PfBtn,
+              {
+                variant: "ghost",
+                disabled: row.kind === null,
+                onClick: () => handleRestoreIgnored(row),
+                children: "\u6062\u590D"
+              }
+            )
+          ] }, row.key)),
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: "\u6807\u300C\u672A\u77E5\u6765\u6E90\u300D\u7684\u6761\u76EE\u662F\u65E9\u671F\u683C\u5F0F\u5199\u7684\uFF0C\u6CA1\u6CD5\u5355\u72EC\u6062\u590D\uFF0C\u7528\u300C\u6E05\u7A7A\u5168\u90E8\u300D\u4E00\u5E76\u6E05\u6389\u3002" }),
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: { marginTop: 4 }, children: /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(PfBtn, { variant: "ghost", onClick: handleClearIgnored, children: "\u6E05\u7A7A\u5168\u90E8" }) })
+        ] });
+      })()
+    ] })
+  ] });
+}
+
+// src/client/desktop-settings.tsx
+var import_jsx_runtime19 = require("react/jsx-runtime");
+function DesktopSettingsPanel() {
+  const [msg, setMsg] = (0, import_react18.useState)(null);
+  const notify = (0, import_react18.useCallback)((m) => setMsg(m), []);
+  (0, import_react18.useEffect)(() => {
+    if (msg && msg.ok) {
+      const t = window.setTimeout(() => setMsg(null), 4e3);
+      return () => window.clearTimeout(t);
+    }
+  }, [msg]);
+  const [taskInfo, setTaskInfo] = (0, import_react18.useState)(null);
+  (0, import_react18.useEffect)(() => {
+    const timer = setInterval(() => {
+      void invoke2("task_status").then((t) => {
+        if (t.running || t.finished) setTaskInfo(t);
+      }).catch(() => {
+      });
+    }, 600);
+    return () => clearInterval(timer);
+  }, []);
+  const [downloadBoxNote, setDownloadBoxNote] = (0, import_react18.useState)(null);
+  (0, import_react18.useEffect)(() => {
+    ensureStyles();
+  }, []);
+  const { data, loaded, refreshData } = useInitialData((text) => notify({ ok: false, text }));
+  const { desktop, proxy, proxyEffective, loopbackAggregation } = data;
+  return /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { "data-desktop-settings": "", style: ROOT_STYLE, children: [
+    taskInfo && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)(
       "div",
       {
         style: {
@@ -2300,14 +3214,14 @@ function DesktopSettingsPanel() {
           border: taskInfo.finished ? taskInfo.error ? "1px solid rgba(239,68,68,.6)" : "1px solid rgba(34,197,94,.5)" : "1px solid var(--dsw-alias-border-neutral,#2a2e37)"
         },
         children: [
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { fontWeight: 600, marginBottom: 4 }, children: [
+          /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { style: { fontWeight: 600, marginBottom: 4 }, children: [
             taskInfo.running ? "\u23F3 " : taskInfo.error ? "\u2717 " : "\u2713 ",
             taskInfo.title
           ] }),
-          taskInfo.running && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { opacity: 0.8 }, children: taskInfo.stage || "\u51C6\u5907\u4E2D\u2026" }),
-            taskInfo.total > 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
-              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+          taskInfo.running && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)(import_jsx_runtime19.Fragment, { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: { opacity: 0.8 }, children: taskInfo.stage || "\u51C6\u5907\u4E2D\u2026" }),
+            taskInfo.total > 0 && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)(import_jsx_runtime19.Fragment, { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
                 "div",
                 {
                   style: {
@@ -2317,7 +3231,7 @@ function DesktopSettingsPanel() {
                     overflow: "hidden",
                     background: "rgba(127,127,127,.25)"
                   },
-                  children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+                  children: /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
                     "div",
                     {
                       style: {
@@ -2330,667 +3244,42 @@ function DesktopSettingsPanel() {
                   )
                 }
               ),
-              /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { opacity: 0.6, marginTop: 3 }, children: [
+              /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { style: { opacity: 0.6, marginTop: 3 }, children: [
                 taskInfo.done,
                 "/",
                 taskInfo.total
               ] })
             ] })
           ] }),
-          taskInfo.finished && taskInfo.error && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { color: "#f87171", whiteSpace: "pre-wrap" }, children: taskInfo.error }),
-          taskInfo.finished && !taskInfo.error && taskInfo.result && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { opacity: 0.85 }, children: taskInfo.result })
+          taskInfo.finished && taskInfo.error && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: { color: "#f87171", whiteSpace: "pre-wrap" }, children: taskInfo.error }),
+          taskInfo.finished && !taskInfo.error && taskInfo.result && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: { opacity: 0.85 }, children: taskInfo.result })
         ]
       }
     ),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "dsh \u6765\u6E90", children: [
-      sourceState ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: sourceInfoText }) : sourceError ? /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: DANGER_NOTE_STYLE, children: [
-        "\u68C0\u6D4B\u5931\u8D25\uFF1A",
-        sourceError
-      ] }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u68C0\u6D4B\u4E2D\u2026" }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { marginTop: 8 }, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: () => void refreshSource(), children: "\u91CD\u65B0\u68C0\u6D4B" }) }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u5185\u7F6E\uFF1A\u968F\u5E94\u7528\u5206\u53D1\u7684 dsh \u4F9D\u8D56\u6811 + Node\uFF0C\u76F4\u8C03\u5185\u90E8\u542F\u52A8\u63A5\u53E3\uFF08\u4E0D\u4F9D\u8D56\u7CFB\u7EDF\u73AF\u5883\uFF09\u3002" })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "dsh \u670D\u52A1\u5730\u5740", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-        ThemeSelect,
-        {
-          style: { marginBottom: 8 },
-          value: desktop.remote_addr ?? "",
-          onChange: (v) => handleSelectRemote(v || null),
-          options: [
-            { value: "", label: "\u672C\u5730\uFF08127.0.0.1\uFF09" },
-            ...(desktop.remote_list ?? []).map((addr) => ({ value: addr, label: addr }))
-          ]
-        }
-      ),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: ROW_STYLE, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          "input",
-          {
-            placeholder: "\u65B0\u589E\uFF1Adsh web \u6253\u5370\u7684\u5B8C\u6574 URL\uFF08\u542B token\uFF09\u6216 host[:port]",
-            className: "pf-input",
-            style: FLEX_1_STYLE,
-            "data-desktop-settings": "remote-add",
-            value: newRemoteUrl,
-            onChange: (e) => setNewRemoteUrl(e.target.value.trim())
-          }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: handleAddRemote, children: "\u65B0\u589E" })
-      ] }),
-      desktop.remote_list.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }, children: desktop.remote_list.map((addr) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(
-        PfBtn,
-        {
-          variant: "danger",
-          style: { fontSize: 11 },
-          onClick: () => handleRemoveRemote(addr),
-          children: [
-            "\u5220\u9664\uFF1A",
-            addr
-          ]
-        },
-        addr
-      )) }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u9009\u62E9\u8FDC\u7A0B\u5730\u5740\u540E\u7ACB\u5373\u6309\u5F53\u524D\u6A21\u5F0F\u91CD\u542F dsh\uFF1B\u65B0\u589E/\u5220\u9664\u4EC5\u6539\u5217\u8868\uFF0C\u91CD\u542F\u540E\u751F\u6548\u3002" }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u6B64\u5904\u7684\u5730\u5740\u662F\u684C\u9762\u58F3\u8FDE\u63A5\u7684 dsh \u670D\u52A1\u6765\u6E90\uFF08\u58F3\u5C06\u76F4\u8FDE\u8BE5\u5730\u5740\uFF0C\u4E0D\u518D\u62C9\u8D77\u672C\u5730\u670D\u52A1\uFF09\uFF1B\u82E5\u8981\u7ED9\u624B\u673A/\u5176\u5B83\u8BBE\u5907\u8FDE\u63A5\u672C\u673A\uFF0C\u8BF7\u7528\u300C\u624B\u673A\u8BBF\u95EE \u2192 \u8FDC\u7A0B\u8BBF\u95EE\u300D\u3002" })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "Profile", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-        ThemeSelect,
-        {
-          style: { marginBottom: 8 },
-          value: profileSelectValue,
-          onChange: handleSwitchProfile,
-          options: (desktop.profiles ?? []).map((p) => ({
-            value: p.name,
-            label: p.active ? `\u2713 ${p.name}` : p.name
-          }))
-        }
-      ),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u5207\u6362 Profile \u4F1A\u4EE5\u76EE\u6807 profile \u91CD\u542F dsh web\u3002" })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "Profile \u7AEF\u53E3", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { ...ROW_STYLE, marginBottom: 10 }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { style: LABEL_STYLE, children: "\u58F3 lane \u8F6C\u53D1\u5668\u53E3\uFF08\u91CD\u542F\u58F3\u751F\u6548\uFF09" }),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          "input",
-          {
-            style: { ...INPUT_BASE_STYLE, width: 84 },
-            "data-desktop-settings": "lane-forwarder-port",
-            placeholder: "3091",
-            value: forwarderInput,
-            onChange: (e) => setForwarderInput(e.target.value),
-            onKeyDown: (e) => {
-              if (e.key === "Enter") handleSaveForwarderPort();
-            }
-          }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveForwarderPort, children: "\u4FDD\u5B58" })
-      ] }),
-      profilePortsStatus.state === "ok" ? /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("table", { style: { width: "100%", fontSize: 12, borderCollapse: "collapse" }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("tr", { children: ["Profile", "dsh \u7AEF\u53E3\uFF08\u4E0A\u6E38\uFF09", "\u9875\u9762\u53E3\uFF08loopback\uFF09", "Lane \u7AEF\u53E3", "\u72B6\u6001", ""].map((h) => /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("th", { style: { textAlign: "left" }, children: h }, h)) }) }),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("tbody", { children: profilePorts.map((r) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("tr", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { children: r.profile }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-            PortCell,
-            {
-              testId: `profile-port-${r.profile}`,
-              placeholder: String(r.upstream_port),
-              value: profilePortInputs[r.profile] ?? "",
-              onChange: (v) => setProfilePortInputs((prev) => ({ ...prev, [r.profile]: v })),
-              onEnter: () => handleSaveProfilePort(r.profile),
-              onSave: () => handleSaveProfilePort(r.profile)
-            }
-          ) }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-            PortCell,
-            {
-              testId: `profile-page-port-${r.profile}`,
-              placeholder: r.page_port > 0 ? String(r.page_port) : "\u542F\u52A8\u65F6\u5206\u914D",
-              value: profilePageInputs[r.profile] ?? "",
-              onChange: (v) => setProfilePageInputs((prev) => ({ ...prev, [r.profile]: v })),
-              onEnter: () => handleSaveProfilePagePort(r.profile),
-              onSave: () => handleSaveProfilePagePort(r.profile)
-            }
-          ) }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-            PortCell,
-            {
-              testId: `profile-lane-port-${r.profile}`,
-              placeholder: String(r.lane_port),
-              value: profileLaneInputs[r.profile] ?? "",
-              onChange: (v) => setProfileLaneInputs((prev) => ({ ...prev, [r.profile]: v })),
-              onEnter: () => handleSaveProfileLanePort(r.profile),
-              onSave: () => handleSaveProfileLanePort(r.profile)
-            }
-          ) }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-            "td",
-            {
-              style: {
-                color: r.running ? "var(--dsw-alias-state-success-primary,#2fbf71)" : "var(--dsw-alias-label-secondary,#9aa4b2)"
-              },
-              children: r.running ? "\u25CF \u8FD0\u884C\u4E2D" : "\u672A\u8FD0\u884C"
-            }
-          ),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", {})
-        ] }, r.profile)) })
-      ] }) : profilePortsStatus.state === "error" ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DANGER_NOTE_STYLE, children: profilePortsStatus.text }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: profilePortsStatus.text ?? "\u52A0\u8F7D\u4E2D\u2026" }),
-      profilePortBoxNote && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: profilePortBoxNote }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u4E0A\u6E38\uFF08dsh \u5B9E\u4F8B\uFF09\uFF1Aweb 3080 \xB7 desktop 3081 \xB7 \u5176\u4F59 3082 \u8D77\u6563\u5217\u907F\u8BA9\uFF1Blane\uFF08\u624B\u673A\u4EE3\u7406\uFF09\uFF1Aweb 3092 \xB7 desktop 3093 \xB7 \u5176\u4F59 3094 \u8D77\u6563\u5217\uFF1B\u9875\u9762\u53E3\uFF08loopback origin\uFF09\uFF1A6390 \u8D77 40 \u4E2A\u987A\u5EF6\u3002\u6539\u52A8\u540E\u91CD\u542F\u8BE5 profile \u751F\u6548\uFF1B \u8F93\u5165\u6846\u663E\u793A\u7684\u662F\u5DF2\u4FDD\u5B58\u7684\u671F\u671B\u503C\uFF0C\u7070\u5B57 placeholder \u662F\u5F53\u524D\u5B9E\u9645\u503C\u3002" }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DANGER_NOTE_STYLE, children: "\u26A0\uFE0F \u6539\u9875\u9762\u53E3\uFF1D\u6362\u6D4F\u89C8\u5668\u672C\u5730\u5B58\u50A8\uFF1AlocalStorage / IndexedDB / \u767B\u5F55\u6001\u7559\u5728\u65E7\u7AEF\u53E3\uFF0C\u4E0D\u4F1A\u8DDF\u968F\u5230\u65B0\u53E3\uFF1B\u8F6C\u53D1\u5668\u53E3\u6539\u52A8\u9700\u91CD\u542F\u58F3\u3002" })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u8FC1\u79FB Profile", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: LABEL_STYLE, children: "\u6E90 profile \u2192 \u76EE\u6807 profile\uFF08\u5168\u91CF\u590D\u5236\uFF1B\u76EE\u6807\u5DF2\u5B58\u5728\u9700\u8986\u76D6\u786E\u8BA4\uFF09" }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: ROW_STYLE, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          ThemeSelect,
-          {
-            style: { flex: 1 },
-            value: migrationSource,
-            onChange: (v) => {
-              setMigrationSource(v);
-              const others = desktop.profiles.filter((p) => p.name !== v);
-              const nextDest = others.find((p) => p.name === migrationDest) ?? others[0];
-              if (nextDest) setMigrationDest(nextDest.name);
-              else setMigrationDest("");
-            },
-            options: (desktop.profiles ?? []).map((p) => ({ value: p.name, label: p.name }))
-          }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          ThemeSelect,
-          {
-            style: { flex: 1 },
-            value: migrationDest,
-            onChange: (v) => setMigrationDest(v),
-            options: migrationDestOptions.map((p) => ({ value: p.name, label: p.name }))
-          }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: handleMigrate, children: "\u8FC1\u79FB\u2026" })
-      ] }),
-      migrationRunning && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { marginTop: 10 }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          "div",
-          {
-            style: {
-              height: 6,
-              borderRadius: 4,
-              background: "var(--dsw-alias-bg-base,#111)",
-              overflow: "hidden"
-            },
-            children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-              "div",
-              {
-                style: {
-                  height: "100%",
-                  width: migrationProgress && migrationProgress.total > 0 ? `${Math.min(100, Math.round(migrationProgress.copied / migrationProgress.total * 100))}%` : "0%",
-                  background: "var(--dsw-alias-state-accent-primary,#3b82f6)",
-                  transition: "width .2s"
-                }
-              }
-            )
-          }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: migrationProgress ? `\u8FC1\u79FB\u4E2D\uFF1A${migrationProgress.copied}/${migrationProgress.total} \u4E2A\u6587\u4EF6\uFF08${migrationProgress.total > 0 ? Math.min(100, Math.round(migrationProgress.copied / migrationProgress.total * 100)) : 0}%\uFF09` : "\u51C6\u5907\u4E2D\u2026" })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u8FC1\u79FB\u4E3A\u5F53\u524D\u65F6\u70B9\u5FEB\u7167\uFF1A\u4E0D\u505C\u6B62\u3001\u4E0D\u91CD\u542F\u4EFB\u4F55\u8FD0\u884C\u4E2D\u7684\u670D\u52A1\uFF1B\u6E90\u5728\u8FC1\u79FB\u671F\u95F4\u7684\u65B0\u6570\u636E\u4E0D\u5305\u542B\u5728\u526F\u672C\u5185\u3002\u76EE\u6807\u4E3A\u6FC0\u6D3B profile \u65F6\u62D2\u7EDD\u8FC1\u79FB\u3002" })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u65E5\u5FD7\u4E0E\u8BCA\u65AD", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: diagSummary === null ? "\u8BFB\u53D6\u4E2D\u2026" : diagSummary }),
-      diagLogPath !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: NOTE_STYLE, children: [
-        "\u58F3\u65E5\u5FD7\uFF1A",
-        diagLogPath
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { display: "flex", gap: 8, marginTop: 8 }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          PfBtn,
-          {
-            variant: "ghost",
-            onClick: () => {
-              void invoke2("export_diagnostics").then((r) => {
-                setDiagExport(r.path);
-                showToast(`\u8BCA\u65AD\u5DF2\u5BFC\u51FA\uFF1A${r.path}`, true);
-              }).catch((e) => showToast(`\u5BFC\u51FA\u5931\u8D25\uFF1A${String(e)}`, false));
-            },
-            children: "\u5BFC\u51FA\u8BCA\u65AD"
-          }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          PfBtn,
-          {
-            variant: "ghost",
-            onClick: () => {
-              void invoke2("get_diagnostics").then((r) => {
-                const path = r.diagnostics?.logs?.shell?.path;
-                if (typeof path === "string" && path !== "") showToast(`\u58F3\u65E5\u5FD7\uFF1A${path}`, true);
-                else showToast("\u8BCA\u65AD\u91CC\u6CA1\u6709\u65E5\u5FD7\u8DEF\u5F84", false);
-              }).catch((e) => showToast(`\u8BFB\u53D6\u5931\u8D25\uFF1A${String(e)}`, false));
-            },
-            children: "\u663E\u793A\u65E5\u5FD7\u8DEF\u5F84"
-          }
-        )
-      ] }),
-      diagExport !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: NOTE_STYLE, children: [
-        "\u4E0A\u6B21\u5BFC\u51FA\uFF1A",
-        diagExport
-      ] })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u5E94\u7528\u66F4\u65B0", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: updateState === null ? "\u8BFB\u53D6\u4E2D\u2026" : `\u5F53\u524D\u7248\u672C ${updateState.view.current || "\u672A\u77E5"}${updateState.view.channel ? `\uFF08${updateState.view.channel}\uFF09` : ""} \xB7 ${updateState.view.label}` }),
-      updateState !== null && updateState.view.message !== "" && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: updateState.view.message }),
-      updateState !== null && updateState.actions.hint !== "" && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: updateState.actions.hint }),
-      updateState !== null && !updateState.available && updateState.reason !== "" && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: updateState.reason }),
-      updateState !== null && updateState.view.error !== "" && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DANGER_NOTE_STYLE, children: updateState.view.error }),
-      updateBusy && updateState !== null && updateState.view.progress !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: NOTE_STYLE, children: [
-        "\u8FDB\u5EA6 ",
-        updateState.view.progress,
-        "%",
-        updateState.view.totalBytes !== null ? `\uFF08${fmtBytes2(updateState.view.bytesDownloaded)} / ${fmtBytes2(
-          updateState.view.totalBytes
-        )}\uFF09` : ""
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { display: "flex", gap: 8, marginTop: 8 }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          PfBtn,
-          {
-            variant: "ghost",
-            disabled: updateState === null || !updateState.actions.canCheck,
-            onClick: () => runUpdate("check_update"),
-            children: "\u68C0\u67E5\u66F4\u65B0"
-          }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          PfBtn,
-          {
-            disabled: updateState === null || !updateState.actions.canDownload,
-            onClick: () => runUpdate("download_update"),
-            children: "\u4E0B\u8F7D\u66F4\u65B0"
-          }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          PfBtn,
-          {
-            disabled: updateState === null || !updateState.actions.canApply,
-            onClick: () => runUpdate("apply_update"),
-            children: "\u91CD\u542F\u5E76\u5B89\u88C5"
-          }
-        )
-      ] })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "dsh \u8FD0\u884C\u65F6\uFF08\u7248\u672C\u4E0B\u8F7D / \u5207\u6362\uFF09", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-        ThemeSelect,
-        {
-          style: { marginBottom: 8 },
-          value: runtimeSource,
-          onChange: (v) => setRuntimeSource(v),
-          options: [
-            { value: "github", label: "\u4E0B\u8F7D\u6E90\uFF1AGitHub Releases" },
-            { value: "npm", label: "\u4E0B\u8F7D\u6E90\uFF1Anpm registry" }
-          ]
-        }
-      ),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: () => void refreshRuntimes(), children: "\u5237\u65B0\u7248\u672C\u76EE\u5F55" }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { marginTop: 8 }, children: [
-        runtimeStatus.state === "error" && runtimeStatus.text && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DANGER_NOTE_STYLE, children: runtimeStatus.text }),
-        runtimeCatalog && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { marginBottom: 6 }, children: currentRuntimeLine({
-            selected: runtimeCatalog.selected,
-            builtin: runtimeCatalog.builtin,
-            running: runtimeCatalog.running
-          }) }),
-          runtimeCatalog.note && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { ...DANGER_NOTE_STYLE, marginBottom: 6, whiteSpace: "pre-wrap" }, children: `\u26A0 ${runtimeCatalog.note}` }),
-          (() => {
-            const seen = /* @__PURE__ */ new Set();
-            const heads = [];
-            for (const ch of ["latest", "alpha", "rc"]) {
-              const e = runtimeCatalog.catalog.find((c) => c.channel === ch);
-              if (e && !seen.has(e.version)) {
-                seen.add(e.version);
-                heads.push(e);
-              }
-            }
-            const installedPinned = runtimeCatalog.catalog.filter(
-              (c) => !seen.has(c.version) && runtimeCatalog.installed.some((i) => i.version === c.version)
-            );
-            const rest = runtimeCatalog.catalog.filter((c) => !seen.has(c.version));
-            const installedOnly = runtimeCatalog.installed.filter((i) => !runtimeCatalog.catalog.some((c) => c.version === i.version)).map((i) => ({ version: i.version, channel: "" }));
-            if (runtimeCatalog.builtin && !runtimeCatalog.catalog.some((c) => c.version === runtimeCatalog.builtin) && !installedOnly.some((i) => i.version === runtimeCatalog.builtin)) {
-              installedOnly.unshift({ version: runtimeCatalog.builtin, channel: "" });
-            }
-            const visible = runtimeExpanded ? [...runtimeCatalog.catalog, ...installedOnly] : [...heads, ...installedPinned, ...installedOnly.filter((i) => !seen.has(i.version))];
-            return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
-              visible.map((c) => {
-                const installed = runtimeCatalog.installed.some((i) => i.version === c.version);
-                const isBuiltin = runtimeCatalog.builtin === c.version;
-                const isRunning = runtimeCatalog.running?.version !== null && runtimeCatalog.running?.version !== void 0 && runtimeCatalog.running.version === c.version;
-                const available = installed || isBuiltin || isRunning;
-                const isCurrent = isRuntimeInUse(
-                  {
-                    selected: runtimeCatalog.selected,
-                    builtin: runtimeCatalog.builtin,
-                    running: runtimeCatalog.running
-                  },
-                  c.version
-                );
-                const tags = [];
-                if (c.channel) tags.push(c.channel);
-                if (isBuiltin) tags.push("\u5185\u7F6E");
-                else if (installed) tags.push("\u5DF2\u4E0B\u8F7D");
-                if (isRunning) tags.push("\u8FD0\u884C\u4E2D");
-                const downloadState = runtimeDownloading[c.version];
-                const failedReason = runtimeDownloadHint(downloadState);
-                const pct = dlProgress && dlProgress.version === c.version && dlProgress.resolved > 0 ? Math.min(100, Math.round(dlProgress.downloaded / dlProgress.resolved * 100)) : 0;
-                return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { margin: "4px 0" }, children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(
-                    "div",
-                    {
-                      style: {
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center"
-                      },
-                      children: [
-                        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: `${c.version}${tags.length ? "\uFF08" + tags.join(" \xB7 ") + "\uFF09" : ""}` }),
-                        !available ? /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { display: "flex", gap: 6, alignItems: "center" }, children: [
-                          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-                            PfBtn,
-                            {
-                              variant: "ghost",
-                              disabled: downloadState === "downloading",
-                              onClick: () => handleDownloadRuntime(c.version),
-                              children: runtimeDownloadButtonLabel(downloadState)
-                            }
-                          ),
-                          downloadState === "downloading" && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: () => handleCancelRuntimeDownload(c.version), children: "\u53D6\u6D88" })
-                        ] }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { display: "flex", gap: 6, alignItems: "center" }, children: [
-                          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-                            PfBtn,
-                            {
-                              variant: "ghost",
-                              disabled: isCurrent,
-                              onClick: () => handleSwitchRuntime(c.version),
-                              children: isCurrent ? "\u4F7F\u7528\u4E2D" : "\u5207\u6362\u5230\u6B64\u7248\u672C"
-                            }
-                          ),
-                          !isBuiltin && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-                            PfBtn,
-                            {
-                              variant: "danger",
-                              disabled: removingVersion !== null || isRunning || runtimeCatalog.selected === c.version,
-                              title: isRunning ? "\u6B63\u5728\u8FD0\u884C\u7684\u7248\u672C\u4E0D\u53EF\u5378\u8F7D" : runtimeCatalog.selected === c.version ? "\u4F7F\u7528\u4E2D\u7684\u7248\u672C\u4E0D\u53EF\u5378\u8F7D\uFF0C\u8BF7\u5148\u5207\u6362" : "\u5220\u9664\u672C\u5730\u5DF2\u4E0B\u8F7D\u7684\u8FD0\u884C\u65F6",
-                              onClick: () => handleRemoveRuntime(c.version),
-                              children: removingVersion === c.version ? "\u5378\u8F7D\u4E2D\u2026" : "\u5378\u8F7D"
-                            }
-                          )
-                        ] })
-                      ]
-                    }
-                  ),
-                  downloadState === "downloading" && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { marginTop: 4 }, children: [
-                    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-                      "div",
-                      {
-                        style: {
-                          height: 6,
-                          borderRadius: 4,
-                          background: "var(--dsw-alias-bg-base,#111)",
-                          overflow: "hidden"
-                        },
-                        children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-                          "div",
-                          {
-                            style: {
-                              height: "100%",
-                              width: `${pct}%`,
-                              background: "var(--dsw-alias-state-accent-primary,#3b82f6)",
-                              transition: "width .3s"
-                            }
-                          }
-                        )
-                      }
-                    ),
-                    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: dlProgress && dlProgress.version === c.version ? `\u5B89\u88C5\u4F9D\u8D56\uFF1A\u5DF2\u4E0B\u8F7D ${dlProgress.downloaded} / ${dlProgress.resolved || "\u2026"} \u4E2A\u5305${dlProgress.resolved > 0 ? `\uFF08${pct}%\uFF09` : ""}` : "\u51C6\u5907\u4E2D\u2026" })
-                  ] }),
-                  failedReason && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-                    "div",
-                    {
-                      style: {
-                        // #97：取消是中性终态，不能穿红色警告色、也不能顶着「下载失败：」的前缀
-                        ...downloadState !== void 0 && typeof downloadState === "object" && "cancelled" in downloadState ? NOTE_STYLE : DANGER_NOTE_STYLE,
-                        marginTop: 4,
-                        whiteSpace: "pre-wrap"
-                      },
-                      children: failedReason
-                    }
-                  )
-                ] }, c.version);
-              }),
-              rest.length > 0 && !runtimeExpanded && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(PfBtn, { variant: "ghost", style: { marginTop: 4 }, onClick: () => setRuntimeExpanded(true), children: [
-                "\u5C55\u5F00\u5168\u90E8 ",
-                runtimeCatalog.catalog.length,
-                " \u4E2A\u7248\u672C \u25BE"
-              ] }),
-              runtimeExpanded && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", style: { marginTop: 4 }, onClick: () => setRuntimeExpanded(false), children: "\u6536\u8D77\u7248\u672C\u5217\u8868 \u25B4" })
-            ] });
-          })()
-        ] })
-      ] })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u4F9D\u8D56\u72B6\u6001\uFF08pnpm store \u4E00\u81F4\u6027\uFF09", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: LABEL_STYLE, children: "dsh \u7684\u63D2\u4EF6\u5B89\u88C5/\u5378\u8F7D\u7531\u5185\u7F6E pnpm \u6267\u884C\uFF1Bprofile \u7684 node_modules \u82E5\u7531\u5176\u5B83 pnpm \u7248\u672C\u88C5\u8FC7\uFF0C store \u5927\u7248\u672C\u4E0D\u4E00\u81F4\u4F1A\u62A5 ERR_PNPM_UNEXPECTED_STORE\u3002\u6B64\u5904\u53EF\u67E5\u770B\u5E76\u91CD\u5EFA\u3002" }),
-      depProfiles === null ? /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: NOTE_STYLE, children: [
-        "\u8BFB\u53D6\u5931\u8D25\uFF1A",
-        depError ?? "\u672A\u77E5\u539F\u56E0"
-      ] }) : depProfiles.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u672A\u53D1\u73B0 profile" }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("table", { style: { width: "100%", fontSize: 12, borderCollapse: "collapse" }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("tr", { style: { textAlign: "left", opacity: 0.75 }, children: [
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("th", { style: { padding: "4px 6px" }, children: "Profile" }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("th", { style: { padding: "4px 6px" }, children: "\u4F9D\u8D56\u7531 pnpm" }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("th", { style: { padding: "4px 6px" }, children: "\u5185\u7F6E pnpm" }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("th", { style: { padding: "4px 6px" }, children: "\u72B6\u6001" }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("th", { style: { padding: "4px 6px" } })
-        ] }) }),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("tbody", { children: depProfiles.map((p) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("tr", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { style: { padding: "4px 6px" }, children: p.profile }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { style: { padding: "4px 6px", opacity: 0.85 }, children: p.recordedPnpm ?? "\u672A\u77E5" }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { style: { padding: "4px 6px", opacity: 0.85 }, children: p.builtinPnpm ?? "\u672A\u77E5" }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { style: { padding: "4px 6px" }, children: !p.needsRebuild ? "\u4E00\u81F4" : p.running ? "\u9700\u91CD\u5EFA\uFF08\u8FD0\u884C\u4E2D\uFF09" : "\u9700\u91CD\u5EFA" }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("td", { style: { padding: "4px 6px" }, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-            PfBtn,
-            {
-              variant: "ghost",
-              disabled: !p.needsRebuild || p.running || depRebuilding !== null,
-              title: p.running ? "\u8BE5 profile \u6B63\u5728\u8FD0\u884C\uFF1A\u5148\u505C\u6B62\u518D\u91CD\u5EFA" : p.needsRebuild ? "\u7528\u5185\u7F6E pnpm \u91CD\u5EFA\u4F9D\u8D56\uFF08\u8FC1\u79FB store \u5927\u7248\u672C\uFF09" : "\u65E0\u9700\u91CD\u5EFA",
-              onClick: () => handleRebuildDeps(p.profile),
-              children: depRebuilding === p.profile ? "\u91CD\u5EFA\u4E2D\u2026" : "\u91CD\u5EFA"
-            }
-          ) })
-        ] }, p.profile)) })
-      ] }),
-      depNote ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: depNote }) : null
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u4E0B\u8F7D", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: ROW_STYLE, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          "input",
-          {
-            placeholder: "1-32",
-            "data-desktop-settings": "download-concurrency",
-            style: { ...INPUT_BASE_STYLE, width: 80 },
-            value: concurrencyInput,
-            onChange: (e) => {
-              concurrencyTouchedRef.current = true;
-              setConcurrencyInput(e.target.value);
-            }
-          }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveConcurrency, children: "\u4FDD\u5B58" })
-      ] }),
-      downloadBoxNote && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: downloadBoxNote }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u540C\u65F6\u8FDB\u884C\u7684\u4E0B\u8F7D\u6570\u4E0A\u9650\uFF0C\u8D85\u51FA\u6392\u961F\uFF1B\u6539\u52A8\u7ACB\u5373\u751F\u6548\u3002" })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u624B\u673A\u8BBF\u95EE\uFF08\u8FDC\u7A0B\u8FDE\u63A5\uFF09", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: ROW_STYLE, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          "input",
-          {
-            placeholder: "30000",
-            "data-desktop-settings": "mux-heartbeat-ms",
-            style: { ...INPUT_BASE_STYLE, width: 100 },
-            value: muxHeartbeatInput,
-            onChange: (e) => setMuxHeartbeatInput(e.target.value)
-          }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveMuxHeartbeat, children: "\u4FDD\u5B58" })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: NOTE_STYLE, children: [
-        "dsh \u7F51\u5173\u5BF9 ",
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("code", { children: "/api/remote.mux" }),
-        " \u7684\u5FC3\u8DF3\u95F4\u9694\uFF08\u6BEB\u79D2\uFF09\u3002dsh \u539F\u751F 2s \u4E14\u8FDE\u4E22 2 \u6B21\u5373\u65AD\u5F00\uFF0C \u79FB\u52A8\u7AEF\u5207\u540E\u53F0/\u5F31\u7F51\u4F1A\u88AB\u79D2\u5224\u6B7B\uFF08\u8868\u73B0\u4E3A\u300C\u80FD\u53D1\u6D88\u606F\u3001\u6536\u4E0D\u5230\u65B0\u6D88\u606F\u300D\uFF09\uFF1B\u58F3\u9ED8\u8BA4\u8986\u76D6\u4E3A 30000\u3002 \u586B 0 = \u4E0D\u8986\u76D6\uFF08\u56DE\u9000 dsh \u9ED8\u8BA4\uFF09\uFF0C\u6539\u52A8\u91CD\u542F dsh \u751F\u6548\u3002"
-      ] })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: ROW_STYLE, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          "input",
-          {
-            type: "checkbox",
-            "data-desktop-settings": "desktop-layout-on-phones",
-            checked: desktopLayoutOnPhones,
-            onChange: (e) => setDesktopLayoutOnPhones(e.target.checked)
-          }
-        ),
-        "\u624B\u673A\u7AEF\u6539\u7528\u684C\u9762\u5E03\u5C40\uFF08\u4E0D\u52A0\u8F7D\u79FB\u52A8\u5E03\u5C40\u63D2\u4EF6\uFF09"
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveMobileLayout, children: "\u4FDD\u5B58" })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u624B\u673A\u4E0A\u7684\u5361\u987F\u6765\u81EA\u5BBF\u4E3B\u524D\u7AEF\uFF08\u4F1A\u8BDD\u6574\u6BB5\u6302\u8F7D + \u9010\u5757\u4EE3\u7801\u9AD8\u4EAE\uFF09\uFF0C\u4E0D\u662F\u7F51\u7EDC\u3002\u52FE\u9009\u540E\u624B\u673A\u8D70\u4E0E iPad \u76F8\u540C\u7684\u684C\u9762\u5E03\u5C40\uFF1A\u660E\u663E\u66F4\u6D41\u7545\uFF0C\u4EE3\u4EF7\u662F\u6392\u7248\u66F4\u6324\uFF08\u53EF\u6A2A\u5C4F\u7F13\u89E3\uFF09\u3002\u4E0D\u52FE\u9009 = \u79FB\u52A8\u5E03\u5C40\u3002\u6539\u52A8\u91CD\u542F dsh \u751F\u6548\u3002" }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u7535\u6E90", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: ROW_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          "input",
-          {
-            type: "checkbox",
-            "data-desktop-settings": "prevent-sleep",
-            checked: preventSleep,
-            onChange: (e) => handleTogglePreventSleep(e.target.checked)
-          }
-        ),
-        "\u6709\u4F1A\u8BDD\u5728\u8DD1\u65F6\u963B\u6B62\u7CFB\u7EDF\u4F11\u7720\uFF08\u7F3A\u7701\u5F00\uFF09"
-      ] }) }),
-      preventSleepNote && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: preventSleepNote }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u7184\u5C4F\u540E\u82E5\u8FD8\u6709\u4F1A\u8BDD\u5728\u8DD1\uFF0C\u58F3\u4F1A\u6301\u6709\u7CFB\u7EDF\u9632\u4F11\u7720\u65AD\u8A00\uFF08macOS \u8D70 IOKit\u3001Windows \u8D70\u7EBF\u7A0B\u6267\u884C\u72B6\u6001\uFF09\uFF0C \u76F4\u5230\u4F1A\u8BDD\u8DD1\u5B8C\u3001dsh \u5B9E\u4F8B\u505C\u6B62\u6216\u9000\u51FA\u58F3\u3002\u5C4F\u5E55\u8BE5\u5173\u8FD8\u662F\u7167\u5173\uFF0C\u53EA\u662F\u4E0D\u8BA9\u6574\u673A\u7761\u8FC7\u53BB\uFF1B\u5408\u76D6\u4ECD\u7136\u4F1A\u7761\u3002\u6539\u52A8\u7ACB\u5373\u751F\u6548\u3002" })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u5F00\u53D1\u8005\u5DE5\u5177", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: ROW_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          "input",
-          {
-            type: "checkbox",
-            "data-desktop-settings": "dev-tools",
-            checked: devTools,
-            onChange: (e) => handleToggleDevTools(e.target.checked)
-          }
-        ),
-        "\u5141\u8BB8\u6253\u5F00 DevTools\uFF08\u6253\u5305\u6001\u9ED8\u8BA4\u5173\uFF1B\u6539\u52A8\u91CD\u542F\u684C\u9762\u58F3\u751F\u6548\uFF09"
-      ] }) }),
-      devToolsNote && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: devToolsNote }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u5F00\u542F\u540E\u684C\u9762\u58F3\u5728\u672C\u673A\u56DE\u73AF\u5730\u5740\u76D1\u542C\u4E00\u4E2A\u8FDC\u7A0B\u8C03\u8BD5\u53E3\uFF0C\u672C\u673A\u4EFB\u610F\u7A0B\u5E8F\u53EF\u501F\u5B83\u5728\u9875\u9762\u91CC\u6267\u884C\u4EE3\u7801\u3002\u53EA\u5728\u81EA\u5DF1\u6392\u67E5\u95EE\u9898\u65F6\u5F00\u542F\uFF0C\u7528\u5B8C\u8BB0\u5F97\u5173\u6389\u5E76\u91CD\u542F\u3002" }),
-      devToolsConfirmKind !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DEV_TOOLS_OVERLAY_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: DEV_TOOLS_MODAL_STYLE, "data-desktop-settings": "dev-tools-confirm", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DEV_TOOLS_TITLE_STYLE, children: devToolsActiveConfirm.title }),
-        devToolsActiveConfirm.lines.map((line) => /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: DEV_TOOLS_BODY_STYLE, children: line }, line)),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: DEV_TOOLS_ACTIONS_STYLE, children: [
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: () => setDevToolsConfirmKind(null), children: devToolsActiveConfirm.cancel }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "primary", onClick: () => saveDevToolsSetting(devToolsConfirmKind === "on"), children: devToolsActiveConfirm.confirm })
-        ] })
-      ] }) })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(SectionBox, { title: "\u4EE3\u7406\u8BBE\u7F6E", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: LABEL_STYLE, children: "\u4EE3\u7406\u6A21\u5F0F" }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-        ThemeSelect,
-        {
-          style: { marginBottom: 10 },
-          value: proxy.proxy_mode,
-          onChange: (v) => setProxy({ ...proxy, proxy_mode: v }),
-          options: [
-            { value: "off", label: "\u4E0D\u4F7F\u7528\u4EE3\u7406" },
-            { value: "system", label: "\u8DDF\u968F\u7CFB\u7EDF\u4EE3\u7406" },
-            { value: "manual", label: "\u624B\u52A8\u6307\u5B9A\u4EE3\u7406" }
-          ]
-        }
-      ),
-      proxy.proxy_mode === "manual" && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: LABEL_STYLE, children: "\u4EE3\u7406 URL" }),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-          "input",
-          {
-            placeholder: "http/https/socks5://host:port",
-            value: proxy.proxy_url,
-            className: "pf-input",
-            style: INPUT_FULL_STYLE,
-            "data-desktop-settings": "proxy-url",
-            onChange: (e) => setProxy({ ...proxy, proxy_url: e.target.value.trim() })
-          }
-        )
-      ] }),
-      (proxy.proxy_mode === "manual" || proxy.proxy_mode === "system") && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
-        proxy.proxy_mode === "manual" && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: LABEL_STYLE, children: "NO_PROXY\uFF08\u4E0D\u8D70\u4EE3\u7406\u7684\u5730\u5740\uFF0C\u9017\u53F7\u5206\u9694\uFF09" }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-            "input",
-            {
-              placeholder: "localhost,127.0.0.1,*.internal",
-              value: proxy.no_proxy,
-              className: "pf-input",
-              style: INPUT_FULL_STYLE,
-              "data-desktop-settings": "no-proxy",
-              onChange: (e) => setProxy({ ...proxy, no_proxy: e.target.value.trim() })
-            }
-          )
-        ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: { display: "flex", gap: 8, marginTop: 8 }, children: [
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: FLEX_1_STYLE, children: [
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: LABEL_STYLE, children: "\u7528\u6237\u540D\uFF08\u53EF\u9009\uFF09" }),
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-              "input",
-              {
-                value: proxy.proxy_user,
-                className: "pf-input",
-                style: INPUT_FULL_STYLE,
-                "data-desktop-settings": "proxy-user",
-                onChange: (e) => setProxy({ ...proxy, proxy_user: e.target.value })
-              }
-            )
-          ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: FLEX_1_STYLE, children: [
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: LABEL_STYLE, children: "\u5BC6\u7801\uFF08\u53EF\u9009\uFF09" }),
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
-              "input",
-              {
-                type: "password",
-                value: proxy.proxy_pass,
-                className: "pf-input",
-                style: INPUT_FULL_STYLE,
-                "data-desktop-settings": "proxy-pass",
-                onChange: (e) => setProxy({ ...proxy, proxy_pass: e.target.value })
-              }
-            )
-          ] })
-        ] })
-      ] }),
-      proxyEffective && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { style: NOTE_STYLE, children: [
-        "\u5F53\u524D\u751F\u6548\uFF1A",
-        JSON.stringify(proxyEffective)
-      ] }),
-      proxy.proxy_mode === "system" && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u7CFB\u7EDF\u4EE3\u7406\u6A21\u5F0F\u4E0B\uFF0C\u4EE3\u7406\u5730\u5740\u4E0E NO_PROXY \u6765\u81EA\u7CFB\u7EDF\u8BBE\u7F6E\uFF08\u5982 Windows \u6CE8\u518C\u8868 ProxyOverride\uFF09\uFF1B\u7528\u6237\u540D/\u5BC6\u7801\u4ECD\u53D6\u81EA\u8BBE\u7F6E\u5E76\u62FC\u5165\u4EE3\u7406\u5730\u5740\u3002" }),
-      proxy.proxy_mode === "manual" && proxy.proxy_url && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: { marginTop: 8 }, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "ghost", onClick: handleTestProxy, children: testBusy ? "\u6D4B\u8BD5\u4E2D\u2026" : "\u6D4B\u8BD5\u8FDE\u63A5" }) }),
-        testResult && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: testResult })
-      ] })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PfBtn, { variant: "primary", disabled: busy, onClick: handleSaveProxy, children: busy ? "\u4FDD\u5B58\u4E2D\u2026" : "\u4FDD\u5B58\u4EE3\u7406\u8BBE\u7F6E" }) }),
-    msg && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(SourceCard, {}),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(ServiceAddressCard, { desktop, refreshData, notify }),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(ProfileCard, { desktop, notify }),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(ProfilePortsCard, { loaded }),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(MigrationCard, { profiles: desktop.profiles, loaded, notify }),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(DiagnosticsCard, {}),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(UpdateCard, {}),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(RuntimeCard, { notify }),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(DependenciesCard, {}),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(DownloadCard, { note: downloadBoxNote, onNote: setDownloadBoxNote }),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(MobileAccessCard, { desktop, onNote: setDownloadBoxNote }),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(LoopbackAggregationCard, { value: loopbackAggregation }),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(PowerCard, { desktop }),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(DevToolsCard, { desktop }),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
+      ProxyCard,
+      {
+        proxy,
+        proxyEffective,
+        loaded,
+        notify
+      }
+    ),
+    msg && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
       "div",
       {
         style: {
@@ -3015,16 +3304,23 @@ function DesktopSettingsPanel() {
         children: msg.text
       }
     ),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { style: NOTE_STYLE, children: "\u670D\u52A1\u5730\u5740/Profile \u5207\u6362\u4F1A\u7ACB\u5373\u91CD\u542F dsh\uFF1B\u7AEF\u53E3\u4E0E\u4EE3\u7406\u5728\u4E0B\u6B21\u91CD\u542F\u540E\u751F\u6548\u3002" })
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
+      "div",
+      {
+        style: {
+          ...NOTE_STYLE,
+          marginTop: 2,
+          paddingTop: 10,
+          borderTop: "1px solid var(--dsw-alias-border-l2, #ffffff1f)"
+        },
+        children: "\u670D\u52A1\u5730\u5740/Profile \u5207\u6362\u4F1A\u7ACB\u5373\u91CD\u542F dsh\uFF1B\u7AEF\u53E3\u4E0E\u4EE3\u7406\u5728\u4E0B\u6B21\u91CD\u542F\u540E\u751F\u6548\u3002"
+      }
+    )
   ] });
 }
 function registerDesktopSettings(ctx) {
   if (!shellRpc.available()) return;
-  try {
-    nsRpc = ctx.connection ?? null;
-  } catch {
-    nsRpc = null;
-  }
+  captureNsRpc(ctx);
   const slots = ctx.slots;
   if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") return;
   slots.inject(
@@ -3035,7 +3331,7 @@ function registerDesktopSettings(ctx) {
     )
   );
   void invoke2("get_pending_active_profile").then((profile) => {
-    if (profile && nsRpc) {
+    if (profile && hasNsRpc()) {
       void nsSave({ active_profile: profile }).catch(() => {
       });
     }
@@ -3048,7 +3344,7 @@ function registerDesktopSettings(ctx) {
       const el = document.createElement("div");
       el.style.cssText = "position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)";
       const card = document.createElement("div");
-      card.style.cssText = "background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l,#ffffff1f);border-radius:12px;padding:24px;min-width:320px;max-width:400px";
+      card.style.cssText = "background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l2,#ffffff1f);border-radius:12px;padding:24px;min-width:320px;max-width:400px";
       const title = document.createElement("div");
       title.style.cssText = "font-size:15px;font-weight:600;margin-bottom:16px;color:var(--dsw-alias-label-primary,#e7eaf0)";
       title.textContent = "\u9009\u62E9\u8981\u542F\u52A8\u7684 Profile";
@@ -3057,7 +3353,7 @@ function registerDesktopSettings(ctx) {
       list.style.cssText = "display:flex;flex-direction:column;gap:8px";
       for (const p of profiles) {
         const btn = document.createElement("button");
-        btn.style.cssText = "padding:10px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer;text-align:left";
+        btn.style.cssText = "padding:10px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer;text-align:left";
         btn.textContent = p;
         btn.onmouseenter = () => btn.style.background = "var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07))";
         btn.onmouseleave = () => btn.style.background = "transparent";
@@ -3069,7 +3365,7 @@ function registerDesktopSettings(ctx) {
         list.appendChild(btn);
       }
       const input = document.createElement("input");
-      input.style.cssText = "margin-top:12px;padding:8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;width:100%;box-sizing:border-box";
+      input.style.cssText = "margin-top:12px;padding:8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;width:100%;box-sizing:border-box";
       input.placeholder = "\u6216\u8F93\u5165\u65B0 profile \u540D\u79F0";
       const startBtn = document.createElement("button");
       startBtn.style.cssText = "margin-top:8px;padding:8px 14px;border-radius:8px;border:none;background:var(--dsw-alias-brand-primary-new-color,#4176e6);color:#fff;font-size:13px;cursor:pointer;width:100%";
@@ -3100,7 +3396,7 @@ function registerDesktopSettings(ctx) {
       const el = document.createElement("div");
       el.style.cssText = "position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)";
       const card = document.createElement("div");
-      card.style.cssText = "background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l,#ffffff1f);border-radius:12px;padding:24px;min-width:340px;max-width:420px;text-align:center";
+      card.style.cssText = "background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l2,#ffffff1f);border-radius:12px;padding:24px;min-width:340px;max-width:420px;text-align:center";
       const title = document.createElement("div");
       title.style.cssText = "font-size:15px;font-weight:600;margin-bottom:8px;color:var(--dsw-alias-label-primary,#e7eaf0)";
       title.textContent = `Profile\u300C${profile}\u300D\u4E0D\u5B8C\u6574`;
@@ -3110,7 +3406,7 @@ function registerDesktopSettings(ctx) {
       const btns = document.createElement("div");
       btns.style.cssText = "display:flex;gap:10px";
       const noBtn = document.createElement("button");
-      noBtn.style.cssText = "flex:1;padding:10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer";
+      noBtn.style.cssText = "flex:1;padding:10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer";
       noBtn.textContent = "\u76F4\u63A5\u542F\u52A8";
       noBtn.onclick = () => {
         el.remove();
@@ -3137,41 +3433,128 @@ function registerDesktopSettings(ctx) {
 }
 
 // src/client/notifications-tab.tsx
-var import_react4 = require("react");
-var import_jsx_runtime4 = require("react/jsx-runtime");
+var import_react19 = require("react");
+
+// src/client/notification-focus-hint.ts
+function focusSuppressHint() {
+  return "\u5E94\u7528\u7A97\u53E3\u5728\u524D\u53F0\u805A\u7126\u65F6\u4E0D\u5F39\u901A\u77E5\uFF08\u5931\u7126\u3001\u6700\u5C0F\u5316\u540E\u7167\u5E38\uFF09\uFF0C\u8BE5\u7B56\u7565\u56FA\u5B9A\u4E0D\u53EF\u914D\u7F6E\u3002";
+}
+
+// src/client/notification-sound-ui.ts
+var SOUND_EXTENSIONS = ["wav", "mp3", "ogg"];
+var CUSTOM_PREFIX = "custom:";
+var FALLBACK_REASON = "\u672C\u673A\u6CA1\u6709\u8BE5\u683C\u5F0F\u7684\u64AD\u653E\u540E\u7AEF";
+function soundExtension(name) {
+  if (typeof name !== "string") return null;
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const extension = name.slice(dot + 1).toLowerCase();
+  return SOUND_EXTENSIONS.includes(extension) ? extension : null;
+}
+function customSoundName(value) {
+  if (typeof value !== "string" || !value.startsWith(CUSTOM_PREFIX)) return null;
+  const name = value.slice(CUSTOM_PREFIX.length);
+  return name === "" ? null : name;
+}
+function soundOptionState(capability, value) {
+  const name = customSoundName(value);
+  if (name === null) return { ok: true, reason: null, extension: null };
+  const extension = soundExtension(name);
+  if (extension === null) return { ok: true, reason: null, extension: null };
+  const support = capability?.formats?.[extension];
+  if (support === void 0 || support === null || typeof support.ok !== "boolean") {
+    return { ok: true, reason: null, extension };
+  }
+  if (support.ok) return { ok: true, reason: null, extension };
+  const reason = typeof support.reason === "string" && support.reason.trim() !== "" ? support.reason : null;
+  return { ok: false, reason: reason ?? FALLBACK_REASON, extension };
+}
+function soundUnavailableReason(capability, value) {
+  const state = soundOptionState(capability, value);
+  return state.ok ? null : state.reason;
+}
+function customSoundOptions(names, capability) {
+  if (!Array.isArray(names)) return [];
+  return names.map((name) => {
+    const value = `${CUSTOM_PREFIX}${name}`;
+    const reason = soundUnavailableReason(capability, value);
+    if (reason === null) return { value, label: name, disabled: false, title: void 0 };
+    return { value, label: `${name}\uFF08\u672C\u673A\u65E0\u6CD5\u64AD\u653E\uFF1A${reason}\uFF09`, disabled: true, title: reason };
+  });
+}
+function capabilityHint(capability) {
+  const hint = capability?.hint;
+  return typeof hint === "string" && hint.trim() !== "" ? hint : null;
+}
+function configuredSoundWarning(capability, sound) {
+  const reason = soundUnavailableReason(capability, sound);
+  if (reason === null) return null;
+  const name = customSoundName(sound);
+  return name === null ? `\u672C\u673A\u65E0\u6CD5\u64AD\u653E\uFF1A${reason}` : `\u672C\u673A\u65E0\u6CD5\u64AD\u653E\u300C${name}\u300D\uFF1A${reason}`;
+}
+function previewFailure(result) {
+  if (typeof result !== "object" || result === null) return null;
+  const { played, audible } = result;
+  if (typeof played !== "string" || played === "") return null;
+  if (audible !== false) return null;
+  const target = played.startsWith(CUSTOM_PREFIX) ? played.slice(CUSTOM_PREFIX.length) : played;
+  return target === "default" ? "\u8BD5\u542C\u6CA1\u6709\u51FA\u58F0\uFF1A\u672C\u673A\u6CA1\u6709\u53EF\u7528\u7684\u64AD\u653E\u540E\u7AEF" : `\u8BD5\u542C\u6CA1\u6709\u51FA\u58F0\uFF1A\u672C\u673A\u65E0\u6CD5\u64AD\u653E\u300C${target}\u300D`;
+}
+var UNAVAILABLE_MACOS_TEXT = "\u5F53\u524D\u73AF\u5883\u65E0\u6CD5\u67E5\u8BE2\u7CFB\u7EDF\u901A\u77E5\u6743\u9650\uFF08dev \u88F8\u4E8C\u8FDB\u5236\u6216\u5E73\u53F0\u4E0D\u652F\u6301\uFF09\uFF1B\u9A8C\u6536\u8BF7\u4F7F\u7528\u6253\u5305\u540E\u7684 .app\u3002";
+var UNAVAILABLE_CHIP = "\u6743\u9650\u4E0D\u53EF\u7528";
+function permissionUnavailableCopy(platform) {
+  if (platform === "win32" || platform === "linux") {
+    const name = platform === "win32" ? "Windows" : "Linux";
+    return {
+      chip: null,
+      neutral: true,
+      text: `${name} \u7684\u901A\u77E5\u7531\u7CFB\u7EDF\u901A\u77E5\u4E2D\u5FC3\u8D1F\u8D23\uFF0C\u672C\u5E94\u7528\u4E0D\u67E5\u8BE2\u6388\u6743\u72B6\u6001\uFF1B\u80FD\u5426\u5F39\u51FA\u4EE5\u7CFB\u7EDF\u8BBE\u7F6E\u4E3A\u51C6\u3002`
+    };
+  }
+  return { chip: UNAVAILABLE_CHIP, neutral: false, text: UNAVAILABLE_MACOS_TEXT };
+}
+function deniedPermissionCopy(platform, bundleId) {
+  const base = "\u901A\u77E5\u6A2A\u5E45\u4E0D\u4F1A\u663E\u793A\u3002\u53EF\u5728\u7CFB\u7EDF\u8BBE\u7F6E\u4E2D\u624B\u52A8\u5F00\u542F\u3002";
+  if (platform !== "darwin" || typeof bundleId !== "string" || bundleId.trim() === "") return base;
+  return `${base}\u5F00\u53D1\u671F\u53EF\u6267\u884C tccutil reset Notifications ${bundleId} \u540E\u91CD\u8BD5\u3002`;
+}
+
+// src/client/notifications-tab.tsx
+var import_jsx_runtime20 = require("react/jsx-runtime");
 function invoke3(cmd, args) {
   return shellRpc.invoke(cmd, args);
 }
 var SYS_PREFS = "x-apple.systempreferences:com.apple.Preference.Notifications";
 var PANEL_CSS2 = `
 [data-notification-settings] { font-size: 13px; }
-[data-notification-settings] .n-card { border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-radius:12px; padding:12px 16px; margin-bottom:10px; }
-[data-notification-settings] .n-banner { display:flex; gap:10px; align-items:center; border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-left:3px solid var(--dsw-alias-state-warn,#e8a33d); background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); border-radius:8px; padding:9px 12px; font-size:12.5px; margin-bottom:10px; }
+[data-notification-settings] .n-card { border:1px solid var(--dsw-alias-border-l2,#ffffff1f); border-radius:12px; padding:12px 16px; margin-bottom:10px; }
+[data-notification-settings] .n-banner { display:flex; gap:10px; align-items:center; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); border-left:3px solid var(--dsw-alias-state-warn,#e8a33d); background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); border-radius:8px; padding:9px 12px; font-size:12.5px; margin-bottom:10px; }
 [data-notification-settings] .n-banner.granted { border-left-color:var(--dsw-alias-state-success,#2fbf71); }
 [data-notification-settings] .n-banner.denied { border-left-color:var(--dsw-alias-state-danger,#e5534b); }
+[data-notification-settings] .n-banner.neutral { border-left-color:var(--dsw-alias-border-l2,#ffffff1f); }
 [data-notification-settings] .n-banner .grow { flex:1; min-width:0; }
-[data-notification-settings] .n-chip { display:inline-block; font-size:11px; border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-radius:6px; padding:1px 7px; color:var(--dsw-alias-label-secondary,#9aa4b2); white-space:nowrap; }
+[data-notification-settings] .n-chip { display:inline-block; font-size:11px; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); border-radius:6px; padding:1px 7px; color:var(--dsw-alias-label-secondary,#9aa4b2); white-space:nowrap; }
 [data-notification-settings] .n-chip.ok { color:var(--dsw-alias-state-success,#2fbf71); border-color:var(--dsw-alias-state-success,#2fbf71); }
 [data-notification-settings] .n-chip.warn { color:var(--dsw-alias-state-warn,#e8a33d); border-color:var(--dsw-alias-state-warn,#e8a33d); }
 [data-notification-settings] .n-chip.danger { color:var(--dsw-alias-state-danger,#e5534b); border-color:var(--dsw-alias-state-danger,#e5534b); }
 [data-notification-settings] .n-btn { background:var(--dsw-alias-brand-primary-new-color,#4176e6); border:none; color:#fff; border-radius:8px; padding:5px 12px; font-size:12px; cursor:pointer; }
 [data-notification-settings] .n-btn:hover { filter:brightness(1.12); }
-[data-notification-settings] .n-btn.ghost { background:transparent; border:1px solid var(--dsw-alias-border-l,#ffffff1f); color:var(--dsw-alias-label-primary,#e7eaf0); }
+[data-notification-settings] .n-btn.ghost { background:transparent; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); color:var(--dsw-alias-label-primary,#e7eaf0); }
 [data-notification-settings] .n-btn.ghost:hover { background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); filter:none; }
 [data-notification-settings] .n-btn.mini { padding:2px 9px; font-size:11px; }
 [data-notification-settings] .n-btn:disabled { opacity:.45; cursor:default; filter:none; }
-[data-notification-settings] .n-switch { position:relative; width:34px; height:19px; border-radius:999px; background:var(--dsw-alias-border-l,#ffffff1f); cursor:pointer; flex:none; transition:background .15s; display:inline-block; vertical-align:middle; }
+[data-notification-settings] .n-switch { position:relative; width:34px; height:19px; border-radius:999px; background:var(--dsw-alias-border-l2,#ffffff1f); cursor:pointer; flex:none; transition:background .15s; display:inline-block; vertical-align:middle; }
 [data-notification-settings] .n-switch.on { background:var(--dsw-alias-state-success,#2fbf71); }
 [data-notification-settings] .n-switch::after { content:""; position:absolute; top:2px; left:2px; width:15px; height:15px; border-radius:50%; background:var(--dsw-alias-bg-base,#151517); transition:left .15s; }
 [data-notification-settings] .n-switch.on::after { left:17px; }
 [data-notification-settings] .n-setrow { display:flex; justify-content:space-between; align-items:center; gap:10px; font-size:12.5px; }
-[data-notification-settings] .n-srow { display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid var(--dsw-alias-border-l,#ffffff1f); }
+[data-notification-settings] .n-srow { display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid var(--dsw-alias-border-l2,#ffffff1f); }
 [data-notification-settings] .n-grp:last-child .n-srow:last-child { border-bottom:none; }
 [data-notification-settings] .n-sinfo { flex:1; min-width:0; }
 [data-notification-settings] .n-sinfo b { font-size:12.5px; font-weight:600; }
 [data-notification-settings] .n-mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:10.5px; color:var(--dsw-alias-label-secondary,#9aa4b2); }
 [data-notification-settings] .n-gname { font-size:11px; color:var(--dsw-alias-label-secondary,#9aa4b2); letter-spacing:.4px; margin:10px 0 2px; }
-[data-notification-settings] .n-select, [data-notification-settings] .n-time { font:inherit; font-size:12px; color:inherit; background:transparent; border:1px solid var(--dsw-alias-border-l,#ffffff1f); border-radius:8px; padding:3px 7px; }
+[data-notification-settings] .n-select, [data-notification-settings] .n-time { font:inherit; font-size:12px; color:inherit; background:transparent; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); border-radius:8px; padding:3px 7px; }
 [data-notification-settings] .n-note { font-size:11px; color:var(--dsw-alias-label-secondary,#9aa4b2); margin-top:8px; }
 [data-notification-settings] .n-mastoff .n-srow .n-switch, [data-notification-settings] .n-mastoff .n-srow select, [data-notification-settings] .n-mastoff .n-srow button { opacity:.4; pointer-events:none; }
 [data-notification-settings] input[type="time"] { color-scheme: inherit; }
@@ -3185,16 +3568,32 @@ function ensureStyles2() {
   document.head.appendChild(style);
 }
 function NotificationSettingsPanel() {
-  const [data, setData] = (0, import_react4.useState)(null);
-  const [busy, setBusy] = (0, import_react4.useState)(false);
-  const refresh = (0, import_react4.useCallback)(() => {
-    invoke3("get_notifications_state").then(setData).catch(() => {
+  const [data, setData] = (0, import_react19.useState)(null);
+  const [busy, setBusy] = (0, import_react19.useState)(false);
+  const [previewNote, setPreviewNote] = (0, import_react19.useState)(null);
+  const [loadFailed, setLoadFailed] = (0, import_react19.useState)(false);
+  const refresh = (0, import_react19.useCallback)(() => {
+    invoke3("get_notifications_state").then((res) => {
+      setLoadFailed(false);
+      setData(res);
+    }).catch((e) => {
+      logFail(e);
+      setLoadFailed(true);
     });
   }, []);
-  (0, import_react4.useEffect)(() => {
+  (0, import_react19.useEffect)(() => {
     refresh();
   }, [refresh]);
-  const save = (0, import_react4.useCallback)((next) => {
+  const refetched = (0, import_react19.useRef)(false);
+  (0, import_react19.useEffect)(() => {
+    if (data === null || refetched.current) return;
+    refetched.current = true;
+    const timer = setTimeout(() => {
+      refresh();
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [data, refresh]);
+  const save = (0, import_react19.useCallback)((next) => {
     setBusy(true);
     invoke3("set_notifications_config", { config: next }).catch((e) => {
       logFail(e);
@@ -3205,7 +3604,7 @@ function NotificationSettingsPanel() {
     w.__xnlLogWarn?.(String(e));
     console.warn("[notifications] \u4FDD\u5B58\u5931\u8D25", e);
   };
-  const patch = (0, import_react4.useCallback)((fn) => {
+  const patch = (0, import_react19.useCallback)((fn) => {
     setData((prev) => {
       if (prev === null) return prev;
       const next = {
@@ -3221,7 +3620,7 @@ function NotificationSettingsPanel() {
     });
   }, [save]);
   if (data === null) {
-    return /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { "data-notification-settings": true, className: "n-note", children: "\u52A0\u8F7D\u4E2D\u2026" });
+    return /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { "data-notification-settings": true, className: "n-note", children: loadFailed ? "\u901A\u77E5\u8BBE\u7F6E\u8BFB\u53D6\u5931\u8D25\uFF1A\u684C\u9762\u58F3\u6CA1\u6709\u54CD\u5E94\uFF08\u8BE6\u89C1\u63A7\u5236\u53F0\uFF09" : "\u52A0\u8F7D\u4E2D\u2026" });
   }
   const requestPerm = () => {
     setBusy(true);
@@ -3241,36 +3640,49 @@ function NotificationSettingsPanel() {
       });
     }).catch((e) => console.warn("[notifications] \u5BFC\u5165\u97F3\u6548\u5931\u8D25", e));
   };
+  const previewSound = (id, sound) => {
+    invoke3("preview_notification_sound", { sound }).then((res) => {
+      const failure = previewFailure(res);
+      setPreviewNote(failure === null ? null : { id, text: failure });
+    }).catch((e) => {
+      logFail(e);
+      setPreviewNote({ id, text: "\u8BD5\u542C\u5931\u8D25\uFF1A\u684C\u9762\u58F3\u6CA1\u6709\u54CD\u5E94\uFF08\u8BE6\u89C1\u63A7\u5236\u53F0\uFF09" });
+    });
+  };
   const groupLabel = (gid) => data.groups.find(([g]) => g === gid)?.[1] ?? gid;
   const grouped = data.groups.map(([gid]) => ({
     gid,
     rows: data.scenarios.filter((s) => s.group === gid)
   }));
-  return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { "data-notification-settings": true, className: data.config.enabled ? "" : "n-mastoff", children: [
-    data.permission === "granted" ? /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-banner granted", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "n-chip ok", children: "\u5DF2\u6388\u4E88" }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "grow", children: "\u7CFB\u7EDF\u5141\u8BB8\u672C\u5E94\u7528\u53D1\u9001\u901A\u77E5\u3002" }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "n-btn ghost mini", onClick: openSysPrefs, children: "\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E" })
-    ] }) : data.permission === "denied" ? /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-banner denied", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "n-chip danger", children: "\u88AB\u62D2\u7EDD" }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "grow", children: "\u901A\u77E5\u6A2A\u5E45\u4E0D\u4F1A\u663E\u793A\u3002\u53EF\u5728\u7CFB\u7EDF\u8BBE\u7F6E\u4E2D\u624B\u52A8\u5F00\u542F\uFF1B\u5F00\u53D1\u671F\u53EF\u6267\u884C tccutil reset Notifications com.arcreel.dsh-desktop-tauriapp \u540E\u91CD\u8BD5\u3002" }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "n-btn ghost mini", onClick: openSysPrefs, children: "\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E" }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "n-btn mini", onClick: requestPerm, disabled: busy, children: "\u7533\u8BF7\u6743\u9650" })
-    ] }) : data.permission === "unavailable" ? /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-banner", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "n-chip", children: "\u6743\u9650\u4E0D\u53EF\u7528" }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "grow", children: "\u5F53\u524D\u73AF\u5883\u65E0\u6CD5\u67E5\u8BE2\u7CFB\u7EDF\u901A\u77E5\u6743\u9650\uFF08dev \u88F8\u4E8C\u8FDB\u5236\u6216\u5E73\u53F0\u4E0D\u652F\u6301\uFF09\uFF1B\u9A8C\u6536\u8BF7\u4F7F\u7528\u6253\u5305\u540E\u7684 .app\u3002" })
-    ] }) : /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-banner", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "n-chip warn", children: "\u672A\u51B3\u5B9A" }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "grow", children: "\u5C1A\u672A\u5411\u7CFB\u7EDF\u7533\u8BF7\u901A\u77E5\u6743\u9650\uFF0C\u9996\u6B21\u7533\u8BF7\u4F1A\u5F39\u7CFB\u7EDF\u6388\u6743\u7A97\u3002" }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "n-btn mini", onClick: requestPerm, disabled: busy, children: "\u7533\u8BF7\u6743\u9650" }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "n-btn ghost mini", onClick: openSysPrefs, children: "\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E" })
+  const capability = data.capability ?? null;
+  const soundHint = capabilityHint(capability);
+  const soundChoices = customSoundOptions(data.sounds, capability);
+  const permissionUnavailable = permissionUnavailableCopy(capability?.platform);
+  return /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { "data-notification-settings": true, className: data.config.enabled ? "" : "n-mastoff", children: [
+    data.permission === "granted" ? /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-banner granted", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-chip ok", children: "\u5DF2\u6388\u4E88" }),
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "grow", children: "\u7CFB\u7EDF\u5141\u8BB8\u672C\u5E94\u7528\u53D1\u9001\u901A\u77E5\u3002" }),
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { className: "n-btn ghost mini", onClick: openSysPrefs, children: "\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E" })
+    ] }) : data.permission === "denied" ? /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-banner denied", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-chip danger", children: "\u88AB\u62D2\u7EDD" }),
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "grow", children: deniedPermissionCopy(capability?.platform, data.bundleId) }),
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { className: "n-btn ghost mini", onClick: openSysPrefs, children: "\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E" }),
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { className: "n-btn mini", onClick: requestPerm, disabled: busy, children: "\u7533\u8BF7\u6743\u9650" })
+    ] }) : data.permission === "unavailable" ? /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: `n-banner${permissionUnavailable.neutral ? " neutral" : ""}`, children: [
+      permissionUnavailable.chip !== null && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-chip", children: permissionUnavailable.chip }),
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "grow", children: permissionUnavailable.text })
+    ] }) : /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-banner", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-chip warn", children: "\u672A\u51B3\u5B9A" }),
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "grow", children: "\u5C1A\u672A\u5411\u7CFB\u7EDF\u7533\u8BF7\u901A\u77E5\u6743\u9650\uFF0C\u9996\u6B21\u7533\u8BF7\u4F1A\u5F39\u7CFB\u7EDF\u6388\u6743\u7A97\u3002" }),
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { className: "n-btn mini", onClick: requestPerm, disabled: busy, children: "\u7533\u8BF7\u6743\u9650" }),
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { className: "n-btn ghost mini", onClick: openSysPrefs, children: "\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E" })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "n-card", children: /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-setrow", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("b", { children: "\u542F\u7528\u684C\u9762\u901A\u77E5" }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "n-note", children: "\u603B\u5F00\u5173\uFF1A\u5173\u95ED\u540E\u6240\u6709\u573A\u666F\u4E00\u5F8B\u9759\u9ED8\uFF08\u573A\u666F\u5F00\u5173\u4FDD\u7559\uFF0C\u91CD\u65B0\u5F00\u542F\u5373\u6062\u590D\uFF09" })
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-card", children: /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-setrow", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("b", { children: "\u542F\u7528\u684C\u9762\u901A\u77E5" }),
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-note", children: "\u603B\u5F00\u5173\uFF1A\u5173\u95ED\u540E\u6240\u6709\u573A\u666F\u4E00\u5F8B\u9759\u9ED8\uFF08\u573A\u666F\u5F00\u5173\u4FDD\u7559\uFF0C\u91CD\u65B0\u5F00\u542F\u5373\u6062\u590D\uFF09" })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
         "span",
         {
           className: `n-switch ${data.config.enabled ? "on" : ""}`,
@@ -3280,13 +3692,13 @@ function NotificationSettingsPanel() {
         }
       )
     ] }) }),
-    /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-card", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-setrow", style: { marginBottom: 10 }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("b", { children: "\u514D\u6253\u6270\u65F6\u6BB5" }),
-          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "n-note", children: "\u65F6\u6BB5\u5185\u901A\u77E5\u9759\u9ED8\uFF08\u4ECD\u8FDB\u7CFB\u7EDF\u901A\u77E5\u4E2D\u5FC3\uFF09" })
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-card", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-setrow", style: { marginBottom: 10 }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("b", { children: "\u514D\u6253\u6270\u65F6\u6BB5" }),
+          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-note", children: "\u65F6\u6BB5\u5185\u901A\u77E5\u9759\u9ED8\uFF08\u4ECD\u8FDB\u7CFB\u7EDF\u901A\u77E5\u4E2D\u5FC3\uFF09" })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
           "span",
           {
             className: `n-switch ${data.config.dnd.on ? "on" : ""}`,
@@ -3296,9 +3708,9 @@ function NotificationSettingsPanel() {
           }
         )
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 10, opacity: data.config.dnd.on ? 1 : 0.45 }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "n-note", style: { margin: 0 }, children: "\u4ECE" }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 10, opacity: data.config.dnd.on ? 1 : 0.45 }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-note", style: { margin: 0 }, children: "\u4ECE" }),
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
           "input",
           {
             className: "n-time",
@@ -3310,8 +3722,8 @@ function NotificationSettingsPanel() {
             })
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "n-note", style: { margin: 0 }, children: "\u5230" }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-note", style: { margin: 0 }, children: "\u5230" }),
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
           "input",
           {
             className: "n-time",
@@ -3324,12 +3736,12 @@ function NotificationSettingsPanel() {
           }
         )
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-setrow", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("b", { children: "\u5168\u5C4F\u65F6\u9759\u9ED8" }),
-          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "n-note", children: "\u672C\u5E94\u7528\u7A97\u53E3\u5168\u5C4F\u65F6\u4E0D\u5F39\u6A2A\u5E45" })
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-setrow", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("b", { children: "\u5168\u5C4F\u65F6\u9759\u9ED8" }),
+          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-note", children: "\u672C\u5E94\u7528\u7A97\u53E3\u5168\u5C4F\u65F6\u4E0D\u5F39\u6A2A\u5E45" })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
           "span",
           {
             className: `n-switch ${data.config.dnd.suppress_fullscreen ? "on" : ""}`,
@@ -3338,27 +3750,32 @@ function NotificationSettingsPanel() {
             })
           }
         )
-      ] })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-card", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline" }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("b", { style: { fontSize: 13 }, children: "\u573A\u666F" }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "n-note", children: "\u6BCF\u4E2A\u573A\u666F\u72EC\u7ACB\u5F00\u5173\u4E0E\u97F3\u6548" })
       ] }),
-      grouped.map(({ gid, rows }) => /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-grp", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "n-gname", children: groupLabel(gid) }),
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-note", children: focusSuppressHint() })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-card", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline" }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("b", { style: { fontSize: 13 }, children: "\u573A\u666F" }),
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-note", children: "\u6BCF\u4E2A\u573A\u666F\u72EC\u7ACB\u5F00\u5173\u4E0E\u97F3\u6548" })
+      ] }),
+      grouped.map(({ gid, rows }) => /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-grp", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-gname", children: groupLabel(gid) }),
         rows.map((s) => {
           const conf = data.config.scenarios[s.id] ?? { enabled: s.defaultOn, sound: "default" };
-          return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-srow", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-sinfo", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("b", { children: s.name }),
-              /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("span", { className: "n-mono", style: { display: "block" }, children: [
+          const soundWarning = configuredSoundWarning(capability, conf.sound);
+          const failureNote = previewNote !== null && previewNote.id === s.id ? previewNote.text : null;
+          return /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-srow", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-sinfo", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("b", { children: s.name }),
+              /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("span", { className: "n-mono", style: { display: "block" }, children: [
                 s.id,
                 " \xB7 ",
                 s.desc
-              ] })
+              ] }),
+              soundWarning !== null && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-note", style: { color: "var(--dsw-alias-state-warn,#e8a33d)" }, children: soundWarning }),
+              failureNote !== null && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-note", style: { color: "var(--dsw-alias-state-danger,#e5534b)" }, children: failureNote })
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
+            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
               "span",
               {
                 className: `n-switch ${conf.enabled ? "on" : ""}`,
@@ -3368,7 +3785,7 @@ function NotificationSettingsPanel() {
                 })
               }
             ),
-            /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)(
+            /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)(
               "select",
               {
                 className: "n-select",
@@ -3376,6 +3793,7 @@ function NotificationSettingsPanel() {
                 value: conf.sound,
                 onChange: (e) => {
                   const v = e.target.value;
+                  setPreviewNote(null);
                   if (v === "__choose") chooseSound();
                   else patch((c) => {
                     const cur = c.scenarios[s.id] ?? { enabled: s.defaultOn, sound: "default" };
@@ -3383,31 +3801,32 @@ function NotificationSettingsPanel() {
                   });
                 },
                 children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("option", { value: "default", children: "\u7CFB\u7EDF\u9ED8\u8BA4" }),
-                  /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("option", { value: "none", children: "\u65E0\u58F0" }),
-                  data.sounds.map((n) => /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("option", { value: `custom:${n}`, children: n }, n)),
-                  /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("option", { value: "__choose", children: "\u81EA\u5B9A\u4E49\u6587\u4EF6\u2026" })
+                  /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("option", { value: "default", children: "\u7CFB\u7EDF\u9ED8\u8BA4" }),
+                  /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("option", { value: "none", children: "\u65E0\u58F0" }),
+                  soundChoices.map((opt) => /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("option", { value: opt.value, disabled: opt.disabled, title: opt.title, children: opt.label }, opt.value)),
+                  /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("option", { value: "__choose", children: "\u81EA\u5B9A\u4E49\u6587\u4EF6\u2026" })
                 ]
               }
             ),
-            /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
+            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
               "button",
               {
                 className: "n-btn ghost mini",
                 title: "\u8BD5\u542C",
-                onClick: () => {
-                  void invoke3("preview_notification_sound", { sound: conf.sound }).catch(() => {
-                  });
-                },
+                onClick: () => previewSound(s.id, conf.sound),
                 children: "\u25B6"
               }
             )
           ] }, s.id);
         })
       ] }, gid)),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "n-note", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-note", children: [
         "\u81EA\u5B9A\u4E49\u97F3\u6548\u6587\u4EF6\uFF08wav / mp3 / ogg\uFF0C\u22645MB\uFF09\u5BFC\u5165\u540E\u5B58\u653E\u4E8E\u6570\u636E\u76EE\u5F55 sounds/\uFF0C\u53EF\u968F\u65F6\u5728\u4E0B\u62C9\u4E2D\u5207\u6362\u6216\u8986\u76D6\u3002",
         busy ? " \xB7 \u4FDD\u5B58\u4E2D\u2026" : ""
+      ] }),
+      soundHint !== null && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-banner", style: { marginTop: 10, marginBottom: 0 }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-chip warn", children: "\u97F3\u6548" }),
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "grow", children: soundHint })
       ] })
     ] })
   ] });

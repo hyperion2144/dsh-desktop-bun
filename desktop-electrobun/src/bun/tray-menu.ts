@@ -6,7 +6,7 @@ import { remoteDisplay } from '../shared/remote.ts'
 // 而 `Tray` 类只是把它交给原生层。分开之后无显示器/无 CEF 也能测。
 //
 // 旧 Tauri 壳的托盘能力（`docs/research/shell-capability-inventory.md` 第 6 节）在这里逐项对齐：
-// 显示/隐藏窗口、profile 切换、重启 dsh 服务、运行时来源切换（内置 / 已装版本 /
+// 显示/隐藏窗口、profile 切换、重启应用、运行时来源切换（内置 / 已装版本 /
 // 目录里点一下就下载并切换）、退出。
 // 还没做的项不摆假入口——宁可菜单短，也不要点了没反应的项。
 
@@ -27,7 +27,7 @@ export interface ProfileRow {
 export const TRAY_MENU_ACTIONS = {
   toggleWindow: 'tray:toggle-window',
   quit: 'tray:quit',
-  restartService: 'tray:restart-service',
+  restartApp: 'tray:restart-app',
   remoteLocal: 'tray:remote:local',
   remoteAddrPrefix: 'tray:remote:addr:',
   windowPrefix: 'tray:window:',
@@ -38,11 +38,12 @@ export const TRAY_MENU_ACTIONS = {
   stopProfile: 'tray:profile:stop:',
   newProfile: 'tray:profile:new',
   migrateProfile: 'tray:profile:migrate',
+  checkUpdates: 'tray:check-updates',
 } as const
 export type TrayActionKind =
   | 'toggle-window'
   | 'quit'
-  | 'restart-service'
+  | 'restart-app'
   | 'open-window'
   | 'switch-runtime'
   | 'download-runtime'
@@ -51,6 +52,7 @@ export type TrayActionKind =
   | 'stop-profile'
   | 'new-profile'
   | 'migrate-profile'
+  | 'check-updates'
 
 export interface TrayAction {
   kind: TrayActionKind
@@ -77,6 +79,13 @@ export interface TrayState {
   profileRows?: readonly ProfileRow[]
   /** dsh 宿主是否在跑（守护器重启期间会短暂为 false） */
   hostRunning: boolean
+  /**
+   * #117：服务面自己管 DSH 的判别位。服务面先于 DSH 存在（#117 的核心），所以托盘在
+   * DSH 还没起来 / 起不来的时候照样拿得到，也能把原因摆给用户。缺省按 hostRunning 推。
+   */
+  serviceStatus?: 'stopped' | 'starting' | 'running' | 'failed' | 'blocked'
+  /** serviceStatus 为 failed / blocked 时的原因（直接进状态行，告诉用户还能干什么） */
+  serviceError?: string | null
   /** 运行时来源的人类可读标签，例如 `内置 0.2.1-alpha.2` */
   runtimeLabel: string
   /** 随包内置树的版本（拿不到时 null，菜单文案会退成「版本未知」） */
@@ -96,12 +105,24 @@ export interface TrayState {
   remoteList: readonly string[]
   /** 「注册 dsh 命令」项的文案；null = 已注册或还没探出 ⇒ 不摆这一项（旧壳 #175 三态） */
   registerLabel: string | null
+  /**
+   * #141：「检查更新」的状态行。缺省（undefined）时菜单不摆这一行，旧调用方不受影响。
+   */
+  updateCheck?: TrayUpdateCheck
 }
 
 /** 版本目录里的一项（与 shared/runtime-catalog.ts 的 CatalogEntry 同名，这里只取菜单要用的两个字段）。 */
 export interface TrayCatalogItem {
   version: string
   channel: string
+}
+
+/** #141：托盘「检查更新」的进程态（壳主进程维护，事件驱动下发，不定时刷新）。 */
+export interface TrayUpdateCheck {
+  /** 正在检查（菜单项置灰，防连点） */
+  checking: boolean
+  /** 上一次检查的结果；null = 还没查过 */
+  result: { notify: boolean; reason: string; updates: number } | null
 }
 
 /** 与 Electrobun 的 MenuItemConfig 对齐（只声明我们用到的字段）。 */
@@ -131,7 +152,8 @@ export function parseTrayAction(action: string | undefined | null): TrayAction |
     return { kind: 'open-window', profile }
   }
   if (action === TRAY_MENU_ACTIONS.registerCli) return { kind: 'register-cli' }
-  if (action === TRAY_MENU_ACTIONS.restartService) return { kind: 'restart-service' }
+  if (action === TRAY_MENU_ACTIONS.restartApp) return { kind: 'restart-app' }
+  if (action === TRAY_MENU_ACTIONS.checkUpdates) return { kind: 'check-updates' }
   if (action === TRAY_MENU_ACTIONS.runtimeBuiltin) return { kind: 'switch-runtime' }
   if (action.startsWith(TRAY_MENU_ACTIONS.runtimeVersionPrefix)) {
     const version = action.slice(TRAY_MENU_ACTIONS.runtimeVersionPrefix.length)
@@ -290,6 +312,51 @@ function truncateMenu(items: TrayMenuItem[]): TrayMenuItem[] {
     return next
   })
 }
+/**
+ * #117：托盘状态行。把「服务面在 / DSH 在不在 / 为什么不在」讲清楚，
+ * 而不是一个「宿主未运行」就让人猜。没有 serviceStatus 的旧调用方按 hostRunning 兼容。
+ */
+export function statusLabel(state: TrayState): string {
+  const status = state.serviceStatus
+  if (status === undefined) return state.hostRunning ? '状态：运行中' : '状态：宿主未运行'
+  if (status === 'running') return '状态：运行中'
+  if (status === 'starting') return '状态：dsh 启动中…'
+  if (status === 'stopped') return '状态：dsh 未运行（托盘已就绪）'
+  const why = state.serviceError === undefined || state.serviceError === null || state.serviceError === '' ? '' : `（${truncateTrayLabel(state.serviceError)}）`
+  if (status === 'blocked') return `状态：已阻塞${why}`
+  return `状态：dsh 未起来${why}`
+}
+
+/**
+ * #141：「检查更新」状态行的文案。产品语义，跟着菜单模型一起单测。
+ *
+ * 口径：查不了就直说查不成（原因跟在后面），而不是抿一句「已是最新」——用户会把它当成真结论。
+ */
+export function updateCheckLabel(check: TrayUpdateCheck | undefined): string | null {
+  if (check === undefined) return null
+  if (check.checking) return '更新：正在检查…'
+  if (check.result === null) return '更新：未检查'
+  if (check.result.notify) return `更新：有 ${String(check.result.updates)} 项可用更新`
+  return `更新：${truncateTrayLabel(check.result.reason)}`
+}
+
+/**
+ * #141：「检查更新」那两格——只在用户问过一次之后才出现（状态行），但「检查更新」始终在。
+ * 状态行 enabled:false（只读），菜单项在检查中置灰防连点。
+ */
+function updateCheckItems(state: Pick<TrayState, 'updateCheck'>): TrayMenuItem[] {
+  const status = updateCheckLabel(state.updateCheck)
+  const items: TrayMenuItem[] = []
+  if (status !== null) items.push({ type: 'normal', label: status, enabled: false })
+  items.push({
+    type: 'normal',
+    label: '检查更新',
+    action: TRAY_MENU_ACTIONS.checkUpdates,
+    enabled: state.updateCheck?.checking !== true,
+  })
+  return items
+}
+
 export function trayMenu(state: TrayState): TrayMenuItem[] {
   const profiles = orderedProfiles(state)
   const items: TrayMenuItem[] = [
@@ -354,6 +421,8 @@ export function trayMenu(state: TrayState): TrayMenuItem[] {
       label: '运行时版本',
       submenu: runtimeMenuItems(state),
     },
+    // #141：「检查更新」与运行时子菜单同区（都是“把自己这套弄到最新”）。
+    ...updateCheckItems(state),
     {
       type: 'normal',
       label: 'dsh 服务地址',
@@ -361,10 +430,10 @@ export function trayMenu(state: TrayState): TrayMenuItem[] {
     },
     {
       type: 'normal',
-      label: state.hostRunning ? '状态：运行中' : '状态：宿主未运行',
+      label: statusLabel(state),
       enabled: false,
     },
-    { type: 'normal', label: '重启 dsh 服务', action: TRAY_MENU_ACTIONS.restartService },
+    { type: 'normal', label: '重启应用', action: TRAY_MENU_ACTIONS.restartApp },
     // 「注册 dsh 命令」（旧壳 #175 条件项）：只在未注册/冲突时出现，已注册或还没探出就不摆
     ...(state.registerLabel === null
       ? []

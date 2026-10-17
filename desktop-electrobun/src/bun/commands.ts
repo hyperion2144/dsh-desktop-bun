@@ -17,7 +17,13 @@ import { permissionHint, type NotifyPermission } from '../shared/notify-permissi
 import type { PortClaim } from '../shared/ports.ts'
 import { EMPTY_TASK, startupAction, validProfileName, type MigrationStatus, type ProfileDependencyRow, type StartupHealth, type TaskSnapshot } from '../shared/profile-ops.ts'
 import type { ShellUpdater } from './updater.ts'
+import type { UpdateNoticeStore, UpdateNoticeTarget } from './update-notice-store.ts'
 import type { ProxyEnv } from '../shared/proxy-env.ts'
+import type { KeepAwakeCapability } from './keep-awake.ts'
+import type { BootPayload } from './shell-server.ts'
+import type { ContextMenuRequest } from './context-menu.ts'
+import { parseContextMenuRequest } from './context-menu.ts'
+import { isOpenableUrl } from './external.ts'
 
 export interface CommandDeps {
   home: string
@@ -32,6 +38,8 @@ export interface CommandDeps {
   save: (patch: Record<string, unknown>) => DesktopSettings
   /** dsh 服务面：重启（设置面板调；#60 起为壳级完整重启，缺省回落宿主级） */
   restartService?: () => Promise<void>
+  /** #119：整应用退出 + 自动重启（B）。拉不起时必须带原因回传——dev 态要显式降级，禁止假装成功。 */
+  restartApp?: () => Promise<{ ok: boolean; reason?: string; message?: string }>
   /** dsh 服务面状态快照（`get_dsh_status`） */
   status?: () => Record<string, unknown>
   /** 壳当前占用的端口（`list_profile_ports` 用：页面口/上游口/lane 口） */
@@ -45,11 +53,15 @@ export interface CommandDeps {
   /** 运行中的 dsh 版本（运行时树的版本；快照缺位时兜底） */
   dshVersion?: () => string
   openExternal?: (url: string) => void
+  /** #128：页面注入脚本的 boot 包（`/__shell__/boot` 的同一份数据）；宿主未就绪返回 null。 */
+  bootPayload?: () => BootPayload | null
+  /** #128：页面右键菜单（`/__shell__/context-menu` 的同一个回调，由主进程弹原生菜单）。 */
+  showContextMenu?: (request: ContextMenuRequest) => void
   closeWindow?: () => void
-  /** 试听音效（设置面板的「试听」；缺省不响，但要回一条可诊断的话） */
-  playSound?: (name: string) => void
-  /** 系统默认提示音的试听（旧壳 `preview_notification_sound("default")`） */
-  playSystemSound?: () => void
+  /** 试听音效（设置面板的「试听」）：真的出声才 true；没后端时 false，面板据此提示（不再假报成功） */
+  playSound?: (name: string) => boolean
+  /** 系统默认提示音的试听（旧壳 `preview_notification_sound("default")`）：真起了进程才 true */
+  playSystemSound?: () => boolean
   /** 弹原生文件选择器选音频（返回绝对路径或 null；旧壳 tauri-plugin-dialog） */
   pickSoundFile?: () => Promise<string | null>
   /** 把音频文件收进 `$DSH_HOME/sounds/`，返回入库文件名（旧壳 sounds::import_file） */
@@ -59,6 +71,8 @@ export interface CommandDeps {
   notifyPermission?: () => NotifyPermission
   /** 主动申请通知授权（返回申请后的状态） */
   notifyRequestPermission?: () => NotifyPermission
+  /** 应用的 bundle identifier（构建期口径，app-identity）：被拒绝横幅的 tccutil 提示要用当前 id，不写死 */
+  bundleId?: string
   /** 运行时快照：来源 / 内置版本 / 已装列表（命令表不自己碰文件系统） */
   runtime?: () => RuntimeSnapshot
   /** 拉取版本目录（github / npm；失败不抛，回 {entries, error}） */
@@ -109,6 +123,11 @@ export interface CommandDeps {
   testProxy?: (url: string) => Promise<number>
   /** 应用更新（`src/bun/updater.ts` 包住的框架 Updater）；无窗口单测可以不接 */
   updater?: ShellUpdater
+  /**
+   * #136：启动更新提醒的开关与拉黑列表。状态住在 `app-support/update-notice.json`，
+   * **不经 `desktop-settings.json`**——设置文件的键名是契约红线，壳内部状态不往里塞。
+   */
+  updateNotice?: UpdateNoticeStore
   /** 桌面档快捷键偏好（旧壳 `shortcuts.rs`；壳只做上限 + 原子写，不解析 JSON） */
   keybindings?: { read: () => string | null; write: (raw: string) => void }
   /** 各 profile 的依赖状态（`list_profile_dependency_status`；旧壳比 pnpm 大版本） */
@@ -121,12 +140,41 @@ export interface CommandDeps {
   zoomToggle?: () => void
   /** F12：确认弹窗回填的同槽转发（旧壳 ui_input_confirm） */
   inputConfirm?: (flow: string, value: string) => void
+  /** #75：防休眠能力快照（Linux 拿不到 inhibit 通道时要能说出来；无窗口单测可不接） */
+  keepAwake?: () => KeepAwakeCapability
 }
 
 /** 上游端口：状态条与「dsh 来源」卡都要它（壳状态快照里的 upstreamPort） */
 function runningPort(deps: CommandDeps): number {
   const running = deps.status?.() ?? {}
   return typeof running.upstreamPort === 'number' ? running.upstreamPort : 0
+}
+
+/** #136：面板没接提醒状态时显式报错，不静默回默认值——开关显示成「开」而实际关着是最坏的一种撒谎。 */
+function noticeStore(deps: CommandDeps): UpdateNoticeStore {
+  const store = deps.updateNotice
+  if (store === undefined) throw new Error('桌面壳未接启动更新提醒状态')
+  return store
+}
+
+/**
+ * #136：把面板传来的 `{kind, version}[]` 收干净再进 store。
+ * 非数组、元素形状不对、空版本号一律拒——拉黑表是持久状态，宁可报错也不能被垃圾参数写脏。
+ */
+function noticeTargets(args: Record<string, unknown>, command: string): UpdateNoticeTarget[] {
+  const raw = args['targets']
+  if (!Array.isArray(raw) || raw.length === 0) throw new Error(`${command}: targets 必须是非空数组`)
+  const targets: UpdateNoticeTarget[] = []
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) throw new Error(`${command}: targets 元素必须是对象`)
+    const row = item as Record<string, unknown>
+    const kind = row['kind']
+    const version = row['version']
+    if (kind !== 'shell' && kind !== 'runtime') throw new Error(`${command}: kind 必须是 shell 或 runtime`)
+    if (typeof version !== 'string' || version.trim() === '') throw new Error(`${command}: version 必须是非空字符串`)
+    targets.push({ kind, version: version.trim() })
+  }
+  return targets
 }
 
 export interface RuntimeSnapshot {
@@ -208,6 +256,8 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
         ],
         // 面板的 nsGet() 读这一段（旧壳只回吐扁平键，那段其实是死的）
         settings: serializeSettings(settings),
+        // #75：防休眠通道的能力快照（旧壳/无窗口单测缺省 null，面板据此显示「拿不到通道」）
+        keep_awake: deps.keepAwake?.() ?? null,
       }
     },
 
@@ -358,6 +408,18 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       deps.log('[rpc] 收到重启 dsh 服务请求')
       await deps.restartService()
       return {}
+    },
+
+    // #119 整应用重启（B）：dev_tools 保存后的生效路径。**与 restart_dsh_service 分开**：
+    // 后者只重起 DSH 树（#60 语义，壳不动），而 dev_tools 的决策锁在壳进程加载那一刻
+    // （模块顶层 planDevToolsBoot + C environ 双写），不重启壳就永不重跑。
+    // 失败（如 dev 构建不支持自拉起）**不抛**：把原因原样回传，让页面说人话，而不是假装成功。
+    restart_desktop_app: async () => {
+      if (deps.restartApp === undefined) throw new Error('restart_desktop_app: 桌面壳重启不可用')
+      deps.log('[rpc] 收到重启桌面应用请求')
+      const result = await deps.restartApp()
+      deps.log(`[rpc] 重启桌面应用：${result.ok ? '已拉起新实例，本进程即将退出' : `${result.reason ?? 'unknown'} —— ${result.message ?? ''}`}`)
+      return result
     },
 
     // 多窗口：设置面板每份窗口各问一次壳，但端口表要覆盖所有 profile。
@@ -514,6 +576,10 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
         })),
         groups: NOTIFICATION_GROUPS,
         sounds: listSounds(deps.home),
+        // 本机播放能力（三平台后端探测的结论）：面板据此禁用没后端的格式、并说明原因
+        capability: deps.notifier?.soundCapability() ?? null,
+        // 当前应用的 bundle id（构建期口径）：被拒绝提示的 tccutil 命令要拼真实 id（#142）
+        bundleId: deps.bundleId ?? null,
       }
     },
     set_notifications_config: (args) => {
@@ -543,14 +609,15 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       deps.log(`[notify] 试听请求：sound = ${sound === '' ? '(空)' : sound}`)
       if (sound === '' || sound === 'none') {
         deps.log('[notify] 试听：none/空 ⇒ 不响')
-        return { played: null, sound }
+        return { played: null, sound, audible: false }
       }
       if (sound === 'default') {
-        deps.playSystemSound?.()
-        return { played: 'default', sound }
+        const audible = deps.playSystemSound?.() === true
+        if (!audible) deps.log('[notify] 试听系统提示音：本机没有可用后端，未出声')
+        return { played: 'default', sound, audible }
       }
-      deps.playSound?.(sound)
-      return { played: sound, sound }
+      const audible = deps.playSound?.(sound) === true
+      return { played: sound, sound, audible }
     },
     // 选文件（返回路径，由 import_notification_sound 收进 sounds/）
     choose_notification_sound: async () => (await deps.pickSoundFile?.()) ?? null,
@@ -605,9 +672,34 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       const result = deps.exportDiagnostics(snapshot)
       return { path: result.path, bytes: result.bytes }
     },
+
+    // ---- #128：页面注入脚本（preload）——原先打壳自答 HTTP 端点，现走官方 RPC 显式方法 ----
+    // 两条都只依赖注入的 deps，boot 就绪判定沿用 HTTP 路由的 503 语义（throw ⇒ 命令面报错）。
+    get_boot_payload: () => {
+      const payload = deps.bootPayload?.()
+      if (payload === null || payload === undefined) throw new Error('boot pending')
+      return payload
+    },
+    show_context_menu: (args: Record<string, unknown>) => {
+      if (deps.showContextMenu === undefined) throw new Error('没有窗口宿主（右键菜单不可用）')
+      // 字段归一化只有一份实现（#144-2）：与 shell-server.ts 的 `/__shell__/context-menu`
+      // 共用 parseContextMenuRequest——entry 白名单化、路径只认绝对路径，改一处就够。
+      // 这里**不**再叠第二层鉴权：请求已经过 createShellRpcFunnel 的 view 授权
+      // （isCommandAllowed），叠一层只会把 remote lane 的调用也挡掉。
+      deps.showContextMenu(parseContextMenuRequest(args))
+      return {}
+    },
     open_external: (args) => {
       const url = argString(args, 'url')
       if (url === '') throw new Error('open_external: url 不能为空')
+      // #128：RPC 直达主进程，命令面必须自带闸——否则 javascript:/file: 这类协议、
+      // 或壳自己的 loopback origin 链接会直接落到系统打开器。
+      // 用 isOpenableUrl（两档口径，见 external.ts）而不是 isExternalUrl（仅链接口径）：
+      // 壳内按钮也要用 open_external 唤起系统设置面板（x-apple.systempreferences:），
+      // 只放行链接口径会把那条按钮静默吞掉。拿不到 origin（无窗口单测）时退化成协议闸。
+      const running = deps.status?.() ?? {}
+      const selfOrigin = typeof running.origin === 'string' ? running.origin : undefined
+      if (!isOpenableUrl(url, selfOrigin)) throw new Error(`open_external: 不是可外部打开的 URL（${url}）`)
       deps.openExternal?.(url)
       return {}
     },
@@ -742,6 +834,20 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       if (updater === undefined) throw new Error('apply_update：壳未接应用更新')
       return updater.apply()
     },
+    // ---- 启动更新提醒的开关与拉黑列表（#136）----
+    // 面板只改 `update-notice.json`；不碰 desktop-settings.json（键名是契约红线）。
+    get_update_notice_state: () => {
+      return noticeStore(deps).read()
+    },
+    set_update_notice_enabled: (args) => {
+      const enabled = args['enabled']
+      if (typeof enabled !== 'boolean') throw new Error('set_update_notice_enabled: enabled 必须是布尔值')
+      return noticeStore(deps).setEnabled(enabled)
+    },
+    restore_update_notice: (args) => {
+      return noticeStore(deps).restore(noticeTargets(args, 'restore_update_notice'))
+    },
+    clear_update_notice_ignored: () => noticeStore(deps).clearIgnored(),
   }
 
   for (const [name, reason] of Object.entries(NOT_PORTED)) {

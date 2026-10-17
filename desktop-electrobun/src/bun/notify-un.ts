@@ -21,6 +21,7 @@ interface NotifySymbols {
   dsh_un_start: () => void
   dsh_un_status: () => number
   dsh_un_request: () => void
+  dsh_un_refresh: () => void
   dsh_un_post: (title: number, body: number, sound: number) => number
   dsh_un_last_error: () => number
 }
@@ -32,8 +33,10 @@ export interface NativeNotify {
   readonly libPath: string | null
   /** 幂等初始化：刷一次状态，未决定就顺手申请（旧壳 setup 阶段的行为）。 */
   start(): void
-  /** 只读当前状态（不发任何系统调用）。 */
+  /** 读当前状态：先踢一次异步刷新（不申请），本次返回的是上一次刷出来的值。 */
   status(): NotifyPermission
+  /** 踢一次状态刷新（异步、不申请）：系统设置里的开关变化由后续 status() 看到。 */
+  refresh(): void
   /** 主动申请授权（异步，结果由后续 status() 看到）。 */
   request(): NotifyPermission
   /** 投递一条通知；返回是否已排进原生队列。 */
@@ -84,6 +87,7 @@ const UNKNOWN_BRIDGE = (log: (line: string) => void, reason: string): NativeNoti
     start: () => {},
     status: () => 'unavailable',
     request: () => 'unavailable',
+    refresh: () => {},
     post: () => false,
     lastError: () => 0,
   }
@@ -131,6 +135,7 @@ export function createNativeNotify(options: NativeNotifyOptions = {}): NativeNot
       dsh_un_start: { args: [], returns: FFIType.void },
       dsh_un_status: { args: [], returns: FFIType.i32 },
       dsh_un_request: { args: [], returns: FFIType.void },
+      dsh_un_refresh: { args: [], returns: FFIType.void },
       dsh_un_post: { args: [FFIType.ptr, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
       dsh_un_last_error: { args: [], returns: FFIType.i32 },
     }) as unknown as { symbols: NotifySymbols }
@@ -157,9 +162,17 @@ export function createNativeNotify(options: NativeNotifyOptions = {}): NativeNot
     },
     status: () => {
       try {
+        lib.symbols.dsh_un_refresh()
         return permissionFromCode(Number(lib.symbols.dsh_un_status()))
       } catch {
         return 'unavailable'
+      }
+    },
+    refresh: () => {
+      try {
+        lib.symbols.dsh_un_refresh()
+      } catch (error) {
+        log(`[notify-un] 刷新授权状态失败：${error instanceof Error ? error.message : String(error)}`)
       }
     },
     request: () => {

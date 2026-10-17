@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { createRpcRouter, type RpcHandler } from '../src/bun/rpc.ts'
-import { createShellRpcFunnel, createWindowStateNotifier, type ShellRpcDeps } from '../src/bun/rpc-bridge.ts'
+import { createShellRpcFunnel, type ShellRpcDeps } from '../src/bun/rpc-bridge.ts'
 import { deriveMaximized, type WindowFrame } from '../src/bun/window-max.ts'
 import { createViewRegistry } from '../src/shared/view-grant.ts'
 function makeDeps(overrides: Partial<ShellRpcDeps> = {}): ShellRpcDeps {
@@ -98,6 +98,27 @@ describe('壳 RPC 漏斗（官方 Typed RPC → 命令表）', () => {
     await expect(guest('window_close', undefined)).rejects.toThrow('不允许来自 guest')
   })
 
+  test('toggle_zoom：F13 旧命令归入漏斗，作用本窗且不进命令表（#128）', async () => {
+    const calls: string[] = []
+    const funnel = createShellRpcFunnel(
+      makeDeps({
+        // router 给 null：命令表没就绪。若还走命令表，这里必然报 'shell rpc not ready'。
+        router: () => null,
+        window: {
+          minimize: () => calls.push('minimize'),
+          isMaximized: () => true,
+          unmaximize: () => calls.push('unmaximize'),
+          maximize: () => calls.push('maximize'),
+          close: () => calls.push('close'),
+          getFrame: () => ({ x: 0, y: 0, width: 0, height: 0 }),
+        },
+      }),
+    )
+    await expect(funnel('toggle_zoom', undefined)).resolves.toEqual({ ok: true })
+    // 改的是本窗（先前走 focusedWindow()，多窗口下会盖错窗），且语义与 window_toggle_maximize 相同
+    expect(calls).toEqual(['unmaximize'])
+  })
+
   describe('Windows 系统最大化（样式补丁，window-max.ts）', () => {
     const WORK: WindowFrame = { x: 0, y: 0, width: 1920, height: 1040 }
 
@@ -179,19 +200,4 @@ describe('壳 RPC 漏斗（官方 Typed RPC → 命令表）', () => {
     expect(seen).toEqual({})
   })
 
-describe('window_state_changed 推送（#73）', () => {
-  test('触发器语义：载荷恒空对象，状态真值由客户端重查 window_get_state', () => {
-    const sent: unknown[] = []
-    const notify = createWindowStateNotifier((payload) => sent.push(payload))
-    notify()
-    expect(sent).toEqual([{}])
-  })
-
-  test('发送失败只记日志不抛（推送是尽力而为，图标同步另有 resize/focus 兜底）', () => {
-    const notify = createWindowStateNotifier(() => {
-      throw new Error('桥断了')
-    })
-    expect(() => notify()).not.toThrow()
-  })
-})
 })

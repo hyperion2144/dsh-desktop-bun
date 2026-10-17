@@ -52,7 +52,10 @@ function harness(overrides: Partial<CommandDeps> = {}): {
     closeWindow: () => {
       calls.closed += 1
     },
-    playSound: (name) => calls.sounds.push(name),
+    playSound: (name) => {
+      calls.sounds.push(name)
+      return true
+    },
     ...overrides,
   }
   return {
@@ -344,10 +347,17 @@ describe('命令表', () => {
     const h = harness()
     try {
       await h.table.open_external?.({ url: 'https://example.com' })
-      expect(h.calls.external).toEqual(['https://example.com'])
+      // 回归锁（#128 复核）：通知设置卡要唤起系统设置面板，协议不在链接口径里但命令面必须收。
+      await h.table.open_external?.({ url: 'x-apple.systempreferences:com.apple.Preference.Notifications' })
+      expect(h.calls.external).toEqual([
+        'https://example.com',
+        'x-apple.systempreferences:com.apple.Preference.Notifications',
+      ])
       await h.table.close_current_window?.({})
       await h.table.exit_window_instance?.({})
       expect(h.calls.closed).toBe(2)
+      // 危险协议仍然拦在命令面（RPC 直达主进程，没有第二层壳）
+      expect(() => h.table.open_external?.({ url: 'javascript:alert(1)' })).toThrow('不是可外部打开的 URL')
     } finally {
       h.cleanup()
     }

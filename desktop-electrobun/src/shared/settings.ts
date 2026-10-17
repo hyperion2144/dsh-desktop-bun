@@ -7,7 +7,7 @@
 // 归一化的三条规矩（对齐旧壳）：
 //   1. 类型不对就当没有（不猜、不抛）——配置文件是用户手改得动的，坏值不该让壳起不来；
 //   2. 数值一律夹取到有意义区间（并发 1..32、心跳 1s..600s），而不是原样接受；
-//   3. 枚举只认白名单（代理模式、dsh 来源、运行时下载源），其余回落到"没设置"。
+//   3. 枚举只认白名单（代理模式、dsh 来源、运行时下载源、loopback 聚合档位），其余回落到"没设置"。
 
 /** 下载管理器并发上限（旧壳 `configured_download_concurrency`：默认 3，夹在 1..=32）。 */
 export const DEFAULT_DOWNLOAD_CONCURRENCY = 3
@@ -22,6 +22,20 @@ export const MUX_HEARTBEAT_MAX = 600_000
 export const PROXY_MODES = ['off', 'system', 'manual'] as const
 export type ProxyMode = (typeof PROXY_MODES)[number]
 
+/**
+ * loopback 数据面聚合档位（#128）——收敛 #54 的 GET 单飞合并带来的两条延迟：
+ *   full：合并并发 GET + 把 ≤256KB 的响应整条缓冲后才下发（TTFB 等整条读完）；
+ *   stream（默认）：仍合并，但领头响应边到边下发（首字节不等整条），旁路累积一份给跟随者；
+ *   none：不合并，每个 GET 各自打上游（health 的 coalesced 恒为 0）。
+ *
+ * 默认档从 full 改成 stream（维护者裁决）：合并能力两档都有，差别只在「首字节要不要等整条读完」。
+ * 等整条读完换来的唯一好处是「同一个响应对所有跟随者是同一份字节」，而 stream 的旁路缓冲同样保证这点，
+ * 代价却是每个请求都白等一次整条传输。桌面端与手机端都是「小 JSON + 长连接」为主，
+ * 让没有跟随者的单请求不必等缓冲，是净收益。已显式选过档的用户不受影响（盘上写死了值）。
+ */
+export const LOOPBACK_AGGREGATION_MODES = ['full', 'stream', 'none'] as const
+export type LoopbackAggregation = (typeof LOOPBACK_AGGREGATION_MODES)[number]
+export const DEFAULT_LOOPBACK_AGGREGATION: LoopbackAggregation = 'stream'
 
 /** dsh 来源只认 builtin；残留 external 由 oneOf 白名单静默回退（键保留，向前兼容旧配置文件）。 */
 export const DSH_MODES = ['builtin'] as const
@@ -85,6 +99,8 @@ export interface DesktopSettings {
   preventSleep?: boolean
   /** #69 开发者工具：打包态重启后开 CEF 远程调试口并放出右键菜单（缺省 false；安全面默认关）。 */
   devTools?: boolean
+  /** #128：loopback 数据面 GET 单飞合并的档位（可选 ⇒ 旧设置文件没这个键时回 DEFAULT_LOOPBACK_AGGREGATION）。切换即时生效，不重启。 */
+  loopbackAggregation?: LoopbackAggregation
   profilePorts?: Record<string, number>
   profileLanePorts?: Record<string, number>
   /** 页面口（loopback origin）偏好：语义对齐 env DSH_SHELL_PAGE_PORT——请求值，被占顺延（改口=换本地存储隔离空间）。 */
@@ -129,6 +145,7 @@ export function serializeSettings(settings: DesktopSettings): Record<string, unk
   put('desktop_render_budget', settings.desktopRenderBudget)
   put('prevent_sleep', settings.preventSleep)
   put('dev_tools', settings.devTools)
+  put('loopback_aggregation', settings.loopbackAggregation)
   put('profile_ports', settings.profilePorts)
   put('profile_lane_ports', settings.profileLanePorts)
   put('profile_page_ports', settings.profilePagePorts)
@@ -176,7 +193,7 @@ export const NOTIFICATION_GROUPS: ReadonlyArray<readonly [string, string]> = [
 export const NOTIFICATION_SCENARIOS: readonly ScenarioMeta[] = [
   { id: 'startup.error', group: 'g-run', name: '启动受阻', desc: 'spawn 失败 · 自愈封顶', defaultOn: true },
   { id: 'runtime.switch', group: 'g-run', name: '运行时切换', desc: '内置 / 已下载版本切换结果', defaultOn: true },
-  { id: 'runtime.download', group: 'g-run', name: '运行时下载', desc: '运行时下载开始 / 失败', defaultOn: true },
+  { id: 'runtime.download', group: 'g-run', name: '运行时下载', desc: '运行时下载完成 / 失败', defaultOn: true },
   { id: 'service.health', group: 'g-run', name: '服务健康', desc: '不可达 · 自动重启', defaultOn: true },
   { id: 'window.lifecycle', group: 'g-win', name: '窗口生命周期', desc: '窗口恢复 / 异常', defaultOn: false },
   { id: 'instance.lifecycle', group: 'g-win', name: '实例生命周期', desc: '端口认领冲突 / 归属提示', defaultOn: false },
@@ -186,6 +203,7 @@ export const NOTIFICATION_SCENARIOS: readonly ScenarioMeta[] = [
   { id: 'task.complete', group: 'g-task', name: '任务完成', desc: '失焦时提醒回来看看', defaultOn: true },
   { id: 'config.error', group: 'g-cfg', name: '配置错误', desc: 'token 无法识别等', defaultOn: true },
   { id: 'config.info', group: 'g-cfg', name: '配置提示', desc: '端口保存等低危信息', defaultOn: false },
+  { id: 'register.cli', group: 'g-cfg', name: 'CLI 注册', desc: '注册/注销 dsh 系统命令的结果反馈', defaultOn: true },
   { id: 'dsh.approval', group: 'g-task', name: '等待审批', desc: 'dsh 会话等待你的审批确认', defaultOn: true },
   { id: 'dsh.error', group: 'g-task', name: '会话错误', desc: 'dsh 会话运行出错', defaultOn: true },
 ]
@@ -211,6 +229,7 @@ export function defaultSettings(): DesktopSettings {
     desktopLayoutOnPhones: false,
     preventSleep: true,
     devTools: false,
+    loopbackAggregation: DEFAULT_LOOPBACK_AGGREGATION,
     dshMode: 'builtin',
     runtimeSource: 'github',
     proxyMode: 'off',
@@ -323,6 +342,7 @@ export function normalizeSettings(raw: unknown): DesktopSettings {
     desktopLayoutOnPhones: bool(pick('desktopLayoutOnPhones', 'desktop_layout_on_phones')) ?? base.desktopLayoutOnPhones,
     preventSleep: bool(pick('preventSleep', 'prevent_sleep')) ?? base.preventSleep,
     devTools: bool(pick('devTools', 'dev_tools')) ?? base.devTools,
+    loopbackAggregation: oneOf(pick('loopbackAggregation', 'loopback_aggregation'), LOOPBACK_AGGREGATION_MODES) ?? base.loopbackAggregation,
     dshMode: oneOf(pick('dshMode', 'dsh_mode'), DSH_MODES) ?? base.dshMode,
     runtimeSource: oneOf(pick('runtimeSource', 'runtime_source'), RUNTIME_SOURCES) ?? base.runtimeSource,
     proxyMode: oneOf(pick('proxyMode', 'proxy_mode'), PROXY_MODES) ?? base.proxyMode,
@@ -388,6 +408,29 @@ export function defaultPortForProfile(profile: string): number {
   if (profile === 'web') return 3080
   if (profile === 'desktop') return 3081
   return PORT_BASE_OTHER + Number(fnv1a64(profile) % 512n)
+}
+
+/** 默认 lane 端口（旧壳 default_lane_port_for_profile：web 3092 / desktop 3093 / 其余 3094+散列%512）。 */
+/** 保存前后哪些端口键变了（config.info「端口保存等低危信息」的事实源；表键按 JSON 序列化比对）。 */
+export function changedPortKeys(before: DesktopSettings, after: DesktopSettings): string[] {
+  const changed: string[] = []
+  const simple: Array<[keyof DesktopSettings, string]> = [
+    ['port', '上游端口'],
+    ['lanePort', 'lane 端口'],
+    ['laneForwarderPort', 'lane 转发端口'],
+  ]
+  for (const [key, label] of simple) {
+    if (before[key] !== after[key]) changed.push(label)
+  }
+  const maps: Array<[keyof DesktopSettings, string]> = [
+    ['profilePorts', 'profile 端口表'],
+    ['profileLanePorts', 'profile lane 端口表'],
+    ['profilePagePorts', 'profile 页面端口表'],
+  ]
+  for (const [key, label] of maps) {
+    if (JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null)) changed.push(label)
+  }
+  return changed
 }
 
 /** 默认 lane 端口（旧壳 default_lane_port_for_profile：web 3092 / desktop 3093 / 其余 3094+散列%512）。 */
@@ -497,6 +540,7 @@ function port(value: unknown): number | undefined {
   push('muxHeartbeatMs', settings.muxHeartbeatMs, base.muxHeartbeatMs)
   push('preventSleep', settings.preventSleep, base.preventSleep)
   push('devTools', settings.devTools, base.devTools)
+  push('loopbackAggregation', settings.loopbackAggregation, base.loopbackAggregation)
   push('desktopLayoutOnPhones', settings.desktopLayoutOnPhones, base.desktopLayoutOnPhones)
   push('remoteAddr', settings.remoteAddr, undefined)
   if (settings.remoteList.length > 0) parts.push(`remoteList=${String(settings.remoteList.length)} 条`)

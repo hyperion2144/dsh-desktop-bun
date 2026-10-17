@@ -14,9 +14,10 @@ import {
   windowAction,
   runtimeMenuItems,
   trayMenu,
+  statusLabel,
   trayTitle,
 } from '../src/bun/tray-menu.ts'
-import { TRAY_LABEL_MAX, truncateTrayLabel } from '../src/bun/tray-menu.ts'
+import { TRAY_LABEL_MAX, truncateTrayLabel, updateCheckLabel } from '../src/bun/tray-menu.ts'
 import {
   DEFAULT_WINDOW_HEIGHT,
   DEFAULT_WINDOW_WIDTH,
@@ -62,10 +63,70 @@ const baseState = (overrides: Partial<TrayState> = {}): TrayState => ({
   ...overrides,
 })
 
+// #117：托盘状态行讲的是「服务面在 / DSH 在不在 / 为什么不在」。
+// 服务面先于 DSH 存在，所以 stopped 与 failed 都有对应的菜单文案（以前只有「宿主未运行」一种）。
+describe('statusLabel（#117 服务面先于 DSH）', () => {
+  test('运行中', () => {
+    expect(statusLabel(baseState({ serviceStatus: 'running' }))).toBe('状态：运行中')
+  })
+
+  test('正在启动', () => {
+    expect(statusLabel(baseState({ serviceStatus: 'starting' }))).toBe('状态：dsh 启动中…')
+  })
+
+  test('服务面已就绪但还没拉 DSH', () => {
+    expect(statusLabel(baseState({ serviceStatus: 'stopped' }))).toBe('状态：dsh 未运行（托盘已就绪）')
+  })
+
+  test('起不来：带原因（这是「能换一个运行时再试」的提示位）', () => {
+    const label = statusLabel(
+      baseState({ serviceStatus: 'failed', serviceError: '找不到可用的 dsh 运行时（dsh_runtime=9.9.9）' }),
+    )
+    expect(label).toContain('dsh 未起来')
+    expect(label).toContain('找不到可用的 dsh 运行时')
+  })
+
+  test('起不来：没给原因也不编一个', () => {
+    expect(statusLabel(baseState({ serviceStatus: 'failed', serviceError: null }))).toBe('状态：dsh 未起来')
+    expect(statusLabel(baseState({ serviceStatus: 'failed' }))).toBe('状态：dsh 未起来')
+  })
+
+  test('阻塞（端口被陌生程序占）与起不来分开说', () => {
+    expect(statusLabel(baseState({ serviceStatus: 'blocked', serviceError: '端口 6391 被其他实例或程序占用' }))).toContain(
+      '状态：已阻塞',
+    )
+  })
+
+  test('长原因按菜单宽度截断', () => {
+    const label = statusLabel(baseState({ serviceStatus: 'failed', serviceError: '错'.repeat(TRAY_LABEL_MAX + 30) }))
+    expect(label.length).toBeLessThanOrEqual(TRAY_LABEL_MAX + '状态：dsh 未起来'.length + 2)
+  })
+
+  test('旧调用方（没给 serviceStatus）按 hostRunning 兼容', () => {
+    expect(statusLabel(baseState({ hostRunning: true }))).toBe('状态：运行中')
+    expect(statusLabel(baseState({ hostRunning: false }))).toBe('状态：宿主未运行')
+  })
+
+  test('trayMenu 里用的就是它（菜单里的状态行不是别的文案）', () => {
+    const label = statusLabel(baseState({ serviceStatus: 'failed', serviceError: '找不到可用的 dsh 运行时' }))
+    expect(labels(trayMenu(baseState({ serviceStatus: 'failed', serviceError: '找不到可用的 dsh 运行时' })))).toContain(label)
+  })
+
+  test('DSH 没起来时，运行时版本与退出这两条自救入口仍然在菜单里（#117 的要害）', () => {
+    const items = trayMenu(
+      baseState({ serviceStatus: 'failed', serviceError: '找不到可用的 dsh 运行时', installed: ['0.2.1-alpha.2'] }),
+    )
+    expect(labels(items)).toContain('退出')
+    const runtime = items.find((item): item is NormalItem & { submenu?: TrayMenuItem[] } => isNormal(item) && item.label.startsWith('运行时版本'))
+    expect(runtime?.submenu).toBeDefined()
+    expect(labels(runtime?.submenu ?? []).some((line) => line.includes('0.2.1-alpha.2'))).toBe(true)
+  })
+})
+
 describe('trayMenu', () => {
 
   test('「注册 dsh 命令」条件项：未注册/冲突时出现，已注册或未探出就不摆', () => {
-    expect(labels(trayMenu(baseState()).slice(-4))).toContain('重启 dsh 服务')
+    expect(labels(trayMenu(baseState()).slice(-4))).toContain('重启应用')
     expect(findItem(trayMenu(baseState()), '注册 dsh 为系统命令')).toBeUndefined()
 
     const missing = trayMenu(baseState({ registerLabel: '注册 dsh 为系统命令' }))
@@ -141,12 +202,41 @@ describe('trayMenu', () => {
     expect(trayTitle(baseState({ profile: 'web' }))).toBe('DSH · web')
   })
 
-  test('菜单结构稳定：两条分隔线，动作行只有三处', () => {
+  test('菜单结构稳定：两条分隔线，动作行只有四处（#141 加了「检查更新」）', () => {
     const items = trayMenu(baseState({ profile: 'web', profiles: ['web', 'app'] }))
     expect(items.filter((item) => item.type === 'divider').length).toBe(2)
     const actionable = items.filter((item): item is NormalItem => isNormal(item) && item.action !== undefined)
-    // 子菜单父项只挂 submenu、不带 action；真正可点的顶层动作只有三个
-    expect(actionable.map((item) => item.label).sort()).toEqual(['退出', '隐藏窗口', '重启 dsh 服务'].sort())
+    // 子菜单父项只挂 submenu、不带 action；真正可点的顶层动作只有四个
+    expect(actionable.map((item) => item.label).sort()).toEqual(
+      ['退出', '隐藏窗口', '重启应用', '检查更新'].sort(),
+    )
+  })
+})
+
+describe('#126 托盘「重启应用」（口径从 DSH 侧重启改为整应用重来）', () => {
+  test('菜单项文案是「重启应用」，动作是 tray:restart-app', () => {
+    const item = trayMenu(baseState()).find(
+      (menu): menu is NormalItem => isNormal(menu) && menu.label === '重启应用',
+    )
+    expect(item?.action).toBe(TRAY_MENU_ACTIONS.restartApp)
+  })
+
+  test('动作 id 不再是 tray:restart-service——语义已变，名字留着会骗人', () => {
+    expect(TRAY_MENU_ACTIONS.restartApp).toBe('tray:restart-app')
+    expect(parseTrayAction('tray:restart-service')).toBeNull()
+  })
+
+  test('DSH 没起来时这一项照样在——整个应用重来正是那时候最需要的出口', () => {
+    const down = baseState({ hostRunning: false, serviceStatus: 'failed', serviceError: '找不到可用的 dsh 运行时' })
+    const labels = trayMenu(down)
+      .filter((item): item is NormalItem => isNormal(item) && item.action !== undefined)
+      .map((item) => item.label)
+    expect(labels).toContain('重启应用')
+    expect(labels).toContain('退出')
+  })
+
+  test('菜单里不再出现「重启 dsh 服务」这个说法（那是面板那一项）', () => {
+    expect(labels(trayMenu(baseState()))).not.toContain('重启 dsh 服务')
   })
 })
 
@@ -154,7 +244,7 @@ describe('parseTrayAction', () => {
   test('解析动作表', () => {
     expect(parseTrayAction(TRAY_MENU_ACTIONS.toggleWindow)).toEqual({ kind: 'toggle-window' })
     expect(parseTrayAction(TRAY_MENU_ACTIONS.quit)).toEqual({ kind: 'quit' })
-    expect(parseTrayAction(TRAY_MENU_ACTIONS.restartService)).toEqual({ kind: 'restart-service' })
+    expect(parseTrayAction(TRAY_MENU_ACTIONS.restartApp)).toEqual({ kind: 'restart-app' })
     expect(parseTrayAction(TRAY_MENU_ACTIONS.runtimeBuiltin)).toEqual({ kind: 'switch-runtime' })
     expect(parseTrayAction(`${TRAY_MENU_ACTIONS.runtimeVersionPrefix}0.2.1-alpha.1`)).toEqual({
       kind: 'switch-runtime',
@@ -406,5 +496,59 @@ describe('托盘菜单限宽（A6）', () => {
     if (runtime?.type !== 'normal') throw new Error('unreachable')
     expect(Array.from(runtime.label).length).toBeLessThanOrEqual(TRAY_LABEL_MAX)
     expect(runtime.enabled).toBe(false)
+  })
+})
+
+// #141：托盘「检查更新」。状态行讲「上一次查到什么」，菜单项讲「现在去查」，两件事分开。
+describe('托盘「检查更新」（#141）', () => {
+  test('没查过就不摆这一行（旧调用方不受影响）', () => {
+    expect(updateCheckLabel(undefined)).toBeNull()
+    expect(trayMenu(baseState()).some((item) => isNormal(item) && item.label.startsWith('更新：'))).toBe(false)
+  })
+
+  test('检查中 / 有更新 / 无更新 / 查不成，四种说法各自不同', () => {
+    expect(updateCheckLabel({ checking: true, result: null })).toBe('更新：正在检查…')
+    expect(updateCheckLabel({ checking: false, result: null })).toBe('更新：未检查')
+    expect(
+      updateCheckLabel({ checking: false, result: { notify: true, reason: '有可用更新', updates: 2 } }),
+    ).toBe('更新：有 2 项可用更新')
+    expect(
+      updateCheckLabel({ checking: false, result: { notify: false, reason: '没有新的可用更新', updates: 0 } }),
+    ).toBe('更新：没有新的可用更新')
+  })
+
+  test('查不成就把原因摆上灰字，而不是抿一句「已是最新」', () => {
+    const label = updateCheckLabel({
+      checking: false,
+      result: { notify: false, reason: 'DSH 运行时这次没查成（离线 / 超时 / 未配置更新源），静默', updates: 0 },
+    })
+    expect(label).toContain('这次没查成')
+    // 灰字行也要限宽，否则长原因会把菜单摆得跟窗口一样宽
+    expect(Array.from(label ?? '').length).toBeLessThanOrEqual(TRAY_LABEL_MAX + 3)
+  })
+
+  test('状态行只读（enabled:false），检查中菜单项置灰防连点', () => {
+    const idle = trayMenu(baseState({ updateCheck: { checking: false, result: null } }))
+    const status = findItem(idle, '更新：未检查')
+    expect(status?.enabled).toBe(false)
+    expect(findItem(idle, '检查更新')?.enabled).toBe(true)
+
+    const busy = trayMenu(baseState({ updateCheck: { checking: true, result: null } }))
+    expect(findItem(busy, '更新：正在检查…')?.enabled).toBe(false)
+    expect(findItem(busy, '检查更新')?.enabled).toBe(false)
+  })
+
+  test('位置与「运行时版本」子菜单同区：状态行 → 检查更新，紧跟在它后面', () => {
+    const items = trayMenu(baseState({ updateCheck: { checking: false, result: { notify: true, reason: 'x', updates: 1 } } }))
+    const at = (label: string): number => items.findIndex((item) => isNormal(item) && item.label === label)
+    const runtimeSub = at('运行时版本')
+    expect(runtimeSub).toBeGreaterThan(-1)
+    expect(at('更新：有 1 项可用更新')).toBe(runtimeSub + 1)
+    expect(at('检查更新')).toBe(runtimeSub + 2)
+  })
+
+  test('action 一路派发到 check-updates', () => {
+    expect(TRAY_MENU_ACTIONS.checkUpdates).toBe('tray:check-updates')
+    expect(parseTrayAction(TRAY_MENU_ACTIONS.checkUpdates)).toEqual({ kind: 'check-updates' })
   })
 })

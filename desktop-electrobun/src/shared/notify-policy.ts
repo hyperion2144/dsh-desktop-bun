@@ -25,6 +25,7 @@ export const SCENARIO = {
   TASK_COMPLETE: 'task.complete',
   CONFIG_ERROR: 'config.error',
   CONFIG_INFO: 'config.info',
+  REGISTER_CLI: 'register.cli',
   DSH_APPROVAL: 'dsh.approval',
   DSH_ERROR: 'dsh.error',
 } as const
@@ -40,6 +41,10 @@ export const NOTIFY_TYPE_SCENARIOS: Readonly<Record<string, string>> = {
 
 /** 音效文件白名单（旧壳 T5 决议：wav / mp3 / ogg，aac/m4a 不进）。 */
 export const SOUND_EXTENSIONS = ['wav', 'mp3', 'ogg'] as const
+
+/** 白名单里的音效扩展名（小写）。 */
+export type SoundExtension = (typeof SOUND_EXTENSIONS)[number]
+
 /** 单文件大小上限（T5：5MB）。 */
 export const MAX_SOUND_BYTES = 5 * 1024 * 1024
 /** 单次播放时长上限（T5：10s 截断，防长音频当通知音）。 */
@@ -108,6 +113,7 @@ export function soundChoice(raw: string): SoundChoice {
 /**
  * 投递决策（纯函数，旧壳 `decide()` 逐条对齐）：
  *   · 总开关关 / 场景关            → 不投递
+ *   · 窗口在前台聚焦（#115）        → 不投递（UI 就在眼前，通知是噪音）
  *   · 免打扰开且命中时段，或全屏静默开且正在全屏 → 投递但静默
  *   · 声音：静默命中 → silent；否则按场景档位
  */
@@ -116,12 +122,18 @@ export function decide(
   scenarioId: string,
   now: { hour: number; minute: number },
   fullscreen: boolean,
+  focused: boolean,
 ): NotifyDecision {
   if (!config.enabled) {
     return { deliver: false, silent: false, sound: { kind: 'silent' } }
   }
   const scenario = config.scenarios[scenarioId] ?? defaultScenarioConfig(scenarioId)
   if (!scenario.enabled) {
+    return { deliver: false, silent: false, sound: { kind: 'silent' } }
+  }
+  // #115：窗口在前台聚焦 → 整条不投递（不只是静默）：UI 就在眼前，通知中心里也不该留记录。
+  // 判定放在总开关 / 场景开关之后：开关关掉本来就什么都不投，先判更省事。
+  if (focused) {
     return { deliver: false, silent: false, sound: { kind: 'silent' } }
   }
   const dnd = config.dnd
@@ -153,11 +165,17 @@ export function isValidSoundName(name: string): boolean {
 }
 
 /** 扩展名是否在白名单里（大小写不敏感）。 */
-export function hasAllowedSoundExtension(name: string): boolean {
+/** 名称里的白名单扩展名（小写）；不在白名单返回 null。 */
+export function soundExtension(name: string): SoundExtension | null {
   const dot = name.lastIndexOf('.')
-  if (dot <= 0) return false
+  if (dot <= 0) return null
   const ext = name.slice(dot + 1).toLowerCase()
-  return (SOUND_EXTENSIONS as readonly string[]).includes(ext)
+  return (SOUND_EXTENSIONS as readonly string[]).includes(ext) ? (ext as SoundExtension) : null
+}
+
+/** 扩展名是否在白名单里（大小写不敏感）。 */
+export function hasAllowedSoundExtension(name: string): boolean {
+  return soundExtension(name) !== null
 }
 
 /** 白名单扩展名 → 允许的文件头魔数（旧壳 `sounds::ALLOWED`，逐条对齐）。 */

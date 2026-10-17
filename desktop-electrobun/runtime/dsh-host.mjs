@@ -100,12 +100,38 @@ const injections = ctx.webServer.collectIndexInjections()
 console.log(`[host] webServer.port = ${String(ctx.webServer.port)} | injections = ${String(injections.length)}`)
 console.log(`HOST-READY ${JSON.stringify({ type: 'ready', url, injections })}`)
 
+// #101：注入清单监控。壳把 boot 载荷冻在 HOST-READY 那一刻，而宿主侧 client-module 图会在
+// 运行期重算（插件市场更新/装卸，dsh-client-hmr 的 stat 轮询触发 recompose）——之后刷新页面
+// 拿的还是旧图 URL，宿主只保留最近两代批次，旧 URL 必 404（页面永久卡 loading）。
+// 这里周期性重采集注入清单，变了就经 stdout 补发一行 HOST-INJECTIONS（壳侧刷新 boot 载荷），
+// 让下一次刷新直接落在新图上。与上游每请求现采同源，成本同量级（内存图快照）。
+const INJECTIONS_WATCH_MS = 1_000
+let reportedInjections = injections
+const injectionsWatch = setInterval(() => {
+  let fresh
+  try {
+    fresh = ctx.webServer.collectIndexInjections()
+  } catch (error) {
+    console.error(`[host] 注入清单采集失败（跳过本轮）：${error instanceof Error ? error.message : String(error)}`)
+    return
+  }
+  if (!Array.isArray(fresh)) return
+  if (JSON.stringify(fresh) === JSON.stringify(reportedInjections)) return
+  reportedInjections = fresh
+  console.log(`[host] 注入清单更新：injections = ${String(fresh.length)}（client-module 图重算，已上报壳）`)
+  console.log(`HOST-INJECTIONS ${JSON.stringify({ type: 'injections', injections: fresh })}`)
+}, INJECTIONS_WATCH_MS)
+injectionsWatch.unref?.()
+
 // 壳要求退出时，把关闭交给运行时（对齐官方 shutdown 语义）。
 // 用函数声明（会提升）：父进程看门狗可能在 await 之前就触发。
 let disposed = false
 function shutdown(reason = 'signal') {
   if (disposed) return
   disposed = true
+  try {
+    clearInterval(injectionsWatch)
+  } catch {}
   console.log(`[host] 退出（${reason}）`)
   try {
     application.dispose?.()

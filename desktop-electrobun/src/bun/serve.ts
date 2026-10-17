@@ -27,11 +27,18 @@ if (process.env.DSH_SHELL_RESOLVE_ONLY === '1') {
       distDir: resolved.distDir,
       profile: resolved.profile,
       appSupport: resolved.appSupport,
+      unresolved: resolved.unresolved,
     })}`
   )
-  process.exit(0)
+  // #117：layout() 不再抛了，失败原因走 unresolved 字段——但探针/CI 的旧契约是「解析不出来就非零退出」，
+  // 那条仍然保留，否则 CI 会把一个解析失败的构建当成功。
+  process.exit(resolved.unresolved === null ? 0 : 1)
 }
 const service = await startService({ clientVersion, noWindow: true })
+// #117：startService 现在只把壳自己的面立起来（托盘/设置/profile/退出），**不等 DSH**——
+// 服务面是用来「管 DSH」的，不是「DSH 起来了才算存在」。但无窗口入口的 SHELL-READY 是
+// 缝 ① 黑盒测试的握手，那条路径要的正是 DSH 已就绪，所以这里显式拉起来。
+await service.ensureRunning()
 // 这一行是缝 ① 的握手：测试读 stdout 拿 origin / token / 上游，再自己去打 HTTP。
 console.log(`SHELL-READY ${JSON.stringify(service.state)}`)
 

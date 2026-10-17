@@ -5,7 +5,8 @@
 // 本模块提供三件事：①样式位补丁（ensureNativeMaximizeStyles：给本进程无边框窗补
 // maximize/minimize/sysmenu 位，之后 maximize()/unmaximize() 全走系统行为）；
 // ②工作区只读取法（getWorkAreaForFrame，bun:ffi user32）；③最大化态纯判定
-// （deriveMaximized：原生旗标优先、几何兜底）。
+// （deriveMaximized：原生旗标优先、几何兜底）；④heal 自检的损坏判定与重摆裁决
+// （isMaximizedPlacementDamaged + healVerdict，#80 三轮）。
 //
 // 维护者拍板（#80）：拒绝一切自绘窗口尺寸——本模块不做、仓内也不再有任何
 // setFrame 式摆位，摆位全部交给系统 API。
@@ -48,6 +49,73 @@ export function deriveMaximized(
     Math.abs(frame.width - workArea.width) <= tolerance &&
     Math.abs(frame.height - workArea.height) <= tolerance
   )
+}
+
+/**
+ * heal 自检容差：判「落位损坏」的外扩上限。实测标定（#80 第五轮实机日志，2K@125%）：
+ * 系统对本类 THICKFRAME 无边框窗的**正常最大化落位**就是工作区四周外扩 9 物理px
+ * （隐形边框补偿），getFrame 返回逻辑px（÷1.25）→ 补偿读数 7.2px，每次最大化恒在；
+ * 100% 缩放下补偿即 ~9px 逻辑值。容差须站上补偿带（≥9px）、远低于真损伤（票面的
+ * 恢复截断是整块顶边，远超 12），取 12。旧值 4px 把补偿读数当损坏，每次最大化
+ * 白重摆 3 次（实机「最大化闪几下」的直接来源）。
+ */
+export const PLACEMENT_DAMAGE_TOLERANCE_PX = 12
+
+/**
+ * frame 相对 workArea 的外扩量：四条边各自「越出工作区多少像素」取最大（左/上
+ * 越出取 workArea 减 frame，右/下超出取 frame 减 workArea；整体向内为负）。
+ */
+export function frameOvershoot(frame: WindowFrame, workArea: WindowFrame): number {
+  return Math.max(
+    workArea.x - frame.x,
+    workArea.y - frame.y,
+    frame.x + frame.width - (workArea.x + workArea.width),
+    frame.y + frame.height - (workArea.y + workArea.height),
+  )
+}
+
+/**
+ * heal 自检的损坏判定（#80 三轮根因修复）：最大化旗标为真时审查几何——外扩量
+ * 超出损坏容差才判损坏、才原生重摆。只认外扩、不认对称差值：THICKFRAME 补偿
+ * 只会把窗向外撑；等比错位只会让读数整体偏小，overshoot ≤ 0 不会误报。
+ *
+ * 补偿带内的外扩是**正常落位**（第五轮实机标定：每次最大化四周恒外扩 9 物理px，
+ * 见容差注释），heal 不得干预——第五轮「每次最大化闪 3 下」就是旧 4px 容差把
+ * 7.2px 补偿读数当损坏、每次最大化连重摆 3 次所致；重摆后系统照旧补偿，frame
+ * 纹丝不动（heal 修不好常态），白闪。容差只在真损伤（恢复复利式越位，远超补偿带）
+ * 时才让 heal 出手。
+ *
+ * 不复用 deriveMaximized：那是状态推导，旗标为真恒真（坐标空间不一致也信旗标）；
+ * 这里恰恰相反，专审「旗标为真时是否外扩超带」。两个相反的语义塞不进同一个函数——
+ * 第三轮重开（双屏 2K 越屏依旧）的根因就是 heal 错借了它，判定恒真、自愈从未触发。
+ *
+ * 坐标前提（第五轮实机修正）：frame（getFrame，逻辑px）与 workArea（rcWork，
+ * 物理px）并不同空间——2K@125% 实测 frame 恰为物理帧 ÷1.25（2062.4=(2560+18)/1.25）。
+ * 等比差异让右/下读数偏小（方向性不误报），补偿侧 7.2px 由容差吸收；更高缩放
+ * 把真损伤读数压进容差下属漏报，届时以 heal 日志数值再标定。
+ */
+export function isMaximizedPlacementDamaged(
+  frame: WindowFrame,
+  workArea: WindowFrame,
+  tolerance: number = PLACEMENT_DAMAGE_TOLERANCE_PX,
+): boolean {
+  return frameOvershoot(frame, workArea) > tolerance
+}
+
+/** 同段最大化期内允许的原生重摆上限：超过说明重摆也落不好（部分机器上游
+ * THICKFRAME 补偿恒外扩），停下防「检查→重摆→resize→再检查」循环闪窗，日志留给
+ * 上游 WM_NCCALCSIZE 根治（electrobun#417 关闭未合、#558 仍开）。 */
+export const HEAL_MAX_REPLACES = 3
+
+export type HealVerdict = 'clean' | 'replace' | 'exhausted'
+
+/**
+ * heal 裁决（纯函数，重摆计数的状态机；index.ts 只做副作用）：
+ * 不损坏 → clean（不计数、也不重置已计数）；损坏且未达上限 → replace；已达上限 → exhausted。
+ */
+export function healVerdict(damaged: boolean, priorReplaces: number): HealVerdict {
+  if (!damaged) return 'clean'
+  return priorReplaces >= HEAL_MAX_REPLACES ? 'exhausted' : 'replace'
 }
 
 interface User32Symbols {
@@ -185,7 +253,6 @@ function loadStylePatchLib(): StylePatchSymbols | null {
 /**
  * 给本进程的可见顶层无边框窗补系统最大化样式位（幂等：已带的跳过）。
  * EnumWindows 本就只枚举顶层窗，pid + 可见 + 缺 WS_MAXIMIZEBOX 三重过滤足够。
- * 返回 false = 平台非 Windows / ffi 不可用 / 枚举失败（调用方走手动 setFrame 兑底）。
  * 返回 false = 平台非 Windows / ffi 不可用 / 枚举失败（调用方直接原生 maximize）。
  */
 export function ensureNativeMaximizeStyles(): boolean {
@@ -216,4 +283,86 @@ export function ensureNativeMaximizeStyles(): boolean {
   } catch {
     return false
   }
+}
+
+// ── 聚合判定与切换（RPC 漏斗与 /__shell__/window 端点共用，#112 抽取）────
+//
+// 抽取前这两段逻辑在 rpc-bridge.ts（漏斗，可注入）与 index.ts（HTTP 端点）各写一份；
+// 现在收口在本模块——本模块的既定职责就是最大化态判定（见文件头③）。
+
+/** 原生窗口动作面（BrowserWindow 的结构子集；测试可注入假窗）。 */
+export interface NativeWindowActions {
+  getFrame(): WindowFrame
+  isMaximized(): boolean
+  maximize(): void
+  unmaximize(): void
+}
+
+/** 平台/工作区/样式补丁的注入点（测试用；缺省见各字段）。 */
+export interface WindowMaxOptions {
+  /** 平台（缺省 process.platform）。 */
+  platform?: NodeJS.Platform
+  /** 工作区取法（缺省 win32 走 user32 ffi，其余平台恒 null）。 */
+  workArea?: (near: WindowFrame) => WindowFrame | null
+  /** 样式补丁生效动作（缺省 win32 走枚举补丁，其余平台恒 false；幂等可重入）。 */
+  maximizeStylesPatched?: () => boolean
+}
+
+/** 最大化态聚合结果（GET /__shell__/window 的载荷形状）。 */
+export interface WindowMaxState {
+  maximized: boolean
+}
+
+/**
+ * 自绘窗口控制的三个动作（页面三键 → 主进程操作 BrowserWindow）。
+ *
+ * 本模块既有职责就是「窗口动作的收口」，动作集合也归这里：service.ts 的 onWindowControl 签名、
+ * shell-server.ts 的 /__shell__/window 校验、titlebar.ts 的动作→RPC 方法映射三处各写一份联合类型，
+ * 迟早漂移（#128）。改成从这儿取，titlebar 的映射表就能被键集合锁住——
+ * 拼错的动作名在编译期报错，而不是在页面里静默不响应。
+ */
+export type WindowControlAction = 'minimize' | 'toggle-maximize' | 'close'
+
+/** 同上，运行期形态：HTTP 端点校验与「已知动作」判定用它，避免再写一遍三连比较。 */
+export const WINDOW_CONTROL_ACTIONS: readonly WindowControlAction[] = ['minimize', 'toggle-maximize', 'close']
+
+/**
+ * 字符串→动作的类型守卫。HTTP 路由拿到的永远是 string，没有守卫就没法收窄，
+ * 收窄不了就只能把 action 直接当 WindowControlAction 用——那等于没校验。
+ */
+export function isWindowControlAction(value: string): value is WindowControlAction {
+  return (WINDOW_CONTROL_ACTIONS as readonly string[]).includes(value)
+}
+
+/**
+ * 最大化态聚合判定：win32 用工作区几何兑底原生旗标，其余平台只看旗标。
+ * rpc-bridge（window_get_state）与 index.ts（onWindowState / toggle 判定）共用。
+ */
+export function windowMaxState(
+  win: Pick<NativeWindowActions, 'getFrame' | 'isMaximized'>,
+  opts: WindowMaxOptions = {},
+): WindowMaxState {
+  const platform = opts.platform ?? process.platform
+  const workAreaOf = opts.workArea ?? getWorkAreaForFrame
+  const frame = win.getFrame()
+  const workArea = platform === 'win32' ? workAreaOf(frame) : null
+  return { maximized: deriveMaximized(frame, workArea, win.isMaximized()) }
+}
+
+/**
+ * 原生最大化切换（#80 拍板：任何情况下不用 setFrame 自摆）。maximize 方向先补
+ * win32 样式位（否则 SW_MAXIMIZE 不按工作区收缩，上游 #558），补丁失败也直接
+ * 原生 maximize。
+ */
+export function toggleWindowMaximize(win: NativeWindowActions, opts: WindowMaxOptions = {}): void {
+  const platform = opts.platform ?? process.platform
+  const { maximized } = windowMaxState(win, opts)
+  if (maximized) {
+    win.unmaximize()
+    return
+  }
+  const stylesPatched =
+    opts.maximizeStylesPatched ?? (() => (platform === 'win32' ? ensureNativeMaximizeStyles() : false))
+  if (platform === 'win32') stylesPatched()
+  win.maximize()
 }

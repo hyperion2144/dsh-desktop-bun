@@ -6,7 +6,7 @@
 //   2. 启动那 10–60 秒里要有可见进度，失败要留在屏幕上给出原因，别只转圈或干脆白屏。
 
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startShellServer } from '../src/bun/shell-server.ts'
@@ -20,6 +20,7 @@ import {
   updateInstance,
   defaultIsOurProcess,
   readBootId,
+  writeInstance,
   type InstanceRecord,
 } from '../src/bun/single-instance.ts'
 import { SPLASH_HEIGHT, SPLASH_WIDTH, splashFailScript, splashHtml, splashStageScript } from '../src/bun/splash.ts'
@@ -144,6 +145,80 @@ describe('单实例锁', () => {
     writeFileSync(file, '{ not json')
     expect(acquireInstance(file, 'web', { identity: { pid: 8 } }).acquired).toBe(true)
     expect(readInstance(file)?.profile).toBe('web')
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('#123 锁写不下去时不再谎报持有锁', () => {
+  test('锁目录不存在时把它建出来并写成（干净机器首次启动的老坑）', () => {
+    const root = tempDir()
+    const dir = join(root, 'appsupport', 'nested')
+    const file = join(dir, 'shell-instance.json')
+    expect(existsSync(dir)).toBe(false)
+
+    const result = acquireInstance(file, 'desktop', { identity: { pid: 111, startedAt: 'now' } })
+
+    expect(existsSync(dir)).toBe(true)
+    expect(result.acquired).toBe(true)
+    expect(result.lockError).toBeNull()
+    expect(readInstance(file)?.pid).toBe(111)
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  test('真写不进去时 lockError 带上原因，且 acquired 不变 false（不能去激活一个不存在的实例）', () => {
+    const root = tempDir()
+    // 父路径是一个**普通文件** ⇒ mkdir 必然失败 ⇒ 模拟权限/磁盘满这类真 IO 失败
+    const blocker = join(root, 'blocker')
+    writeFileSync(blocker, 'not a directory')
+    const file = join(blocker, 'shell-instance.json')
+
+    const result = acquireInstance(file, 'desktop', { identity: { pid: 222, startedAt: 'now' } })
+
+    expect(result.lockError).not.toBeNull()
+    expect(result.lockError).toMatch(/ENOTDIR|EEXIST|not a directory/i)
+    // acquired 说的是「有没有另一个活实例」，与「锁写没写成」正交——写失败时仍是 true
+    expect(result.acquired).toBe(true)
+    expect(result.previous).toBeNull()
+    expect(readInstance(file)).toBeNull()
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  test('writeInstance 直接调：目录不存在则 mkdir；写不成则 ok:false 且有原因', () => {
+    const root = tempDir()
+    const nested = join(root, 'a', 'b')
+    const good = writeInstance(join(nested, 'shell-instance.json'), record({ pid: 333 }))
+    expect(good).toEqual({ ok: true, error: null })
+    expect(existsSync(nested)).toBe(true)
+
+    const blocker = join(root, 'blocker')
+    writeFileSync(blocker, 'not a directory')
+    const bad = writeInstance(join(blocker, 'shell-instance.json'), record({ pid: 444 }))
+    expect(bad.ok).toBe(false)
+    expect(bad.error).toBeTruthy()
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  test('目录后来才被建出来时，回填 origin 能补上（#123 的连带那条也顺带治好）', () => {
+    const root = tempDir()
+    const dir = join(root, 'appsupport')
+    const file = join(dir, 'shell-instance.json')
+    acquireInstance(file, 'desktop', { identity: { pid: 555, startedAt: 'now' } })
+    updateInstance(file, 555, { origin: 'http://127.0.0.1:6390', pageUrl: 'http://127.0.0.1:6390/t/' })
+    expect(readInstance(file)?.origin).toBe('http://127.0.0.1:6390')
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  test('已有活实例时 lockError 为 null（让位的路径本来就没写过）', () => {
+    const dir = tempDir()
+    const file = join(dir, 'shell-instance.json')
+    writeFileSync(file, JSON.stringify(record({ pid: 4242 })))
+    const result = acquireInstance(file, 'desktop', {
+      isAlive: (pid) => pid === 4242,
+      isOurProcess: () => true,
+      identity: { pid: 999 },
+    })
+    expect(result.acquired).toBe(false)
+    expect(result.lockError).toBeNull()
     rmSync(dir, { recursive: true, force: true })
   })
 })
@@ -330,6 +405,7 @@ describe('/__shell__/window 端点（A5 自绘窗口控制）', () => {
   function withWindowServer(
     onWindowControl: (action: 'minimize' | 'toggle-maximize' | 'close') => void,
     run: (origin: string) => Promise<void>,
+    onWindowState?: () => { maximized: boolean },
   ): Promise<void> {
     const dist = tempDir()
     const probe = Bun.serve({ port: 0, fetch: () => new Response('upstream') })
@@ -344,6 +420,7 @@ describe('/__shell__/window 端点（A5 自绘窗口控制）', () => {
       port,
       bootPayload: () => null,
       onWindowControl,
+      onWindowState,
     })
     try {
       return run(server.origin).finally(() => server.stop())
@@ -383,5 +460,23 @@ describe('/__shell__/window 端点（A5 自绘窗口控制）', () => {
       const response = await fetch(`${origin}/__shell__/window`)
       expect(response.status).toBe(405)
     })
+  })
+
+  test('GET + onWindowState ⇒ 200 {maximized}（#112 标题栏带图标查询）', async () => {
+    let calls = 0
+    await withWindowServer(
+      () => undefined,
+      async (origin) => {
+        const response = await fetch(`${origin}/__shell__/window`)
+        expect(response.status).toBe(200)
+        expect(response.headers.get('cache-control')).toBe('no-store')
+        expect(await response.json()).toEqual({ maximized: true })
+        expect(calls).toBe(1)
+      },
+      () => {
+        calls += 1
+        return { maximized: true }
+      },
+    )
   })
 })

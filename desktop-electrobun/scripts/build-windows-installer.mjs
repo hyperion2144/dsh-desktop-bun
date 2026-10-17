@@ -610,6 +610,8 @@ Section "un.install"
   Call un.DshRemoveAppTree
   DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@"
   DeleteRegKey HKCU "Software\\@@APP_ID@@"
+  ; #107：壳运行时写的通知身份键（HKCU\Software\Classes\AppUserModelId\<APP_ID>）一并清掉
+  DeleteRegKey HKCU "Software\\Classes\\AppUserModelId\\@@APP_ID@@"
   ; 非递归：安装根只有空了才删得掉，别误伤用户自己放进去的东西
   RMDir "$INSTDIR"
 SectionEnd`

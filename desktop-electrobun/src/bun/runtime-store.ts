@@ -44,6 +44,38 @@ export function runtimeTrashDir(appSupport: string): string {
   return join(runtimesDir(appSupport), RUNTIME_TRASH_DIR)
 }
 
+/** 安装中临时目录的前缀。点目录 = 扫描一律跳过：半装树绝不能被当成「已下载的版本」。 */
+export const STAGING_PREFIX = '.staging-'
+
+/** 某一次安装自己的临时目录（id 由调用方给，同版本重试互不踩）。 */
+export function runtimeStagingDirOf(appSupport: string, version: string, id: string): string {
+  return join(runtimesDir(appSupport), `${STAGING_PREFIX}${version}-${id}`)
+}
+
+/** 清掉上次安装中断（崩了 / 被杀 / 断网）留下的临时目录：扫描本来就看不见它，但会白占磁盘。 */
+export function purgeStagingDirs(appSupport: string, log?: RuntimeStoreLogger): number {
+  const root = runtimesDir(appSupport)
+  let entries: string[]
+  try {
+    entries = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith(STAGING_PREFIX))
+      .map((entry) => entry.name)
+  } catch {
+    return 0
+  }
+  let removed = 0
+  for (const name of entries) {
+    const target = join(root, name)
+    try {
+      rmSync(target, { recursive: true, force: true })
+      removed += 1
+    } catch (error) {
+      log?.(`安装残留清理失败：${target}（${error instanceof Error ? error.message : String(error)}）`)
+    }
+  }
+  return removed
+}
+
 export function installedManifestPath(appSupport: string): string {
   return join(runtimesDir(appSupport), INSTALLED_MANIFEST)
 }

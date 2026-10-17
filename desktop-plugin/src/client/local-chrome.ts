@@ -1,95 +1,14 @@
 import type { DesktopClientPlatform } from './environment.ts'
-import { sendWindowAction, shellRpc } from './shell-rpc.ts'
+import { shellRpc } from './shell-rpc.ts'
 
-/** 各平台自绘条高度（CSS px）。 */
-const STRIP_HEIGHT: Record<DesktopClientPlatform, number> = {
-  darwin: 28,
-  win32: 32,
-  linux: 32,
-}
+/** macOS 侧栏顶部拖拽带高度（CSS px）。win32/linux 顶部 chrome 已上收壳 preload（#112）。 */
+const DARWIN_STRIP_HEIGHT = 28
 
 /** macOS 折叠态拖拽带宽度：只铺红绿灯区（官方 shell.leading 座位按钮在 x≈88 起，#23）。 */
 const TRAFFIC_LIGHT_BAND = 76
 
-/** Win/Linux 自绘窗口按钮预留宽度（CSS px）。 */
-const CAPTION_CONTROLS_WIDTH = 138
-
 /** ui-layout 原生 frame 的 overlay 层稳定标记（AppFrame 固定渲染 data-shell-overlay）。 */
 const FRAME_LAYER_SELECTOR = '[data-shell-overlay]'
-
-
-/** 自绘窗口三键：官方 RPC 优先，兜底 /__shell__/window（shell-rpc.ts）；失败可见，不再静默吞。 */
-function runWindowAction(action: 'minimize' | 'toggle-maximize' | 'close'): void {
-  sendWindowAction(action).catch((error) => console.error('[dsh-desktop] window action failed', error))
-}
-
-export const maximizeIconSvg = (maximized: boolean): string =>
-  maximized
-    ? '<rect x="1.5" y="4.5" width="7" height="6" stroke="currentColor" strokeWidth="1" fill="none" /><path d="M3.5 4.5V2.5H10.5V9H8.5" stroke="currentColor" strokeWidth="1" fill="none" />'
-    : '<rect x="1.5" y="1.5" width="9" height="9" stroke="currentColor" strokeWidth="1" fill="none" />'
-
-/** 官方 RPC 报告的最大化态 → 换最大化/还原图标（几何推导在壳侧 window-max.ts，按钮不存在则无操作）。 */
-function syncMaximizeIcon(): void {
-  const button = document.querySelector<HTMLButtonElement>('.dshDesktopCaptionButton-maximize')
-  if (button === null) return
-  shellRpc
-    .invoke<{ maximized: boolean }>('window_get_state', undefined, { timeoutMs: 5000 })
-    .then((state) => {
-      button.innerHTML = `<svg viewBox="0 0 12 12" aria-hidden="true">${maximizeIconSvg(state.maximized)}</svg>`
-      button.setAttribute('aria-label', state.maximized ? '还原' : '最大化')
-    })
-    .catch(() => undefined)
-}
-function makeCaptionButton(aria: string, extraClass: string, svgPath: string): HTMLButtonElement {
-  const button = document.createElement('button')
-  button.type = 'button'
-  button.className = `dshDesktopCaptionButton${extraClass ? ` ${extraClass}` : ''}`
-  button.setAttribute('aria-label', aria)
-  button.innerHTML = `<svg viewBox="0 0 12 12" aria-hidden="true">${svgPath}</svg>`
-  return button
-}
-
-/** Win/Linux 自绘窗口按钮：最小化 / 最大化 / 关闭。 */
-function buildWindowControls(platform: DesktopClientPlatform): HTMLElement {
-  const box = document.createElement('div')
-  box.className = 'dshDesktopWindowControls'
-  box.appendChild(makeCaptionButton('最小化', '', '<path d="M1 6h10" stroke="currentColor" strokeWidth="1" fill="none" />'))
-  box.appendChild(makeCaptionButton('最大化', 'dshDesktopCaptionButton-maximize', maximizeIconSvg(false)))
-  box.appendChild(makeCaptionButton('关闭', 'dshDesktopCaptionButton-close', '<path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1" />'))
-  box.addEventListener('click', (event) => {
-    const button = (event.target as HTMLElement).closest('button')
-    const action = button?.getAttribute('aria-label')
-    if (action === '最小化') runWindowAction('minimize')
-    else if (action === '最大化' || action === '还原') {
-      runWindowAction('toggle-maximize')
-      syncMaximizeIcon()
-    }
-    else if (action === '关闭') runWindowAction('close')
-  })
-  // 初次尝试同步 + 窗口尺寸变化（含贴靠/手动最大化）后重同步（去抖 200ms，#50 验证反馈）
-  if (platform !== 'darwin') {
-    syncMaximizeIcon()
-    // 壳侧主动推的窗口状态变化（#73：启动恢复最大化后 dom-ready 补 maximize，页面无从感知）：
-    // 消息是触发器，收到就重查真值。先挂监听再首查——接管前抵达的推送由框架 preload
-    // 攒在 __electrobunPendingHostMessages，首查（ensureReceive）时排空分发。
-    shellRpc.onMessage((name) => {
-      if (name === 'window_state_changed') syncMaximizeIcon()
-    })
-    let resizeTimer = 0
-    window.addEventListener('resize', () => {
-      window.clearTimeout(resizeTimer)
-      resizeTimer = window.setTimeout(syncMaximizeIcon, 200)
-    })
-    // 隐藏后找回（托盘 show）与首布局即最大化的启动场景都没有 resize 事件：焦点/可见性一变就重查
-    window.addEventListener('focus', () => syncMaximizeIcon())
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') syncMaximizeIcon()
-    })
-    // 启动轮询（收 hack 轮已删）：竞态由「先挂 onMessage 再首查」+ 壳侧 focus 唯一断言点闭环，
-    // 事件驱动的 focus/visibilitychange 重查保留。
-  }
-  return box
-}
 
 /** 定位标准布局的 AppFrame（overlay 层的父节点）与三列。children 顺序：sidebar / center / rightbar / overlay … */
 function locateLayout(): { frame: HTMLElement; sidebar: HTMLElement; center: HTMLElement | null; rightColumn: HTMLElement | null } | null {
@@ -108,14 +27,12 @@ function locateLayout(): { frame: HTMLElement; sidebar: HTMLElement; center: HTM
  * - darwin：sidebar 顶部一条拖拽区（透明），并把 sidebar 内容下移对应高度；
  *   折叠时把侧栏网格轨道加宽到 90px（红绿灯始终在侧栏内），内部 56px 窄栏水平居中，
  *   并禁用 frame 的慢速网格过渡（避免我们的覆盖与过渡互相重启导致折叠卡慢）；
- * - win32/linux：中间区域顶部一条自绘条（左侧拖拽区 + 右侧窗口按钮），
- *   中间列内容用 padding 顶下去，防止重叠。
+ * - win32/linux：不再绘制顶部 chrome（#112）：标题栏带与三键上收壳 preload
  *
  * 挂点范式照搬 better-sidebar：往 document.body 追加 fixed host，子元素绝对定位；
  * frame / 三列用 ui-layout 的稳定标记定位（不依赖 hash 类名）。
  */
 export function installLocalChrome(platform: DesktopClientPlatform): () => void {
-  const height = STRIP_HEIGHT[platform]
 
   const host = document.createElement('div')
   host.className = 'dshDesktopChromeHost'
@@ -123,13 +40,13 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
   strip.className = 'dshDesktopChromeStrip'
   const drag = document.createElement('div')
   drag.className = 'dshDesktopChromeDrag'
-  // Electrobun 的拖拽区是 CSS 驱动（preload/dragRegions）：类名挂上才能原生拖动（macOS/Windows 同）
+  // Electrobun 的拖拽区是 CSS 驱动（preload/dragRegions）：类名挂上才能原生拖动（macOS）
   drag.classList.add('electrobun-webkit-app-region-drag')
-  // 拖拽区双击 = 最大化切换（原生层不合成 WM_NCLBUTTONDBLCLK；macOS 走系统红绿灯，不需要）
-  if (platform !== 'darwin') drag.addEventListener('dblclick', () => runWindowAction('toggle-maximize'))
   strip.appendChild(drag)
-  if (platform !== 'darwin') strip.appendChild(buildWindowControls(platform))
-  host.appendChild(strip)
+  // #112：win32/linux 的标题栏带与三键上收壳 preload，页面内只在 darwin 铺拖拽带；
+  // strip/drag 在 win/linux 保持游离节点不进 DOM（只有 sync 的 darwin 分支触达）；
+  // host 全平台承载底部状态条，dispose 统一移除。
+  if (platform === 'darwin') host.appendChild(strip)
   document.body.appendChild(host)
 
   /** 底部状态条高度（sidebar 内容用 padding-bottom 让出一整行）。 */
@@ -355,7 +272,7 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
       return
     }
     attempts = 0
-    const { frame, sidebar, center, rightColumn } = layout
+    const { frame, sidebar } = layout
     ensureSidebarScroll(sidebar)
     const sidebarWidth = sidebar.offsetWidth
     // 底部状态条：内容行让出一整行（所有平台），状态条覆盖其上
@@ -373,7 +290,7 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
         // 全隐 + shell.leading 座位放官方「打开侧边栏/新会话」按钮（红绿灯旁 x≈88 起）。
         // 拖拽带只铺红绿灯区（TRAFFIC_LIGHT_BAND），不遮座位按钮；状态条按维护者
         // 拍板随侧栏隐藏（#23 Q1）。
-        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${height}px;background:transparent;`
+        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${DARWIN_STRIP_HEIGHT}px;background:transparent;`
         drag.style.cssText = 'position:absolute;inset:0;'
         sidebar.style.paddingTop = ''
         bar.style.display = 'none'
@@ -381,18 +298,10 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
         // 官方桌面口径：拖拽带全透明、只铺红绿灯区（76px）——红绿灯浮在侧栏
         // header 左侧空白区（折叠按钮在右侧，不受遮挡）；透明条带与任何主题
         // 表面同色（同像素透出），色差从结构上不可能发生（#23）。
-        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${height}px;`
+        strip.style.cssText = `left:0;top:0;width:${TRAFFIC_LIGHT_BAND}px;height:${DARWIN_STRIP_HEIGHT}px;`
         drag.style.cssText = 'position:absolute;inset:0;'
         bar.style.display = ''
       }
-    } else {
-      // 布局对齐旧壳（维护者口径）：Windows/Linux 中间列顶部保留一整条 chrome 条
-      //（拖拽区 + 右侧窗口三键），中间列内容用 padding 顶下去，右侧 panel 覆写 top。
-      strip.style.cssText = `left:${sidebarWidth}px;right:0;top:0;height:${height}px;`
-      drag.style.cssText = `position:absolute;top:0;bottom:0;left:0;right:${CAPTION_CONTROLS_WIDTH}px;`
-      if (center !== null) center.style.paddingTop = `${height}px`
-      const rightPanel = rightColumn?.querySelector('[data-sidebar-right-panel]')
-      if (rightPanel !== null) (rightPanel as HTMLElement).style.top = `${height}px`
     }
   }
 
@@ -419,11 +328,6 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
         attributes: true,
         attributeFilter: ['data-sidebar-collapsed', 'data-details-collapsed', 'style'],
       })
-      // 右侧 Sidebar 切换会话时 React 销毁重建 panel DOM，新节点丢失 inline top。
-      // 监听 rightColumn 子树 childList 变化，panel 被替换后重跑 sync 补回 top（#62）。
-      if (layout.rightColumn !== null) {
-        mutationObserver.observe(layout.rightColumn, { childList: true, subtree: true })
-      }
     }
     return true
   }
@@ -457,9 +361,6 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
       found.sidebar.style.removeProperty('border-right')
       found.frame.style.removeProperty('transition')
       found.frame.style.removeProperty('grid-template-columns')
-      if (found.center !== null) found.center.style.paddingTop = ''
-      const rightPanel = found.rightColumn?.querySelector('[data-sidebar-right-panel]')
-      if (rightPanel !== null) (rightPanel as HTMLElement).style.top = ''
     }
     // 还原侧边栏宽度修复（HMR/停用后不留内联样式与标记）
     for (const el of minWidthPatched) el.style.minWidth = ''

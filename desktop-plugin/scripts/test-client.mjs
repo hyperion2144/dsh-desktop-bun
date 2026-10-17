@@ -5,7 +5,7 @@
  * platform-keyboard（#187）的绑定匹配 / keybindings 解析与编辑。
  */
 import { build } from 'esbuild'
-import { mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { createContext, runInContext } from 'node:vm'
@@ -488,7 +488,7 @@ assert.equal(area.value, 'xy', '输入框 value 里的控制字符也被擦掉')
 
 
 
-// ── shell-rpc（#50）：统一传输层，三通道选择 / wire 协议 / 超时 / 窗口三键 ──
+// ── shell-rpc（#50）：统一传输层，三通道选择 / wire 协议 / 超时 ──
 await build({
   entryPoints: [join(root, 'src/client/shell-rpc.ts')],
   outfile: join(tmp, 'shell-rpc.mjs'),
@@ -498,7 +498,7 @@ await build({
   target: 'node20',
   logLevel: 'silent',
 })
-const { createShellRpc, sendWindowAction } = await import(pathToFileURL(join(tmp, 'shell-rpc.mjs')).href)
+const { createShellRpc } = await import(pathToFileURL(join(tmp, 'shell-rpc.mjs')).href)
 
 // 官方桥：捕获 postMessage 包形，回包经 receiveMessageFromHost 注入
 {
@@ -542,61 +542,65 @@ const { createShellRpc, sendWindowAction } = await import(pathToFileURL(join(tmp
   assert.deepEqual(globals.__electrobunPendingHostMessages, [], '接管后积压已排空')
 }
 
-// 壳→页面主动推送（#73）：{type:'message', id:消息名, payload} 分发给监听器
-{
-  const globals = {
-    __electrobunHostBridge: { postMessage: () => {} },
-    __electrobun: {},
+// #128：壳 preload 装的官方 RPC 分发器（与 preload.ts 同形）。桩里造一个同构的：
+// 自己发 id、自己占接收面、自己排 pending——插件在场时官方通道**整体**委托给它。
+const withPreloadDispatcher = () => {
+  const sent = []
+  const pending = new Map()
+  let nextId = 0
+  const globals = { __electrobunHostBridge: { postMessage: (raw) => sent.push(JSON.parse(raw)) }, __electrobun: {} }
+  const invoke = (method, params) =>
+    new Promise((resolve, reject) => {
+      nextId += 1
+      pending.set(nextId, { resolve, reject })
+      globals.__electrobunHostBridge.postMessage(JSON.stringify({ type: 'request', id: nextId, method, params }))
+    })
+  globals.__DSH_SHELL_RPC__ = { invoke, request: invoke }
+  globals.__electrobun.receiveMessageFromHost = (packet) => {
+    const waiter = pending.get(packet.id)
+    if (waiter === undefined) return
+    pending.delete(packet.id)
+    if (packet.success === true) waiter.resolve(packet.payload)
+    else waiter.reject(new Error(String(packet.error)))
   }
-  const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
-  const seen = []
-  const off = rpc.onMessage((name, payload) => seen.push([name, payload]))
-  void rpc.invoke('ping').catch(() => {}) // 接管接收面（真页面上 handlePacket 也只在接管后可达）
-  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: { maximized: true } })
-  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 1, success: true, payload: 'x' })
-  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: { maximized: false } })
-  assert.deepEqual(seen, [['window_state_changed', { maximized: true }], ['window_state_changed', { maximized: false }]], 'message 包分发到监听器，response 不串台')
-  off()
-  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: {} })
-  assert.equal(seen.length, 2, '退订后不再分发')
-  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 7, payload: {} })
-  assert.equal(seen.length, 2, 'id 非字符串的 message 包丢弃')
+  return { globals, sent }
 }
 
-// 接管前抵达的推送：preload 攒在 __electrobunPendingHostMessages，首查（ensureReceive）时排空分发
+// 插件把整条官方通道委托给 preload 分发器，且不碰 receiveMessageFromHost
 {
-  const globals = {
-    __electrobunHostBridge: { postMessage: () => {} },
-    __electrobun: {},
-    __electrobunPendingHostMessages: [{ type: 'message', id: 'window_state_changed', payload: {} }],
-  }
+  const { globals, sent } = withPreloadDispatcher()
+  const before = globals.__electrobun.receiveMessageFromHost
   const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
-  let pushed = 0
-  rpc.onMessage((name) => {
-    if (name === 'window_state_changed') pushed += 1
-  })
-  void rpc.invoke('x').catch(() => {})
-  assert.equal(pushed, 1, '积压的推送在首次 invoke 排空时分发（#73 启动竞态）')
-  assert.deepEqual(globals.__electrobunPendingHostMessages, [], '积压已排空')
+  const p = rpc.invoke('get_desktop_client_environment', { a: 1 })
+  assert.equal(sent.length, 1, '只发一个请求（插件没另起一套）')
+  assert.equal(sent[0].method, 'get_desktop_client_environment', '方法名原样上送')
+  assert.deepEqual(sent[0].params, { a: 1 }, '参数原样上送')
+  assert.equal(rpc.available(), true, '有 preload 分发器时 available()')
+  assert.equal(globals.__electrobun.receiveMessageFromHost, before, '插件不覆盖 receiveMessageFromHost（覆盖了 preload 的在途回包就没人接）')
+  assert.equal(rpc.onMessage, undefined, 'onMessage 已随 #128 删除（页面侧无生产订阅者）')
+  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: sent[0].id, success: true, payload: 'env' })
+  assert.equal(await p, 'env', '回包经 preload 分发器归位，resolve value')
 }
 
-// 多监听器隔离：一个抛错不影响其余
+// 注入脚本与插件同时在飞：共用一个 id 空间，回包乱序抵达也不串台
 {
-  const globals = {
-    __electrobunHostBridge: { postMessage: () => {} },
-    __electrobun: {},
-  }
+  const { globals, sent } = withPreloadDispatcher()
   const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
-  let second = 0
-  rpc.onMessage(() => {
-    throw new Error('第一个监听器炸了')
-  })
-  void rpc.invoke('ping').catch(() => {}) // 接管接收面（真页面上 handlePacket 也只在接管后可达）
-  rpc.onMessage((name) => {
-    if (name === 'window_state_changed') second += 1
-  })
-  globals.__electrobun.receiveMessageFromHost({ type: 'message', id: 'window_state_changed', payload: {} })
-  assert.equal(second, 1, '一个监听器抛错不阻断其余监听器')
+  const fromPlugin = rpc.invoke('plugin_cmd')
+  const fromInjected = globals.__DSH_SHELL_RPC__.invoke('shell_cmd')
+  assert.deepEqual(
+    sent.map((packet) => [packet.id, packet.method]),
+    [
+      [1, 'plugin_cmd'],
+      [2, 'shell_cmd'],
+    ],
+    '两条共用一个 id 空间（各发一个 id=1 的话壳侧按 id 存表会丢一份回包）',
+  )
+  // 回包倒序抵达：谁等 id 谁拿自己的
+  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 2, success: true, payload: 'shell' })
+  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 1, success: true, payload: 'plugin' })
+  assert.equal(await fromPlugin, 'plugin', '插件那条拿到自己的回包')
+  assert.equal(await fromInjected, 'shell', '注入脚本那条拿到自己的回包')
 }
 
 // 中继通道（mobile-access 远程页）
@@ -606,22 +610,24 @@ const { createShellRpc, sendWindowAction } = await import(pathToFileURL(join(tmp
   assert.deepEqual(await rpc.invoke('get_notifications_state', { x: 1 }), { cmd: 'get_notifications_state', args: { x: 1 } }, '有中继无桥时走中继')
 }
 
-// 同源 fetch 兑底：带 token 头 + 请求体字形
+// #128：同源 fetch 兑底整条删除——只剩每视图 token 不再算「可用通道」，而且一个 fetch 都不打
 {
-  const calls = []
-  const fetchImpl = async (url, init) => { calls.push({ url, init }); return { ok: true, json: async () => ({ ok: true, value: { status: 2 } }) } }
-  const globals = { __DSH_SHELL_VIEW_TOKEN__: 'tok-1' }
-  const rpc = createShellRpc({ readGlobals: () => globals, fetchImpl })
-  assert.deepEqual(await rpc.invoke('get_dsh_status'), { status: 2 }, 'fetch 兑底解析 value')
-  assert.equal(calls[0].url, '/__shell__/rpc', '端点正确')
-  assert.equal(calls[0].init.headers['x-dsh-shell-view'], 'tok-1', '带每视图 token 头')
-  assert.deepEqual(JSON.parse(calls[0].init.body), { cmd: 'get_dsh_status', args: {} }, 'body 对齐旧 shim 协议')
-
-  const fetchErr = async () => ({ ok: true, json: async () => ({ ok: false, error: 'unsupported command: nope' }) })
-  const rpcE = createShellRpc({ readGlobals: () => globals, fetchImpl: fetchErr })
-  await assert.rejects(rpcE.invoke('nope'), /unsupported command/, 'fetch 业务失败可见')
+  let fetchCalls = 0
+  const realFetch = globalThis.fetch
+  globalThis.fetch = () => {
+    fetchCalls += 1
+    return Promise.resolve(new Response('{}'))
+  }
+  try {
+    const globals = { __DSH_SHELL_VIEW_TOKEN__: 'tok-1' }
+    const rpc = createShellRpc({ readGlobals: () => globals })
+    assert.equal(rpc.available(), false, '只有视图 token 时 available() 为 false（fetch 兑底已删）')
+    await assert.rejects(rpc.invoke('get_dsh_status'), /shell rpc unavailable/, '不再有第三条通道可走')
+    assert.equal(fetchCalls, 0, '同源 fetch 兑底分支已删（不再 POST /__shell__/rpc）')
+  } finally {
+    globalThis.fetch = realFetch
+  }
 }
-
 // 无任何通道：available false + invoke reject
 {
   const rpc = createShellRpc({ readGlobals: () => ({}) })
@@ -629,32 +635,31 @@ const { createShellRpc, sendWindowAction } = await import(pathToFileURL(join(tmp
   await assert.rejects(rpc.invoke('x'), /shell rpc unavailable/)
 }
 
-// 官方通道失败不回退 fetch（命令可能已生效，toggle 二次执行会翻转两次）
+// 官方通道失败不重试、也不打 fetch（命令可能已生效，toggle 二次执行会翻转两次）
 {
   let fetchCalls = 0
-  const fetchImpl = async () => { fetchCalls += 1; return { ok: true, json: async () => ({ ok: true, value: 1 }) } }
-  const globals = { __electrobunHostBridge: { postMessage: () => {} }, __electrobun: {}, __DSH_SHELL_VIEW_TOKEN__: 't3' }
-  const rpc = createShellRpc({ readGlobals: () => globals, fetchImpl, setTimeoutImpl: (fn) => { fn(); return 1 }, clearTimeoutImpl: () => {} })
-  await assert.rejects(rpc.invoke('x'), /timed out/)
-  assert.equal(fetchCalls, 0, '官方通道超时后不打 fetch 兑底')
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (...args) => {
+    fetchCalls += 1
+    return realFetch(...args)
+  }
+  try {
+    const globals = { __electrobunHostBridge: { postMessage: () => {} }, __electrobun: {} }
+    const rpc = createShellRpc({
+      readGlobals: () => globals,
+      setTimeoutImpl: (fn) => {
+        fn()
+        return 1
+      },
+      clearTimeoutImpl: () => {},
+    })
+    await assert.rejects(rpc.invoke('x'), /timed out/)
+    assert.equal(fetchCalls, 0, '官方通道超时后不打 fetch')
+  } finally {
+    globalThis.fetch = realFetch
+  }
 }
 
-// 窗口三键：官方通道 window_* 方法；无桥时 /__shell__/window 兑底
-{
-  const sent = []
-  const globals = { __electrobunHostBridge: { postMessage: (raw) => sent.push(JSON.parse(raw)) }, __electrobun: {} }
-  const rpc = createShellRpc({ readGlobals: () => globals, setTimeoutImpl: () => 0, clearTimeoutImpl: () => {} })
-  const p = sendWindowAction('toggle-maximize', { rpc, readGlobals: () => globals })
-  assert.equal(sent[0].method, 'window_toggle_maximize', '三键走官方 RPC 方法')
-  globals.__electrobun.receiveMessageFromHost({ type: 'response', id: 1, success: true, payload: null })
-  await p
-
-  const calls = []
-  const fetchImpl = async (url, init) => { calls.push({ url, init }); return { ok: true } }
-  await sendWindowAction('minimize', { fetchImpl, readGlobals: () => ({ __DSH_SHELL_VIEW_TOKEN__: 't2' }) })
-  assert.equal(calls[0].url, '/__shell__/window', '无桥三键兑底到窗口端点')
-  assert.deepEqual(JSON.parse(calls[0].init.body), { action: 'minimize' })
-}
 
 // ── devtools-toggle（#69）：开发者工具开关的状态机与安全面文案 ──
 await build({
@@ -690,9 +695,24 @@ assert.ok(dtCopy.lines.some((l) => l.includes('凭据')), '文案点破会话内
 assert.ok(dtCopy.confirm.includes('重启'), '确认动作带重启语义')
 assert.equal(dtCopy.cancel, '取消', '取消不写入')
 
-// 保存后提示：两个方向都点明要重启
+// 保存后提示：#119 区分「真的重启了」与「没重启成」——后者不得预支「正在重启」
 assert.ok(dt.devToolsSavedNote(true).includes('重启'), '开启提示含重启')
 assert.ok(dt.devToolsSavedNote(false).includes('重启'), '关闭提示含重启')
+assert.ok(dt.devToolsSavedNote(true).includes('正在重启'), '未收到回包时沿用「正在重启」文案')
+assert.ok(dt.devToolsSavedNote(true, { ok: true }).includes('正在重启'), '重启成功同文案')
+const dtFailNote = dt.devToolsSavedNote(true, { ok: false, reason: 'dev-build', message: '开发构建不支持自动重启' })
+assert.ok(!dtFailNote.includes('正在重启'), '没重启成就不许说「正在重启」（#119：禁止假装重启成功）')
+assert.ok(dtFailNote.includes('设置已保存'), '失败文案先说设置存下来了')
+assert.ok(dtFailNote.includes('手动重启'), '失败文案给出补救路径')
+assert.ok(dtFailNote.includes('开发构建不支持自动重启'), '壳给的原因原样透出，不被吃掉')
+assert.ok(
+  dt.devToolsSavedNote(false, { ok: false, reason: 'spawn-failed' }).includes('spawn-failed'),
+  '只有 reason 没有 message 时也把 reason 说出来',
+)
+assert.ok(
+  dt.devToolsSavedNote(true, { ok: false }).includes('未知原因'),
+  '回包既没 message 也没 reason 时有兜底说法，不出「undefined」',
+)
 
 // ── runtime-download-ui（#97）：下载终态判定 / 取消 / 「当前使用」归一 ──
 await build({
@@ -794,6 +814,502 @@ const rdu = await import(pathToFileURL(join(tmp, 'runtime-download-ui.mjs')).hre
   assert.equal(rdu.runtimeDownloadHint('downloading'), '')
 }
 
+// ── notification-sound-ui（#74）：自定义音效可用性判定 / 试听失败不静默 ──
+await build({
+  entryPoints: [join(root, 'src/client/notification-sound-ui.ts')],
+  outfile: join(tmp, 'notification-sound-ui.mjs'),
+  format: 'esm',
+  platform: 'node',
+  bundle: true,
+  target: 'node20',
+  logLevel: 'silent',
+})
+const nsui = await import(pathToFileURL(join(tmp, 'notification-sound-ui.mjs')).href)
 
+// #142：被拒绝横幅的 tccutil 提示——id 用当前应用 id，非 darwin 不出 mac 专属提示
+{
+  const denied = nsui.deniedPermissionCopy
+  assert.ok(
+    denied('darwin', 'com.hyperion.dsh-desktop-bun').includes('tccutil reset Notifications com.hyperion.dsh-desktop-bun'),
+    'macOS 被拒绝提示拼当前应用 id'
+  )
+  assert.equal(denied('win32', 'com.x.y'), '通知横幅不会显示。可在系统设置中手动开启。', 'Windows 没有 tccutil')
+  assert.equal(denied('darwin', null).includes('tccutil'), false, 'id 缺失只给系统设置指引')
+  assert.equal(denied(undefined, 'com.x.y').includes('tccutil'), false, '平台未知不出 mac 专属提示')
+}
+
+// 一份「mp3/ogg 没后端」的能力报告（Linux 上没装 paplay/ffmpeg 的真实形状）
+const MP3_REASON = 'PATH 上找不到能播 .mp3 的播放器（paplay / pw-play / ffplay / mpg123）'
+const OGG_REASON = '系统自带播放器不认 Ogg Vorbis：装上 ffmpeg（提供 ffplay）后才能播'
+const cap = {
+  platform: 'linux',
+  formats: {
+    wav: { ok: true, backend: 'aplay', reason: null },
+    mp3: { ok: false, backend: null, reason: MP3_REASON },
+    ogg: { ok: false, backend: null, reason: OGG_REASON },
+  },
+  hint: '本机没有 .mp3 / .ogg 的播放后端：PATH 上找不到能播 .mp3 的播放器',
+}
+
+// ① capability 整个缺失（老壳 / 测试桩 / 没接播放层）：不炸、不禁用、不报警
+for (const missing of [null, undefined, {}, { formats: null }, { formats: { mp3: null } }]) {
+  const opts = nsui.customSoundOptions(['a.wav', 'b.mp3'], missing)
+  assert.equal(opts.length, 2, '缺能力报告时下拉项照旧列全')
+  assert.deepEqual(opts[0], { value: 'custom:a.wav', label: 'a.wav', disabled: false, title: undefined }, '缺报告时不禁用')
+  assert.equal(opts[1].label, 'b.mp3', '缺报告时不往文案里塞原因')
+  assert.equal(nsui.soundOptionState(missing, 'custom:b.mp3').ok, true, '缺报告时自定义档当可用')
+  assert.equal(nsui.configuredSoundWarning(missing, 'custom:b.mp3'), null, '缺报告时不出告警')
+}
+assert.deepEqual(nsui.customSoundOptions(null, null), [], 'sounds 缺失回空数组，不炸')
+assert.equal(nsui.customSoundOptions(['a.wav'], null).length, 1, 'sounds 正常时照常出项')
+assert.equal(nsui.capabilityHint(null), null, '无能力报告不出总说明')
+assert.equal(nsui.capabilityHint({ hint: '   ' }), null, '空白 hint 当没有（不画空行）')
+assert.equal(nsui.capabilityHint({ hint: 7 }), null, '非字符串 hint 当没有')
+assert.equal(nsui.capabilityHint(cap), cap.hint, '有 hint 时原样透传')
+
+// ② 扩展名没后端的选项：禁用 + 原因写进文案（用户看得见，不只藏 title）
+const choices = nsui.customSoundOptions(['叮.wav', '提示音.mp3', '警报.ogg'], cap)
+assert.equal(choices[0].disabled, false, '有后端的扩展名不禁用')
+assert.equal(choices[0].label, '叮.wav', '可用的项文案不加料')
+assert.equal(choices[1].disabled, true, '没后端的 .mp3 下拉里禁用')
+assert.ok(choices[1].label.startsWith('提示音.mp3'), '禁用项仍带音效名')
+assert.ok(choices[1].label.includes(MP3_REASON), '禁用原因写进选项文案（可见）')
+assert.equal(choices[1].title, MP3_REASON, 'title 给原因全文')
+assert.equal(choices[2].disabled, true, '没后端的 .ogg 同样禁用')
+assert.ok(choices[2].label.includes(OGG_REASON), 'ogg 原因同样可见')
+
+// 内置档不做格式判定（default / none / __choose 永远可选）
+for (const builtin of ['default', 'none', '__choose', '']) {
+  assert.equal(nsui.soundOptionState(cap, builtin).ok, true, `内置档 ${builtin || '(空)'} 不判定`)
+}
+assert.equal(nsui.soundOptionState(cap, 'custom:a.aac').ok, true, '白名单外的扩展名不误报（导入时就已拦）')
+assert.equal(nsui.soundOptionState(cap, 'custom:无后缀').ok, true, '无后缀不误报')
+assert.ok(nsui.soundOptionState({ formats: { ogg: { ok: false, backend: null, reason: null } } }, 'custom:x.ogg').reason, '壳侧没给原因时有兜底文案（不出空尾巴）')
+assert.equal(nsui.soundExtension('a.WAV'), 'wav', '扩展名大小写不敏感')
+assert.equal(nsui.soundExtension('a.aac'), null, '白名单外回 null')
+assert.equal(nsui.soundExtension('.bashrc'), null, '隐藏文件不算后缀')
+assert.equal(nsui.customSoundName('custom:x.ogg'), 'x.ogg', 'custom: 前缀剥掉')
+assert.equal(nsui.customSoundName('none'), null, '内置档不是自定义音')
+assert.equal(nsui.customSoundName('custom:'), null, '空名不算自定义音')
+
+// ③ 已配置但本机播不了：行里（不只下拉里）也要看得见
+const warn = nsui.configuredSoundWarning(cap, 'custom:提示音.mp3')
+assert.ok(warn.includes('提示音.mp3'), '告警点名哪个音效')
+assert.ok(warn.includes(MP3_REASON), '告警带原因')
+assert.equal(nsui.configuredSoundWarning(cap, 'custom:叮.wav'), null, '能播的不告警')
+assert.equal(nsui.configuredSoundWarning(cap, 'default'), null, '系统默认不告警')
+
+// ④ 试听：真放了但没出声 ⇒ 可见失败；none/空档与老壳缺 audible 都不报错
+const failed = nsui.previewFailure({ played: 'custom:提示音.mp3', sound: '提示音.mp3', audible: false })
+assert.ok(typeof failed === 'string' && failed.length > 0, 'audible=false 且有 played 时给失败文案')
+assert.ok(failed.includes('提示音.mp3'), '失败文案点名播不响的音效')
+assert.ok(nsui.previewFailure({ played: 'default', sound: 'default', audible: false }).includes('本机没有可用的播放后端'), '系统默认档没后端也给话说')
+assert.equal(nsui.previewFailure({ played: 'custom:叮.wav', sound: '叮.wav', audible: true }), null, '真响了不报错')
+assert.equal(nsui.previewFailure({ played: 'custom:叮.wav', sound: '叮.wav' }), null, '缺 audible（老壳）不显示失败')
+assert.equal(nsui.previewFailure({ played: 'custom:叮.wav', sound: '叮.wav', audible: undefined }), null, 'audible=undefined 不显示失败')
+assert.equal(nsui.previewFailure({ played: null, sound: 'none', audible: false }), null, 'played=null（none/空档）不算失败')
+assert.equal(nsui.previewFailure({ played: '', sound: '', audible: false }), null, 'played 空串不算失败')
+assert.equal(nsui.previewFailure(null), null, '响应为空不炸')
+assert.equal(nsui.previewFailure(undefined), null, '响应缺省不炸')
+assert.equal(nsui.previewFailure('ok'), null, '响应非对象不炸')
+
+// ⑤ 「权限不可用」横幅平台化（PR #100 实测反馈）：win/linux 上「dev 裸二进制 / 打包后的 .app」是假话
+const OLD_UNAVAILABLE_TEXT = '当前环境无法查询系统通知权限（dev 裸二进制或平台不支持）；验收请使用打包后的 .app。'
+for (const plat of ['win32', 'linux']) {
+  const copy = nsui.permissionUnavailableCopy(plat)
+  assert.equal(copy.neutral, true, `${plat}：中性横幅（不带告警语气）`)
+  assert.equal(copy.chip, null, `${plat}：不画「权限不可用」chip`)
+  assert.ok(!copy.text.includes('打包后的 .app'), `${plat}：文案不含「打包后的 .app」`)
+  assert.ok(!copy.text.includes('dev 裸二进制'), `${plat}：文案不含「dev 裸二进制」`)
+  assert.ok(copy.text.includes('系统通知中心'), `${plat}：说清通知归系统通知中心`)
+  assert.ok(copy.text.includes('不查询授权状态'), `${plat}：说清壳不查询授权状态`)
+}
+assert.ok(nsui.permissionUnavailableCopy('win32').text.includes('Windows'), 'win32 点名 Windows')
+assert.ok(nsui.permissionUnavailableCopy('linux').text.includes('Linux'), 'linux 点名 Linux')
+// darwin 与不可知平台（缺失 / 非字符串 / 未知值）：逐字保留旧文案，不许把「不知道」当 Windows
+for (const plat of ['darwin', undefined, null, '', 0, {}, [], 'freebsd', 'win32 ', 'Win32']) {
+  const copy = nsui.permissionUnavailableCopy(plat)
+  assert.equal(copy.text, OLD_UNAVAILABLE_TEXT, `平台 ${String(plat)} 逐字保留旧文案`)
+  assert.equal(copy.chip, '权限不可用', `平台 ${String(plat)} 保留旧 chip`)
+  assert.equal(copy.neutral, false, `平台 ${String(plat)} 保留原观感`)
+}
+
+// 面板接线（源码级门禁）：判定绿了但没画到 DOM 上 = #74 复发——史上面板还出过「整片空白」事故。
+const tabSource = readFileSync(join(root, 'src/client/notifications-tab.tsx'), 'utf8')
+assert.ok(tabSource.includes('data.capability ?? null'), 'capability 缺失时走容错读法')
+assert.ok(tabSource.includes('customSoundOptions(data.sounds, capability)'), '下拉项经可用性判定')
+assert.ok(tabSource.includes('disabled={opt.disabled}'), '没后端的格式真的落到 option[disabled] 上')
+assert.ok(tabSource.includes('configuredSoundWarning(capability, conf.sound)'), '已配置且本机不可播的音效行里判定')
+assert.ok(tabSource.includes('previewFailure(res)'), '试听响应经失败判定')
+assert.ok(tabSource.includes('setPreviewNote(failure === null ? null : { id, text: failure })'), '失败文案进可见状态')
+assert.ok(tabSource.includes('capabilityHint(capability)'), '缺后端总说明接进面板')
+assert.ok(tabSource.includes('permissionUnavailableCopy(capability?.platform)'), '权限不可用横幅取平台判定')
+assert.ok(tabSource.includes('{permissionUnavailable.text}'), '平台化文案画进横幅')
+
+
+
+// ── keep-awake-note（#75）：防休眠能力提示——缺位 / 拿不到通道 / 按 backend 分平台口径 ──
+await build({
+  entryPoints: [join(root, 'src/client/keep-awake-note.ts')],
+  outfile: join(tmp, 'keep-awake-note.mjs'),
+  format: 'esm',
+  platform: 'node',
+  target: 'node20',
+  logLevel: 'silent',
+})
+const ka = await import(pathToFileURL(join(tmp, 'keep-awake-note.mjs')).href)
+
+// 与面板其余说明共用的尾句（逐字；改口径必须先改这里）
+const KA_TAIL =
+  '直到会话跑完、dsh 实例停止或退出壳。屏幕该关还是照关，只是不让整机睡过去；合盖仍然会睡。改动立即生效。'
+
+// 缺位（老壳没有 keep_awake 字段）/ available 缺失：info + 三平台口径，不把「不知道」说成「不支持」
+for (const [label, cap] of [
+  ['字段缺省', undefined],
+  ['字段为 null', null],
+  ['字段在但 available 缺失', { platform: 'linux', backend: 'systemd-inhibit' }],
+]) {
+  const note = ka.keepAwakeNote(cap)
+  assert.equal(note.tone, 'info', `${label}：未知按 info 说明，不误报降级`)
+  for (const token of ['macOS', 'Windows', 'Linux']) {
+    assert.ok(note.text.includes(token), `${label}：通用说明含 ${token}`)
+  }
+  assert.ok(note.text.includes(KA_TAIL), `${label}：含共同尾句`)
+}
+
+// available:false（拿不到 inhibit 通道）：warn + 明说降级 + 壳给的 reason 原文，绝不静默
+const kaOff = ka.keepAwakeNote({
+  platform: 'linux',
+  backend: null,
+  available: false,
+  reason: 'systemd-inhibit 不在 PATH，且没有可用的 logind 会话抑制',
+})
+assert.equal(kaOff.tone, 'warn', '拿不到通道必须 warn（面板走醒目色）')
+assert.ok(kaOff.text.includes('本环境拿不到防休眠通道'), 'warn 明说本环境拿不到防休眠通道')
+assert.ok(kaOff.text.includes('systemd-inhibit 不在 PATH'), 'warn 原文带上壳给的原因')
+assert.ok(kaOff.text.includes('空闲休眠'), 'warn 说清开关开着也可能空闲休眠')
+
+// reason 缺失 / 非字符串：固定兜底句，且任何分支都不许把 undefined 漏进文案
+for (const [label, cap] of [
+  ['reason 缺省', { available: false }],
+  ['reason 为 null', { available: false, reason: null }],
+  ['reason 为空白串', { available: false, reason: '  ' }],
+  ['reason 非字符串', { available: false, reason: 42 }],
+]) {
+  const note = ka.keepAwakeNote(cap)
+  assert.equal(note.tone, 'warn', `${label}：仍然 warn`)
+  assert.ok(note.text.includes('本环境拿不到防休眠通道'), `${label}：仍然明说降级`)
+  assert.ok(note.text.includes('原因未知'), `${label}：缺原因时给固定兜底句`)
+  assert.ok(!note.text.includes('undefined'), `${label}：文案里不许出现 undefined`)
+}
+
+// available:true：按 backend 给平台口径（四个通道各一条）
+for (const [backend, token] of [
+  ['caffeinate', 'IOKit'],
+  ['execution-state', '线程执行状态'],
+  ['systemd-inhibit', 'systemd-inhibit'],
+  ['gnome-session-inhibit', 'gnome-session-inhibit'],
+]) {
+  const note = ka.keepAwakeNote({ platform: 'linux', backend, available: true })
+  assert.equal(note.tone, 'info', `${backend}：通道可用按 info 说明`)
+  assert.ok(note.text.includes(token), `${backend}：文案含 ${token}`)
+  assert.ok(note.text.includes(KA_TAIL), `${backend}：含共同尾句`)
+}
+
+// 未知 backend（壳将来加通道）：回退三平台通用说明，不空口断言某个平台
+const kaUnknown = ka.keepAwakeNote({ platform: 'linux', backend: 'portable-signal', available: true })
+assert.equal(kaUnknown.tone, 'info', '未知 backend 按 info')
+for (const token of ['macOS', 'Windows', 'Linux']) {
+  assert.ok(kaUnknown.text.includes(token), `未知 backend 回退通用说明（含 ${token}）`)
+}
+
+
+// ── notification-focus-hint（#115）：窗口在前台聚焦时不投递通知的说明文案 ──
+await build({
+  entryPoints: [join(root, 'src/client/notification-focus-hint.ts')],
+  outfile: join(tmp, 'notification-focus-hint.mjs'),
+  format: 'esm',
+  platform: 'node',
+  bundle: true,
+  target: 'node20',
+  logLevel: 'silent',
+})
+const focusHint = await import(pathToFileURL(join(tmp, 'notification-focus-hint.mjs')).href)
+
+const focusText = focusHint.focusSuppressHint()
+assert.ok(focusText.length > 0, '说明文案非空')
+assert.ok(focusText.includes('前台聚焦') && focusText.includes('不弹通知'), '说清「前台聚焦时不弹通知」')
+assert.ok(focusText.includes('失焦') && focusText.includes('最小化'), '说清失焦/最小化后照常')
+assert.ok(focusText.includes('不可配置'), '点明是固定策略（别让用户去找开关）')
+for (const word of ['可以关闭', '可关闭', '可以关掉', '开关']) {
+  assert.ok(!focusText.includes(word), `不写成可配置项（不含「${word}」）`)
+}
+for (const word of ['平台', 'win32', 'Windows', 'linux', 'Linux', 'macOS', 'darwin']) {
+  assert.ok(!focusText.includes(word), `平台无关（不含「${word}」）`)
+}
+assert.ok(!focusText.includes('\n'), '一句话粒度（不含换行）')
+assert.ok(focusText.length <= 60, '一句话粒度（≤60 字）')
+assert.equal(focusHint.focusSuppressHint(), focusText, '纯函数：同输入同输出')
+
+// 源码级接线门禁：文案必须真的画进通知页（#115）
+const focusTabSource = readFileSync(join(root, 'src/client/notifications-tab.tsx'), 'utf8')
+assert.ok(focusTabSource.includes('{focusSuppressHint()}'), '说明文案画进通知页（#115 接线）')
+
+// ── 桌面设置面板（#128）：结构性断言，不是快照 ──
+// 面板是 .tsx，跑不了纯函数断言；但两处改动都是「有没有卡框 / 档位键名对不对」，
+// 用源码文本锁死最省事，也最贴近真实回归形态（谁都可能顺手把它挪出 SectionBox）。
+// #144：面板从单个 2341 行的 .tsx 拆成了「入口 + desktop-settings/ 目录」。下面所有面板断言都跑在**模块集合**上，
+// 所以「断言只在某个文件里切片」这件事从此不会因为新增卡片而失效——新卡自动进集合。
+function collectPanelModules(dir, acc = []) {
+  for (const name of readdirSync(dir).sort()) {
+    const full = join(dir, name)
+    if (statSync(full).isDirectory()) collectPanelModules(full, acc)
+    else if (name.endsWith('.ts') || name.endsWith('.tsx')) acc.push(full)
+  }
+  return acc
+}
+const panelModules = [
+  join(root, 'src/client/desktop-settings.tsx'),
+  ...collectPanelModules(join(root, 'src/client/desktop-settings')),
+]
+const panelSource = panelModules.map((f) => readFileSync(f, 'utf8')).join('\n')
+
+// 剥掉 JSX 注释再切片：注释里出现 `</SectionBox>` 字样会让「找第一个闭合标签」误判到注释上。
+const panelNoJsxComments = panelSource.replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
+
+// 卡片切片：取某张 SectionBox 到它自己闭合标签之间的正文。
+function sliceCard(source, title) {
+  const start = source.indexOf(`<SectionBox title="${title}">`)
+  const end = source.indexOf('</SectionBox>', start)
+  assert.ok(start !== -1 && end !== -1, `${title} 卡还在`)
+  return source.slice(start, end)
+}
+
+// ① 聚合档位：面板写出去的键必须与壳 serializeSettings 写的下划线键逐字一致，
+// 值域三档也与壳 LOOPBACK_AGGREGATION_MODES 一致——任一边改名，这里当场红。
+assert.ok(panelSource.includes('loopback_aggregation'), '面板写 loopback_aggregation（与壳落盘键同名）')
+for (const mode of ['full', 'stream', 'none']) {
+  assert.ok(
+    new RegExp(`value: '${mode}'`).test(panelSource),
+    `聚合档位表含 ${mode}（与壳白名单同值）`,
+  )
+}
+// 默认档：面板不跨包 import 壳代码（lib/client.js 是随插件单独发布的产物），所以「壳的默认值」
+// 在面板这边有三份手写字面量要跟着改：档位表的标签、loopbackAggregationMode 的回退值、
+// use-initial-data 的占位值。漏改任何一份，用户看到的 radio 会与壳实际跑的路子不一致。
+{
+  const shellDefault = readFileSync(
+    join(dirname(root), 'desktop-electrobun/src/shared/settings.ts'),
+    'utf8',
+  ).match(/DEFAULT_LOOPBACK_AGGREGATION: LoopbackAggregation = '([a-z]+)'/)[1]
+  assert.strictEqual(shellDefault, 'stream', `壳的默认档是 stream（当前 ${shellDefault}）`)
+  assert.ok(
+    panelSource.includes(`value: '${shellDefault}', label: '只关缓冲（默认）'`),
+    '档位表把「只关缓冲」标成默认',
+  )
+  assert.ok(
+    panelSource.includes(`hit === undefined ? '${shellDefault}'`),
+    '面板的坏值回退与壳的默认档一致',
+  )
+  assert.ok(
+    panelSource.includes(`loopbackAggregation: '${shellDefault}'`),
+    '面板首回话前的占位档与壳的默认档一致',
+  )
+}
+// 聚合卡自己的文案不许出现「重启」：切档即时生效，写了重启就是骗用户。
+{
+  const aggCard = sliceCard(panelNoJsxComments, 'loopback 数据面聚合')
+  assert.ok(aggCard.includes('立即生效'), '聚合卡写明「立即生效」')
+  assert.ok(!aggCard.includes('重启 dsh 生效'), '聚合卡不写「重启 dsh 生效」（切档即时生效）')
+}
+
+// ② 手机端桌面布局开关：必须在「手机访问（远程连接）」这张卡的 </SectionBox> 之前。
+// #128 的原症状就是它掉在 </SectionBox> 之后裸奔（没有卡片框），所以直接卡位置。
+{
+  const card = sliceCard(panelNoJsxComments, '手机访问（远程连接）')
+  assert.ok(card.includes('移动端布局'), '手机端桌面布局开关在「手机访问」卡内（有卡片框）')
+  assert.ok(card.includes('desktopLayoutOnPhones'), '卡内绑着布局开关自己的状态')
+}
+
+// ③ 手机布局开关：与同面板其它 checkbox（#69 开发者工具 / #186 防休眠 / #128 聚合档位）口径一致——勾选即存。
+// 原症状是它只 setState、旁边挂一个「保存」按钮，而同形态的防休眠是勾选即存，形态相同行为不同。
+{
+  const at = panelNoJsxComments.indexOf('data-desktop-settings="desktop-layout-on-phones"')
+  assert.ok(at !== -1, '布局开关还在')
+  const row = panelNoJsxComments.slice(at, panelNoJsxComments.indexOf('</div>', at))
+  assert.ok(
+    row.includes('onChange={(e) => handleToggleMobileLayout(e.target.checked)}'),
+    '布局开关勾选直接落盘（不再只改本地 state 等点保存）',
+  )
+  assert.ok(!row.includes('保存</PfBtn>'), '布局开关那一行不再挂「保存」按钮')
+  assert.ok(
+    panelSource.includes('const handleToggleMobileLayout = (next: boolean)'),
+    'handler 收 next 参数而不是读 state（否则连点两下会存反）',
+  )
+}
+
+// ④ 边框 token：dsh 宿主只定义 --dsw-alias-border-l1..l4 四档（每档各有浅色/深色两套值），
+// 写成不带数字的 -l 永远取不到变量、只能落回白色 #ffffff1f ⇒ 浅色主题白底白线看不见（#128）。
+// 清单覆盖整个面板模块集合（#144）：新增卡片自动被扫到，不需要谁记得补一行。
+for (const f of panelModules) {
+  const src = readFileSync(f, 'utf8')
+  assert.ok(
+    !src.includes('--dsw-alias-border-l,'),
+    `${f.slice(root.length + 1)}：不再用宿主未定义的 --dsw-alias-border-l（会永远回退白色，浅色主题看不见边框）`,
+  )
+}
+for (const f of ['notifications-tab.tsx', 'downloads-tab.tsx']) {
+  const src = readFileSync(join(root, 'src/client', f), 'utf8')
+  assert.ok(
+    !src.includes('--dsw-alias-border-l,'),
+    `${f}：不再用宿主未定义的 --dsw-alias-border-l（会永远回退白色，浅色主题看不见边框）`,
+  )
+}
+
+// ⑤ 代理设置卡：保存按钮必须落在 </SectionBox> 之内。
+// 回归形态是「保存按钮和说明跑到框外」——SectionBox 提前闭合，按钮漂在卡外；面板里其余卡都是「按钮在卡内」。
+{
+  const card = sliceCard(panelNoJsxComments, '代理设置')
+  assert.ok(card.includes('onClick={handleSaveProxy}'), '保存按钮在「代理设置」卡内（没漂到框外）')
+  assert.ok(card.includes('保存代理设置'), '卡内就是那个保存按钮（不是别的同名文案）')
+}
+
+// ⑥ 卡片顺序：#144 把面板拆成 15 个 cards/*.tsx 后，顺序从「单文件里的物理位置」变成了「入口 JSX 的排列」，
+// 这是一处**肉眼扫不出来**的退化：拆分时把相邻的两张卡写反，页面照样渲染，只是顺序变了。
+// 本断言已经抓到过一次（日志与诊断/应用更新 与 dsh 运行时 互相错位）。
+//
+// 断言链：入口 JSX 里卡片组件的先后 → 各自文件里唯一的 SectionBox title → 冻结列表。
+// 两头都比：组件顺序错、或某张卡的 title 漂了，都会红。
+{
+  const entry = readFileSync(join(root, 'src/client/desktop-settings.tsx'), 'utf8')
+  const cardDir = join(root, 'src/client/desktop-settings/cards')
+  const kebab = (name) =>
+    name.replace(/Card$/, '').replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()
+  const used = [...entry.matchAll(/<([A-Z][A-Za-z]*Card)\b/g)].map((m) => m[1])
+  assert.deepStrictEqual(
+    // 比的是「同一张卡」，不是文件名长相：`DevToolsCard` 驼峰转 kebab 得 `dev-tools`，而文件叫 `devtools-card.tsx`
+    // （仓库里数据属性也一律写 `dev-tools`，卡片组件名是 `DevToolsCard`）。两边去连字符再比。
+    used.map((n) => kebab(n).replace(/-/g, '')).sort(),
+    readdirSync(cardDir)
+      .filter((f) => f.endsWith('-card.tsx'))
+      .map((f) => f.replace('-card.tsx', '').replace(/-/g, ''))
+      .sort(),
+    'cards/ 下每张卡都在入口被编排（不多不少）',
+  )
+  // 按「去掉连字符的名字」找文件，而不是拿 kebab 直接拼路径（devtools ↔ dev-tools 那条对不上）。
+  const fileByCard = new Map(
+    readdirSync(cardDir)
+      .filter((f) => f.endsWith('-card.tsx'))
+      .map((f) => [f.replace('-card.tsx', '').replace(/-/g, ''), f]),
+  )
+  const titles = used.map((name) => {
+    const key = kebab(name).replace(/-/g, '')
+    const file = fileByCard.get(key)
+    assert.ok(file !== undefined, `${name} 对应的卡片文件存在（找 ${key}-card.tsx）`)
+    const src = readFileSync(join(cardDir, file), 'utf8')
+    const found = [...src.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/<SectionBox title="([^"]+)"/g)]
+    assert.strictEqual(found.length, 1, `${name} 恰好一张 SectionBox（实际 ${found.length} 张）`)
+    return found[0][1]
+  })
+  assert.deepStrictEqual(
+    titles,
+    [
+      'dsh 来源',
+      'dsh 服务地址',
+      'Profile',
+      'Profile 端口',
+      '迁移 Profile',
+      '日志与诊断',
+      '应用更新',
+      'dsh 运行时（版本下载 / 切换）',
+      '依赖状态（pnpm store 一致性）',
+      '下载',
+      '手机访问（远程连接）',
+      'loopback 数据面聚合',
+      '电源',
+      '开发者工具',
+      '代理设置',
+    ],
+    '卡片顺序＝拆分前单文件的真实 DOM 顺序（相邻卡写反时肉眼扫不出来，靠这条拦）',
+  )
+}
+
+
+// ── update-notice-settings（#136）：启动更新提醒的开关与已忽略版本列表 ──
+await build({
+  entryPoints: [join(root, 'src/client/update-notice-settings.ts')],
+  outfile: join(tmp, 'update-notice-settings.mjs'),
+  format: 'esm',
+  platform: 'node',
+  bundle: true,
+  target: 'node20',
+  logLevel: 'silent',
+})
+const notice = await import(pathToFileURL(join(tmp, 'update-notice-settings.mjs')).href)
+
+// ── parseUpdateNoticeState：回包形状校验。读不到就该读不到，不能默认「开着」──
+assert.equal(notice.parseUpdateNoticeState(null), null, 'null 回包 = 读不到')
+assert.equal(notice.parseUpdateNoticeState('[1,2]'), null, '数组不是合法状态')
+assert.equal(notice.parseUpdateNoticeState('nope'), null, '字符串不是合法状态')
+assert.equal(notice.parseUpdateNoticeState({}).enabled, true, '缺 enabled 字段 = 默认开（缺字段的老文件不该被当成用户关掉了）')
+assert.equal(notice.parseUpdateNoticeState({ enabled: false }).enabled, false, '显式 false = 关')
+assert.equal(notice.parseUpdateNoticeState({ enabled: 'no' }).enabled, true, '非布尔值不当成关')
+assert.deepEqual(
+  notice.parseUpdateNoticeState({ ignored: ['runtime:0.2.2', ' runtime:0.2.2 ', 'shell:0.3.0', 7, ''] }).ignored,
+  ['runtime:0.2.2', 'shell:0.3.0'],
+  '拉黑键去重、去空白、丢掉非字符串',
+)
+assert.deepEqual(notice.parseUpdateNoticeState({ ignored: 'nope' }).ignored, [], 'ignored 不是数组就当空')
+assert.deepEqual(
+  notice.parseUpdateNoticeState({ lastNotified: { shell: '0.3.0', runtime: '   ' } }).lastNotified,
+  { shell: '0.3.0', runtime: null },
+  '空白版本号回落 null（不参与比较）',
+)
+assert.deepEqual(notice.parseUpdateNoticeState({}).lastNotified, { shell: null, runtime: null }, '缺 lastNotified 回落空')
+
+// ── parseIgnoredKey：带前缀拆路。同号的壳与运行时是两件事，绝不能合并 ──
+assert.deepEqual(notice.parseIgnoredKey('shell:0.3.0'), { kind: 'shell', version: '0.3.0' }, '壳键')
+assert.deepEqual(notice.parseIgnoredKey('runtime:0.2.2-alpha.1'), { kind: 'runtime', version: '0.2.2-alpha.1' }, '运行时键')
+assert.deepEqual(notice.parseIgnoredKey('0.3.0'), { kind: null, version: '0.3.0' }, '无前缀 = 未知来源（照样能显示、能被清空）')
+assert.deepEqual(notice.parseIgnoredKey('plugin:0.3.0'), { kind: null, version: 'plugin:0.3.0' }, '不认识的前缀也当未知来源，原样保留')
+assert.deepEqual(notice.parseIgnoredKey('shell:'), { kind: null, version: 'shell:' }, '前缀后版本号为空 = 未知来源')
+assert.deepEqual(notice.parseIgnoredKey(':0.3.0'), { kind: null, version: ':0.3.0' }, '空前缀 = 未知来源')
+
+// ── ignoredRows：壳在前、运行时在后，各按版本从高到低 ──
+const rows = notice.ignoredRows(['runtime:0.2.9', 'shell:0.3.0', 'runtime:0.2.10', 'shell:0.3.0', 'weird-key'])
+assert.deepEqual(
+  rows.map((r) => r.label),
+  ['桌面壳 0.3.0', 'DSH 运行时 0.2.10', 'DSH 运行时 0.2.9', 'weird-key'],
+  '壳在前；同路按版本从高到低（0.2.10 > 0.2.9，不是字典序）；未知来源殿后',
+)
+assert.equal(rows.length, 4, '重复键去重')
+assert.equal(notice.ignoredRows([]).length, 0, '空列表没有行')
+assert.equal(notice.ignoredRows(['shell:0.3.0'])[0].kind, 'shell', '行上带着路（恢复按钮靠它回传）')
+assert.equal(notice.ignoredRows(['weird-key'])[0].kind, null, '未知来源那行的 kind 是 null（面板据此禁用「恢复」）')
+
+// ── 文案：开关语义必须写在面板上，不能只写在票面 ──
+const hintOn = notice.updateNoticeEnabledHint(true)
+const hintOff = notice.updateNoticeEnabledHint(false)
+assert.ok(hintOn.includes('弹窗'), '开着时说清会弹窗提醒')
+assert.ok(hintOn.includes('托盘'), '开着时也点明托盘随时可查')
+assert.ok(hintOff.includes('启动不再弹'), '关掉时说清启动不再弹')
+assert.ok(hintOff.includes('不受这个开关约束'), '关掉后仍说清手动检查不受约束（票面第 4 条硬要求）')
+assert.ok(!hintOff.includes('不会再检查'), '不说成「连检查都不做了」——托盘那次照做')
+assert.equal(notice.ignoredEmptyHint(), '没有被忽略的版本。', '空列表灰字')
+
+// 源码级接线门禁：这一段必须真的画进设置面板
+// #144 之后面板拆成 src/client/desktop-settings/ 下的卡片模块，开关与列表都住在
+// cards/update-card.tsx；红线断言必须扫模块集合，否则新模块天然逃过检查。
+const settingsSource = panelSource
+for (const cmd of ['get_update_notice_state', 'set_update_notice_enabled', 'restore_update_notice', 'clear_update_notice_ignored']) {
+  assert.ok(settingsSource.includes(`'${cmd}'`), `面板调了 ${cmd}`)
+}
+assert.ok(settingsSource.includes('{updateNoticeEnabledHint(updateNotice.enabled)}'), '说明文案画进面板')
+assert.ok(settingsSource.includes('清空全部'), '「清空全部」画进面板')
+assert.ok(settingsSource.includes('恢复'), '「恢复」画进面板')
+assert.ok(
+  !/desktop\.[a-z_]*update_notice[a-z_]*/.test(settingsSource),
+  '不把提醒开关当普通设置键写进 desktop-settings.json（键名是契约红线）',
+)
 rmSync(tmp, { recursive: true, force: true })
 console.log('client 纯函数测试：全部通过 ✓')

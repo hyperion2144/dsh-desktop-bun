@@ -6,9 +6,11 @@ import { join } from 'node:path'
 import {
   DEFAULT_DOWNLOAD_CONCURRENCY,
   DEFAULT_MUX_HEARTBEAT_MS,
+  DEFAULT_LOOPBACK_AGGREGATION,
   DEFAULT_PROFILE,
   NOTIFICATION_SCENARIOS,
   activeProfile,
+  changedPortKeys,
   defaultSettings,
   expandHome,
   normalizeSettings,
@@ -63,6 +65,26 @@ describe('normalizeSettings', () => {
     expect(normalizeSettings({ dsh_mode: 'external' }).dshMode).toBe('builtin') // 外部已移除：白名单外静默回退
     expect(normalizeSettings({ runtime_source: 'npm' }).runtimeSource).toBe('npm')
     expect(normalizeSettings({ runtime_source: 'ftp' }).runtimeSource).toBe('github')
+  })
+
+  // #128：loopback 聚合三档。老设置文件没这个键、或用户手改成不认识的值，都必须静默回
+  // #128：loopback 聚合三档。老设置文件没这个键、或用户手改成不认识的值，都必须静默回
+  // 默认档——回错了会让没选过档的用户凭空换一种数据面行为。
+  // #144 起默认档是 stream（只关缓冲）：合并照旧，但首字节不等整条读完。
+  // 下面第一条断言是**写死字面量**的，不是拿常量比自己——否则把默认值改回去也照样绿。
+  test('loopback_aggregation：缺键与坏值回默认档 stream，落盘走下划线键', () => {
+    expect(DEFAULT_LOOPBACK_AGGREGATION).toBe('stream')
+    expect(normalizeSettings({}).loopbackAggregation).toBe('stream')
+    expect(normalizeSettings({ loopback_aggregation: 'full' }).loopbackAggregation).toBe('full')
+    expect(normalizeSettings({}).loopbackAggregation).toBe(DEFAULT_LOOPBACK_AGGREGATION)
+    expect(normalizeSettings({ loopback_aggregation: 'stream' }).loopbackAggregation).toBe('stream')
+    expect(normalizeSettings({ loopbackAggregation: 'none' }).loopbackAggregation).toBe('none')
+    expect(normalizeSettings({ loopback_aggregation: 'bogus' }).loopbackAggregation).toBe(DEFAULT_LOOPBACK_AGGREGATION)
+    expect(normalizeSettings({ loopback_aggregation: 3 }).loopbackAggregation).toBe(DEFAULT_LOOPBACK_AGGREGATION)
+    expect(normalizeSettings({ loopback_aggregation: '  ' }).loopbackAggregation).toBe(DEFAULT_LOOPBACK_AGGREGATION)
+    const json = serializeSettings(normalizeSettings({ loopback_aggregation: 'none' })) as Record<string, unknown>
+    expect(json.loopback_aggregation).toBe('none')
+    expect(settingsSummary(normalizeSettings({ loopback_aggregation: 'none' }))).toContain('loopbackAggregation="none"')
   })
 
   test('空白字符串等于没设置（用户手改配置常见）', () => {
@@ -327,6 +349,47 @@ layoutSuite('layout > profile 决议', () => {
     saveSettings(home, normalizeSettings({ active_profile: 'web' }))
     const settings = loadSettings({ home }).settings
     const env = { DSH_HOME: home, DSH_SHELL_RUNTIME_DIR: layoutRuntime }
-    expect(layout({ env, profile: activeProfile(settings, env) }).profile).toBe('web')
+    const result = layout({ env, profile: activeProfile(settings, env) })
+    expect(result.profile).toBe('web')
+    // 树是全的：#117 新增的 unresolved 不该有东西
+    expect(result.unresolved).toBe(null)
+  })
+})
+
+// #117：布局/运行时解析不出来时 layout() **不再抛**。
+// 服务面是用来「管 DSH」的，不是「DSH 起来了才算存在」——解析失败也要先把壳自己的部分立起来
+// （托盘、设置、profile、退出），否则用户连「换一个运行时」都点不到。
+// 挂在 layoutSuite 外面：失败路径本身就是没有完整运行时树，正是这条要验的场景。
+describe('layout > 解析失败不抛（#117）', () => {
+  test('运行时树不完整：不抛，unresolved 点名缺哪几项，壳自己的字段仍是真值', () => {
+    const home = tempHome()
+    const brokenTree = mkdtempSync(join(tmpdir(), 'dsh-broken-tree-')) // 空目录：dsh lib 与前端 dist 都在不了
+    const result = layout({ env: { DSH_HOME: home }, runtimeDir: brokenTree, profile: 'web' })
+
+    expect(result.unresolved).toMatch(/壳布局不完整/)
+    expect(result.unresolved).toMatch(/dsh lib/)
+    // 壳自己的部分照常可用——托盘/设置/profile 全靠这几项，与 DSH 起不起得来无关
+    expect(result.profile).toBe('web')
+    expect(result.home).toBe(home)
+    expect(result.profileDir).toBe(join(home, 'profiles', 'web'))
+    expect(result.runtimeDir).toBe(brokenTree)
+  })
+})
+
+describe('changedPortKeys：config.info 端口提示的事实源（#115）', () => {
+  test('没动端口键 = 空表（普通保存不打扰）', () => {
+    expect(changedPortKeys(normalizeSettings({}), normalizeSettings({ active_profile: 'web' }))).toEqual([])
+  })
+
+  test('动了标量端口键：按数组顺序报出对应中文键名', () => {
+    expect(
+      changedPortKeys(normalizeSettings({}), normalizeSettings({ port: 3080, lane_forwarder_port: 3099 })),
+    ).toEqual(['上游端口', 'lane 转发端口'])
+  })
+
+  test('动了 profile 端口表：按表名报', () => {
+    expect(changedPortKeys(normalizeSettings({}), normalizeSettings({ profile_lane_ports: { web: 3092 } }))).toEqual([
+      'profile lane 端口表',
+    ])
   })
 })
