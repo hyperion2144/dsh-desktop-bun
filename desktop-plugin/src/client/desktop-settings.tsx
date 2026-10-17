@@ -151,13 +151,13 @@ const PANEL_CSS = `
 [data-desktop-settings] .pf-btn { background:var(--dsw-alias-brand-primary-new-color,#4176e6); border:none; color:#fff; border-radius:8px; padding:6px 13px; font-size:12px; cursor:pointer; transition:filter .12s, transform .06s; }
 [data-desktop-settings] .pf-btn:hover { filter:brightness(1.12); }
 [data-desktop-settings] .pf-btn:active { transform:translateY(1px); }
-[data-desktop-settings] .pf-btn.ghost { background:transparent; border:1px solid var(--dsw-alias-border-l,#ffffff1f); color:var(--dsw-alias-label-primary,#e7eaf0); }
+[data-desktop-settings] .pf-btn.ghost { background:transparent; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); color:var(--dsw-alias-label-primary,#e7eaf0); }
 [data-desktop-settings] .pf-btn.ghost:hover { background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); filter:none; }
 [data-desktop-settings] .pf-btn.ghost:active { background:var(--dsw-alias-interactive-bg-active,rgba(255,255,255,.12)); transform:translateY(1px); filter:none; }
 [data-desktop-settings] .pf-btn.danger { background:transparent; border:1px solid var(--dsw-alias-state-danger-primary,#e5534b); color:var(--dsw-alias-state-danger-primary,#e5534b); }
 [data-desktop-settings] .pf-btn.danger:hover { background:rgba(229,83,75,.12); filter:none; }
 [data-desktop-settings] .pf-btn:disabled { opacity:.5; cursor:not-allowed; }
-[data-desktop-settings] input, [data-desktop-settings] select { padding:6px 8px; border-radius:8px; border:1px solid var(--dsw-alias-border-l,#ffffff1f); background:var(--dsw-alias-bg-base,#151517); color:inherit; font-size:12px; }
+[data-desktop-settings] input, [data-desktop-settings] select { padding:6px 8px; border-radius:8px; border:1px solid var(--dsw-alias-border-l2,#ffffff1f); background:var(--dsw-alias-bg-base,#151517); color:inherit; font-size:12px; }
 [data-desktop-settings] .pf-label { font-size:11px; color:var(--dsw-alias-label-secondary,#9aa4b2); margin-bottom:4px; }
 [data-desktop-settings] .pf-input { width:100%; box-sizing:border-box; }
 [data-desktop-settings] .pf-title { font-weight:600; font-size:13px; margin-bottom:10px; }
@@ -184,7 +184,7 @@ const ROOT_STYLE: React.CSSProperties = {
   fontSize: 13,
 }
 const SECTION_STYLE: React.CSSProperties = {
-  border: '1px solid var(--dsw-alias-border-l,#ffffff1f)',
+  border: '1px solid var(--dsw-alias-border-l2,#ffffff1f)',
   borderRadius: 12,
   padding: '14px 16px',
 }
@@ -207,13 +207,17 @@ const NOTE_STYLE: React.CSSProperties = {
 const INPUT_BASE_STYLE: React.CSSProperties = {
   padding: '6px 8px',
   borderRadius: 8,
-  border: '1px solid var(--dsw-alias-border-l,#ffffff1f)',
+  border: '1px solid var(--dsw-alias-border-l2,#ffffff1f)',
   background: 'var(--dsw-alias-bg-base,#151517)',
   color: 'inherit',
   fontSize: 12,
 }
 const INPUT_FULL_STYLE: React.CSSProperties = { ...INPUT_BASE_STYLE, width: '100%', boxSizing: 'border-box' }
 const ROW_STYLE: React.CSSProperties = { display: 'flex', gap: 8, alignItems: 'center' }
+// #128 loopback 数据面聚合：三档单选的一行（竖排：radio + 档位名 + 一句解释）。
+// 排布沿用面板里 checkbox 标签的 flex 写法，只是竖着排、允许换行——不新造第二套卡片样式。
+const RADIO_ROW_STYLE: React.CSSProperties = { display: 'flex', alignItems: 'flex-start', gap: 8, padding: '5px 0', cursor: 'pointer' }
+const RADIO_TEXT_STYLE: React.CSSProperties = { fontSize: 12.5, lineHeight: 1.5, color: 'var(--dsw-alias-label-primary,#e7eaf0)' }
 const FLEX_1_STYLE: React.CSSProperties = { flex: 1 }
 // #69 开发者工具确认弹窗：遮罩/卡片/文字 token 与 local-chrome.ts 退出确认弹窗同款（--dsw-alias-* 带回退）
 const DEV_TOOLS_OVERLAY_STYLE: React.CSSProperties = {
@@ -242,6 +246,32 @@ const DEV_TOOLS_ACTIONS_STYLE: React.CSSProperties = { display: 'flex', justifyC
 const DEV_TOOLS_CONFIRM = devToolsConfirmCopy()
 const DEV_TOOLS_DISABLE = devToolsDisableCopy()
 
+// #128 loopback 数据面聚合档位（面板只负责选与存，判定全在壳侧）。
+//
+// 值域的唯一事实源是壳侧 desktop-electrobun/src/shared/settings.ts 的 LOOPBACK_AGGREGATION_MODES /
+// DEFAULT_LOOPBACK_AGGREGATION。面板**不**跨包 import 壳代码：lib/client.js 是随插件单独发布的产物，
+// 把壳的 settings 模块编进去等于把两边的发布边界焊死。读值走壳回吐的设置快照（get_desktop_settings_data 的
+// settings 段 = serializeSettings 的下划线键），与 dev_tools / prevent_sleep 同一条路。
+//
+// 下面这张表既是渲染清单也是白名单（loopbackAggregationMode 复用它校验）——别再另立一份字面量，
+// 也别把档位换名：full / stream / none 是壳落盘的键，换个说法等于换键。
+type LoopbackAggregationMode = 'full' | 'stream' | 'none'
+const LOOPBACK_AGGREGATION_OPTIONS: ReadonlyArray<{
+  value: LoopbackAggregationMode
+  label: string
+  detail: string
+}> = [
+  { value: 'full', label: '全开（默认）', detail: '合并并发 GET，并整条缓冲 ≤256KB 的响应' },
+  { value: 'stream', label: '只关缓冲', detail: '仍合并，但响应边到边下发' },
+  { value: 'none', label: '全关', detail: '不合并，每个请求各自打宿主' },
+]
+
+/** 壳回吐的原始值 → 面板认的档位：旧设置文件没这个键、或值不认识，一律回默认（壳侧同款回退 = full）。 */
+function loopbackAggregationMode(raw: unknown): LoopbackAggregationMode {
+  const hit = LOOPBACK_AGGREGATION_OPTIONS.find((o) => o.value === raw)
+  return hit === undefined ? 'full' : hit.value
+}
+
 const BTN_PRIMARY_STYLE: React.CSSProperties = {
   background: 'var(--dsw-alias-brand-primary-new-color,#4176e6)',
   border: 'none',
@@ -254,7 +284,7 @@ const BTN_PRIMARY_STYLE: React.CSSProperties = {
 const BTN_GHOST_STYLE: React.CSSProperties = {
   ...BTN_PRIMARY_STYLE,
   background: 'transparent',
-  border: '1px solid var(--dsw-alias-border-l,#ffffff1f)',
+  border: '1px solid var(--dsw-alias-border-l2,#ffffff1f)',
   color: 'var(--dsw-alias-label-primary,#e7eaf0)',
 }
 const BTN_DANGER_STYLE: React.CSSProperties = {
@@ -447,6 +477,11 @@ function DesktopSettingsPanel(): React.ReactElement {
   // #186：有会话在跑时阻止系统休眠（缺省开）
   const [preventSleep, setPreventSleep] = useState(true)
   const [preventSleepNote, setPreventSleepNote] = useState<string | null>(null)
+  // #147 路线 A：布局开关的保存回执（就近显示；原先落在「下载」卡的共享 note 里，隔着一整张卡）
+  const [mobileLayoutNote, setMobileLayoutNote] = useState<string | null>(null)
+  // #128：loopback 数据面聚合档位（缺省全开；壳在请求热路径上读内存值 ⇒ 改档立即生效，不需要重启）
+  const [loopbackAggregation, setLoopbackAggregation] = useState<LoopbackAggregationMode>('full')
+  const [loopbackAggregationNote, setLoopbackAggregationNote] = useState<string | null>(null)
 
   // #147/#144：壳键状态从持久化值回填（设置弹窗每次挂载都重读；只写不回填 = 关掉再进就丢）
   useEffect(() => {
@@ -694,6 +729,8 @@ function DesktopSettingsPanel(): React.ReactElement {
           proxy_pass: (ns.proxy_pass as string) || p.proxy_pass || '',
         })
         setProxyEffective(p.effective)
+        // #128：聚合档位从壳回吐的设置快照读（老设置文件没这个键 = undefined ⇒ 下面回默认 full）
+        setLoopbackAggregation(loopbackAggregationMode(ns.loopback_aggregation))
         // 以 **Rust 返回的完整对象为基底**，只覆盖三个以 ns 优先的展示字段——
         // 之前是手写对象，漏字段就静默丢值（#147 实测：勾选保存成功但重开永远不勾）。
         setDesktop({
@@ -987,17 +1024,44 @@ function DesktopSettingsPanel(): React.ReactElement {
       .catch((e) => setPreventSleepNote(`保存失败：${String(e)}`))
   }
 
-  /** #147 路线 A：保存「手机端改用桌面布局」开关。 */
-  const handleSaveMobileLayout = (): void => {
-    void nsSave({ desktop_layout_on_phones: desktopLayoutOnPhones })
+  /** #147 路线 A：「手机端改用桌面布局」开关——与同面板其它 checkbox（#69 / #186 / #128）口径一致：勾选即存。
+   *  「即时生效」不是这一项的额外特性，只是落盘之外没有别的步骤；它要对手机端真正生效仍需重启 dsh，
+   *  那件事写在下方说明文字里。保存失败回拨，避免 UI 显示已开而盘上还是旧值。 */
+  const handleToggleMobileLayout = (next: boolean): void => {
+    setDesktopLayoutOnPhones(next)
+    void nsSave({ desktop_layout_on_phones: next })
       .then(() =>
-        setDownloadBoxNote(
-          desktopLayoutOnPhones
+        setMobileLayoutNote(
+          next
             ? '已保存：手机使用桌面布局（不加载移动布局插件），重启 dsh 生效。'
             : '已保存：手机使用移动布局，重启 dsh 生效。'
         )
       )
-      .catch((e) => setDownloadBoxNote(`保存失败：${String(e)}`))
+      .catch((e) => {
+        setDesktopLayoutOnPhones(!next)
+        setMobileLayoutNote(`保存失败：${String(e)}`)
+      })
+  }
+
+  /**
+   * #128：保存 loopback 数据面聚合档位。改 radio 即存（同 prevent_sleep 的路子：壳每次请求在热路径上读
+   * 内存里的 liveSettings，切完立刻生效，所以文案里不许出现「重启生效」）。
+   * 存失败把 radio 拨回盘上那一档：单选钮停在一个没存上的值上，比只给一行提示更误导。
+   */
+  const handleSaveLoopbackAggregation = (next: LoopbackAggregationMode): void => {
+    const prev = loopbackAggregation
+    if (next === prev) return
+    setLoopbackAggregation(next)
+    void nsSave({ loopback_aggregation: next })
+      .then(() =>
+        setLoopbackAggregationNote(
+          `已保存：${LOOPBACK_AGGREGATION_OPTIONS.find((o) => o.value === next)?.label ?? next}（立即生效，无需重启）`
+        )
+      )
+      .catch((e) => {
+        setLoopbackAggregation(prev)
+        setLoopbackAggregationNote(`保存失败，已回到原档位：${String(e)}`)
+      })
   }
 
   const handleSaveProxy = (): void => {
@@ -1907,23 +1971,52 @@ function DesktopSettingsPanel(): React.ReactElement {
           移动端切后台/弱网会被秒判死（表现为「能发消息、收不到新消息」）；壳默认覆盖为 30000。
           填 0 = 不覆盖（回退 dsh 默认），改动重启 dsh 生效。
         </div>
-      </SectionBox>
+        {/* #147 路线 A：原先这一块掉在 </SectionBox> 之后裸奔（没有卡片框），这里并进本卡的第二段。 */}
+        <div style={{ ...LABEL_STYLE, marginTop: 12 }}>移动端布局</div>
         <div style={ROW_STYLE}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <input
               type="checkbox"
               data-desktop-settings="desktop-layout-on-phones"
               checked={desktopLayoutOnPhones}
-              onChange={(e) => setDesktopLayoutOnPhones(e.target.checked)}
+              onChange={(e) => handleToggleMobileLayout(e.target.checked)}
             />
             手机端改用桌面布局（不加载移动布局插件）
           </label>
-          <PfBtn variant="ghost" onClick={handleSaveMobileLayout}>保存</PfBtn>
         </div>
         <div style={NOTE_STYLE}>
           手机上的卡顿来自宿主前端（会话整段挂载 + 逐块代码高亮），不是网络。勾选后手机走与 iPad
           相同的桌面布局：明显更流畅，代价是排版更挤（可横屏缓解）。不勾选 = 移动布局。改动重启 dsh 生效。
         </div>
+        {mobileLayoutNote && <div style={NOTE_STYLE}>{mobileLayoutNote}</div>}
+      </SectionBox>
+
+      {/* ── loopback 数据面聚合（#128）── */}
+      <SectionBox title="loopback 数据面聚合">
+        {LOOPBACK_AGGREGATION_OPTIONS.map((opt) => (
+          <label key={opt.value} style={RADIO_ROW_STYLE}>
+            <input
+              type="radio"
+              name="loopback-aggregation"
+              data-desktop-settings={`loopback-aggregation-${opt.value}`}
+              checked={loopbackAggregation === opt.value}
+              onChange={() => handleSaveLoopbackAggregation(opt.value)}
+            />
+            <span style={RADIO_TEXT_STYLE}>
+              {opt.label}
+              <span style={{ color: 'var(--dsw-alias-label-secondary,#9aa4b2)', marginLeft: 8 }}>
+                {opt.detail}
+              </span>
+            </span>
+          </label>
+        ))}
+        {loopbackAggregationNote && <div style={NOTE_STYLE}>{loopbackAggregationNote}</div>}
+        <div style={NOTE_STYLE}>
+          桌面壳回环数据面（桌面页面和手机远程访问都走它）对 GET 请求的合并与缓冲策略。「只关缓冲」保留合并，
+          只让响应边到边下发；「全关」连合并也停掉，每个请求各自打上游，不会关掉别的功能。改动立即生效，
+          不需要重启。
+        </div>
+      </SectionBox>
 
       {/* ── 电源（#186 / #75 防休眠能力）── */}
       <SectionBox title="电源">
@@ -2072,14 +2165,13 @@ function DesktopSettingsPanel(): React.ReactElement {
             {testResult && <div style={NOTE_STYLE}>{testResult}</div>}
           </>
         )}
+        {/* #128：保存按钮原本落在 </SectionBox> 之后（面板里唯一的例外），与其它卡的「按钮在卡内」惯例对齐 */}
+        <div style={{ marginTop: 10 }}>
+          <PfBtn variant="primary" disabled={busy} onClick={handleSaveProxy}>
+            {busy ? '保存中…' : '保存代理设置'}
+          </PfBtn>
+        </div>
       </SectionBox>
-
-      {/* ── 保存（代理）── */}
-      <div>
-        <PfBtn variant="primary" disabled={busy} onClick={handleSaveProxy}>
-          {busy ? '保存中…' : '保存代理设置'}
-        </PfBtn>
-      </div>
 
       {msg && (
         <div
@@ -2107,7 +2199,16 @@ function DesktopSettingsPanel(): React.ReactElement {
         </div>
       )}
 
-      <div style={NOTE_STYLE}>
+      {/* #128：面板级脚注（覆盖服务地址/Profile/端口/代理四节，不属任何单卡），加分隔线与上边距，
+          免得紧贴最后一张卡看起来像从卡里漏出来的元素 */}
+      <div
+        style={{
+          ...NOTE_STYLE,
+          marginTop: 2,
+          paddingTop: 10,
+          borderTop: '1px solid var(--dsw-alias-border-l2, #ffffff1f)',
+        }}
+      >
         服务地址/Profile 切换会立即重启 dsh；端口与代理在下次重启后生效。
       </div>
     </div>
@@ -2152,7 +2253,7 @@ export function registerDesktopSettings(ctx: ClientContext): void {
       const el = document.createElement('div')
       el.style.cssText = 'position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)'
       const card = document.createElement('div')
-      card.style.cssText = 'background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l,#ffffff1f);border-radius:12px;padding:24px;min-width:320px;max-width:400px'
+      card.style.cssText = 'background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l2,#ffffff1f);border-radius:12px;padding:24px;min-width:320px;max-width:400px'
       const title = document.createElement('div')
       title.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:16px;color:var(--dsw-alias-label-primary,#e7eaf0)'
       title.textContent = '选择要启动的 Profile'
@@ -2161,7 +2262,7 @@ export function registerDesktopSettings(ctx: ClientContext): void {
       list.style.cssText = 'display:flex;flex-direction:column;gap:8px'
       for (const p of profiles) {
         const btn = document.createElement('button')
-        btn.style.cssText = 'padding:10px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer;text-align:left'
+        btn.style.cssText = 'padding:10px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer;text-align:left'
         btn.textContent = p
         btn.onmouseenter = () => btn.style.background = 'var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07))'
         btn.onmouseleave = () => btn.style.background = 'transparent'
@@ -2173,7 +2274,7 @@ export function registerDesktopSettings(ctx: ClientContext): void {
         list.appendChild(btn)
       }
       const input = document.createElement('input')
-      input.style.cssText = 'margin-top:12px;padding:8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;width:100%;box-sizing:border-box'
+      input.style.cssText = 'margin-top:12px;padding:8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;width:100%;box-sizing:border-box'
       input.placeholder = '或输入新 profile 名称'
       const startBtn = document.createElement('button')
       startBtn.style.cssText = 'margin-top:8px;padding:8px 14px;border-radius:8px;border:none;background:var(--dsw-alias-brand-primary-new-color,#4176e6);color:#fff;font-size:13px;cursor:pointer;width:100%'
@@ -2204,7 +2305,7 @@ export function registerDesktopSettings(ctx: ClientContext): void {
       const el = document.createElement('div')
       el.style.cssText = 'position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)'
       const card = document.createElement('div')
-      card.style.cssText = 'background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l,#ffffff1f);border-radius:12px;padding:24px;min-width:340px;max-width:420px;text-align:center'
+      card.style.cssText = 'background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l2,#ffffff1f);border-radius:12px;padding:24px;min-width:340px;max-width:420px;text-align:center'
       const title = document.createElement('div')
       title.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:8px;color:var(--dsw-alias-label-primary,#e7eaf0)'
       title.textContent = `Profile「${profile}」不完整`
@@ -2214,7 +2315,7 @@ export function registerDesktopSettings(ctx: ClientContext): void {
       const btns = document.createElement('div')
       btns.style.cssText = 'display:flex;gap:10px'
       const noBtn = document.createElement('button')
-      noBtn.style.cssText = 'flex:1;padding:10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer'
+      noBtn.style.cssText = 'flex:1;padding:10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer'
       noBtn.textContent = '直接启动'
       noBtn.onclick = () => {
         el.remove()

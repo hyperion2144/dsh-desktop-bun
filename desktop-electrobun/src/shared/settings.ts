@@ -7,7 +7,7 @@
 // 归一化的三条规矩（对齐旧壳）：
 //   1. 类型不对就当没有（不猜、不抛）——配置文件是用户手改得动的，坏值不该让壳起不来；
 //   2. 数值一律夹取到有意义区间（并发 1..32、心跳 1s..600s），而不是原样接受；
-//   3. 枚举只认白名单（代理模式、dsh 来源、运行时下载源），其余回落到"没设置"。
+//   3. 枚举只认白名单（代理模式、dsh 来源、运行时下载源、loopback 聚合档位），其余回落到"没设置"。
 
 /** 下载管理器并发上限（旧壳 `configured_download_concurrency`：默认 3，夹在 1..=32）。 */
 export const DEFAULT_DOWNLOAD_CONCURRENCY = 3
@@ -22,6 +22,15 @@ export const MUX_HEARTBEAT_MAX = 600_000
 export const PROXY_MODES = ['off', 'system', 'manual'] as const
 export type ProxyMode = (typeof PROXY_MODES)[number]
 
+/**
+ * loopback 数据面聚合档位（#128）——收敛 #54 的 GET 单飞合并带来的两条延迟：
+ *   full（默认，= #54 原行为）：合并并发 GET + 把 ≤256KB 的响应整条缓冲后才下发（TTFB 等整条读完）；
+ *   stream：仍合并，但领头响应边到边下发（首字节不等整条），旁路累积一份给跟随者；
+ *   none：不合并，每个 GET 各自打上游（health 的 coalesced 恒为 0）。
+ */
+export const LOOPBACK_AGGREGATION_MODES = ['full', 'stream', 'none'] as const
+export type LoopbackAggregation = (typeof LOOPBACK_AGGREGATION_MODES)[number]
+export const DEFAULT_LOOPBACK_AGGREGATION: LoopbackAggregation = 'full'
 
 /** dsh 来源只认 builtin；残留 external 由 oneOf 白名单静默回退（键保留，向前兼容旧配置文件）。 */
 export const DSH_MODES = ['builtin'] as const
@@ -85,6 +94,8 @@ export interface DesktopSettings {
   preventSleep?: boolean
   /** #69 开发者工具：打包态重启后开 CEF 远程调试口并放出右键菜单（缺省 false；安全面默认关）。 */
   devTools?: boolean
+  /** #128：loopback 数据面 GET 单飞合并的档位（可选 ⇒ 旧设置文件没这个键时回 DEFAULT_LOOPBACK_AGGREGATION）。切换即时生效，不重启。 */
+  loopbackAggregation?: LoopbackAggregation
   profilePorts?: Record<string, number>
   profileLanePorts?: Record<string, number>
   /** 页面口（loopback origin）偏好：语义对齐 env DSH_SHELL_PAGE_PORT——请求值，被占顺延（改口=换本地存储隔离空间）。 */
@@ -129,6 +140,7 @@ export function serializeSettings(settings: DesktopSettings): Record<string, unk
   put('desktop_render_budget', settings.desktopRenderBudget)
   put('prevent_sleep', settings.preventSleep)
   put('dev_tools', settings.devTools)
+  put('loopback_aggregation', settings.loopbackAggregation)
   put('profile_ports', settings.profilePorts)
   put('profile_lane_ports', settings.profileLanePorts)
   put('profile_page_ports', settings.profilePagePorts)
@@ -212,6 +224,7 @@ export function defaultSettings(): DesktopSettings {
     desktopLayoutOnPhones: false,
     preventSleep: true,
     devTools: false,
+    loopbackAggregation: DEFAULT_LOOPBACK_AGGREGATION,
     dshMode: 'builtin',
     runtimeSource: 'github',
     proxyMode: 'off',
@@ -324,6 +337,7 @@ export function normalizeSettings(raw: unknown): DesktopSettings {
     desktopLayoutOnPhones: bool(pick('desktopLayoutOnPhones', 'desktop_layout_on_phones')) ?? base.desktopLayoutOnPhones,
     preventSleep: bool(pick('preventSleep', 'prevent_sleep')) ?? base.preventSleep,
     devTools: bool(pick('devTools', 'dev_tools')) ?? base.devTools,
+    loopbackAggregation: oneOf(pick('loopbackAggregation', 'loopback_aggregation'), LOOPBACK_AGGREGATION_MODES) ?? base.loopbackAggregation,
     dshMode: oneOf(pick('dshMode', 'dsh_mode'), DSH_MODES) ?? base.dshMode,
     runtimeSource: oneOf(pick('runtimeSource', 'runtime_source'), RUNTIME_SOURCES) ?? base.runtimeSource,
     proxyMode: oneOf(pick('proxyMode', 'proxy_mode'), PROXY_MODES) ?? base.proxyMode,
@@ -521,6 +535,7 @@ function port(value: unknown): number | undefined {
   push('muxHeartbeatMs', settings.muxHeartbeatMs, base.muxHeartbeatMs)
   push('preventSleep', settings.preventSleep, base.preventSleep)
   push('devTools', settings.devTools, base.devTools)
+  push('loopbackAggregation', settings.loopbackAggregation, base.loopbackAggregation)
   push('desktopLayoutOnPhones', settings.desktopLayoutOnPhones, base.desktopLayoutOnPhones)
   push('remoteAddr', settings.remoteAddr, undefined)
   if (settings.remoteList.length > 0) parts.push(`remoteList=${String(settings.remoteList.length)} 条`)

@@ -18,11 +18,12 @@ import { statSync } from 'node:fs'
 import { decide } from '../shared/admission.ts'
 import { INDEX_FILE, contentTypeFor, isNoContentAsset, resolveAsset } from '../shared/asset-path.ts'
 import { corsHeaders, scrubRequestHeaders, scrubResponseHeaders, shouldNoStore } from '../shared/headers.ts'
+import { DEFAULT_LOOPBACK_AGGREGATION, type LoopbackAggregation } from '../shared/settings.ts'
 import { isExternalUrl } from './external.ts'
 import { VIEW_TOKEN_HEADER, denyReason, isCommandAllowed } from '../shared/view-grant.ts'
 import type { ViewGrant, ViewRegistry } from '../shared/view-grant.ts'
 import { isOpenablePath, type ContextMenuRequest } from './context-menu.ts'
-import type { WindowMaxState } from './window-max.ts'
+import { isWindowControlAction, type WindowControlAction, type WindowMaxState } from './window-max.ts'
 import type { ProfileOpRequest, ProfileOpResult } from './profile-dialog.ts'
 
 /** 官方 web-document.ts 的同一行：index 会等异步的 Host 注入，先把 promise 挂上。 */
@@ -55,7 +56,7 @@ export interface ShellServerOptions {
   /** 单实例激活：第二个壳请求把窗口带到前台（主进程实现） */
   onActivate?: () => void
   /** 自绘窗口控制（A5）：页面三键 → 主进程操作 BrowserWindow */
-  onWindowControl?: (action: 'minimize' | 'toggle-maximize' | 'close') => void
+  onWindowControl?: (action: WindowControlAction) => void
   /** 最大化态读取（#112 壳层标题栏带）：GET /__shell__/window 回 { maximized }；缺省时 GET 仍 405 */
   onWindowState?: () => WindowMaxState
   /** F9：托盘弹框的新建/迁移 profile 提交（服务面实现） */
@@ -69,6 +70,8 @@ export interface ShellServerOptions {
    * 不传 `views` ⇒ 不做每视图校验（只在测试与旧调用点里出现）。
    */
   views?: ViewRegistry
+  /** loopback 数据面聚合档位（#128）；缺省 = 全开。热路径读，不得每次同步读盘。 */
+  aggregation?: () => LoopbackAggregation
   onRpc?: (raw: string, grant: ViewGrant | null) => Promise<{ status: number; body: Record<string, unknown> }>
   onLog?: (line: string) => void
 }
@@ -155,7 +158,7 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
     return `${html.slice(0, insertAt)}${BOOT_LINE}${html.slice(insertAt)}`
   }
 
-  /** 单飞共享的已完成响应：整条缓冲（只有 ≤256KB 且带 content-length 的 GET 才走这条路）。 */
+  /** 单飞共享的已完成响应：`full` 档是「带 content-length 且 ≤256KB」的整条缓冲，`stream` 档是转发过程中旁路累积的那一份。 */
   interface SharedGet {
     status: number
     headers: Headers
@@ -167,8 +170,13 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
     buffered: Promise<SharedGet | null>
     resolve: (value: SharedGet | null) => void
   }
-  /** 超过这个体积的 GET 不做单飞（大响应/流式响应绝不缓冲，避免内存与背压问题）。 */
+  /** 共享体的体积上限（#128）：`full` 档按 content-length 预先判定，`stream` 档按实际累积量封顶——超了放弃共享，绝不无限缓冲。 */
   const SINGLEFLIGHT_MAX_BYTES = 262_144
+  /**
+   * 档位读取（#128）：缺省 = 全开。每个请求在 proxy() 入口取一次，同请求内不重复读；
+   * 调用方给的是内存 getter（liveSettings），切档即时生效且热路径零磁盘 IO。
+   */
+  const aggregation = (): LoopbackAggregation => options.aggregation?.() ?? DEFAULT_LOOPBACK_AGGREGATION
   const inflightGets = new Map<string, InflightGet>()
 
   /**
@@ -218,6 +226,68 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
       },
     })
     return new Response(stream, { status: input.status, headers: input.headers })
+  }
+  /** 累积的 chunk 拼成一份 ArrayBuffer（跟随者拿到的就是这一份）。 */
+  function concatChunks(chunks: Uint8Array[], total: number): ArrayBuffer {
+    const out = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) {
+      out.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return out.buffer
+  }
+
+  /**
+   * `stream` 档的领头 body（#128）：pull 式逐 chunk 转发给页面（保背压），同时旁路累积一份——
+   * 首个 chunk 一到就下发，首字节不再等整条读完。累积总量超上限立刻放弃共享并丢掉已累积的引用（内存有界）；
+   * 读完且在限额内才 settle 一份给跟随者（仍在合并）。读失败 / 页面取消 / 超限 ⇒ settle(null)，
+   * 跟随者各自回落打一次上游。settle 恰好一次。
+   */
+  function teeSharedBody(
+    source: ReadableStream<Uint8Array>,
+    head: { status: number; headers: Headers },
+    settle: (value: SharedGet | null) => void,
+  ): ReadableStream<Uint8Array> {
+    const reader = source.getReader()
+    const chunks: Uint8Array[] = []
+    let accumulated = 0
+    let shareable = true
+    let settled = false
+    const finish = (value: SharedGet | null): void => {
+      if (settled) return
+      settled = true
+      chunks.length = 0
+      settle(value)
+    }
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read()
+          if (done) {
+            controller.close()
+            finish(shareable ? { status: head.status, headers: head.headers, body: concatChunks(chunks, accumulated) } : null)
+            return
+          }
+          controller.enqueue(value)
+          if (!shareable) return
+          accumulated += value.byteLength
+          if (accumulated > SINGLEFLIGHT_MAX_BYTES) {
+            shareable = false
+            chunks.length = 0
+            return
+          }
+          chunks.push(value)
+        } catch (error) {
+          controller.error(error)
+          finish(null)
+        }
+      },
+      cancel(reason) {
+        void reader.cancel(reason).catch(() => {})
+        finish(null)
+      },
+    })
   }
 
   // ---- 批量转发端点（#54 数据面聚合）：一次 POST 携 N 个子请求，并发转发、按序聚合 ----
@@ -279,9 +349,12 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
     proxied += 1
     const method = request.method.toUpperCase()
     const key = `${pathname}${search}`
+    // #128：档位每请求读一次，同请求内不再读——中途切档只影响后续请求，不会把在飞请求换语义。
+    const mode = aggregation()
+    const merge = mode !== 'none'
 
     // ---- GET 单飞（#54）：并发同 URL 搭领头请求的车，不重复打上游 ----
-    const joined = method === 'GET' ? inflightGets.get(key) : undefined
+    const joined = merge && method === 'GET' ? inflightGets.get(key) : undefined
     if (joined !== undefined && !joined.done) {
       coalesced += 1
       inFlight += 1
@@ -308,7 +381,7 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
 
     // 领头占位：先登记再发上游，并发同 URL 才赶得上搭车
     let entry: InflightGet | null = null
-    if (method === 'GET') {
+    if (merge && method === 'GET') {
       const prior = inflightGets.get(key)
       if (prior !== undefined && prior.done) inflightGets.delete(key)
       if (!inflightGets.has(key)) {
@@ -319,12 +392,18 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
       }
     }
 
-    const releaseEntry = (): void => {
+    /** 领头占位的结算（三档共用）：恰好一次，结完立刻从表里摘掉，后到的跟随者不再搭车。 */
+    const settleEntry = (value: SharedGet | null): void => {
       if (entry === null) return
-      entry.done = true
-      entry.resolve(null)
-      if (inflightGets.get(key) === entry) inflightGets.delete(key)
+      const finished = entry
       entry = null
+      finished.done = true
+      finished.resolve(value)
+      if (inflightGets.get(key) === finished) inflightGets.delete(key)
+    }
+    /** 领头失败/不可共享 ⇒ 跟随者落回自己打一次。 */
+    const releaseEntry = (): void => {
+      settleEntry(null)
     }
 
     try {
@@ -346,6 +425,39 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
 
     // 可共享判定：只合并「带 content-length 且 ≤256KB」的 GET——大响应与流式（SSE/chunked）
     // 一律不缓冲，避免内存膨胀与背压变化。
+    const onSettled = (): void => {
+      inFlight = Math.max(0, inFlight - 1)
+    }
+
+    // `stream` 档（#128）：领头立刻流式下发（首字节不等整条读完），边转发边旁路累积一份给跟随者。
+    // 不看 content-length，靠实际累积量封顶；超限 / 读失败 / 页面取消 ⇒ 跟随者回落自己打一次。
+    if (mode === 'stream' && entry !== null) {
+      const inflight = entry
+      const streamed = upstream.body
+      if (streamed === null) {
+        settleEntry(null)
+        onSettled()
+        return new Response(null, { status: upstream.status, headers: outHeaders })
+      }
+      entry = null
+      return trackedResponse({
+        status: upstream.status,
+        headers: outHeaders,
+        body: teeSharedBody(streamed, { status: upstream.status, headers: outHeaders }, (value) => {
+          inflight.done = true
+          inflight.resolve(value)
+          if (inflightGets.get(key) === inflight) inflightGets.delete(key)
+        }),
+        method,
+        pathname,
+        ttfbMs,
+        t0,
+        onSettled,
+      })
+    }
+
+    // `full`（默认，= #54 原行为）：只合并「带 content-length 且 ≤256KB」的 GET——大响应与流式
+    // （SSE/chunked）一律不缓冲，避免内存膨胀与背压变化。`none` 档压根没有 entry，整段跳过。
     let shared: SharedGet | null = null
     if (entry !== null && upstream.body !== null) {
       const length = Number(upstream.headers.get('content-length'))
@@ -357,17 +469,7 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
         }
       }
     }
-    if (entry !== null) {
-      const finished = entry
-      entry = null
-      finished.done = true
-      finished.resolve(shared)
-      if (inflightGets.get(key) === finished) inflightGets.delete(key)
-    }
-
-    const onSettled = (): void => {
-      inFlight = Math.max(0, inFlight - 1)
-    }
+    settleEntry(shared)
 
     if (shared !== null) {
       onSettled()
@@ -504,7 +606,7 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           } catch {
             return new Response('bad json', { status: 400 })
           }
-          if (action !== 'minimize' && action !== 'toggle-maximize' && action !== 'close') {
+          if (!isWindowControlAction(action)) {
             return new Response(`unknown window action: ${action}`, { status: 400 })
           }
           options.onWindowControl(action)

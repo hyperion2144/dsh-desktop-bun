@@ -21,6 +21,7 @@
 - CI 每日定时全量兜底（#8）：build.yml 新增 schedule（UTC 18:30 = 北京 02:30）；main 打包链（三平台打包 / NSIS / 断言 / 冒烟）由每日自动验证，防 hutch 与 runner 镜像漂移导致的静默腐坏。
 - loopback 数据面聚合（#54）：壳新增 `/__shell__/batch` 批量转发端点（一次 POST 携 ≤32 个子请求，并发转发按序聚合，单个失败不拖垮整批，整包 no-store）与相同 method+path+query 并发 GET 的单飞合并（≤256KB 且带 content-length 的响应共享给并发等待者，流式/大响应不缓冲）；`/__shell__/health` 新增 `proxiedInFlight`/`coalesced` 字段；proxy 慢请求日志由单段 ttfb 拆为 `ttfb`/`total` 两段（total 含流式体传输）。
 - 运行时下载可取消（#97）：下载进行中时按钮组出现「取消」（无二次确认），走新命令 `cancel_runtime_download`——与通用 `cancel_download` 并列，运行时安装不在下载管理器内，有自己的单飞状态。取消 = **树级**停止安装进程树（复用 #60 的 `process-tree.stopProcessTree`，pnpm 的构建/lifecycle 孙进程继承管道写端，只杀直接子进程会等不到 EOF）→ 删半成品目录 → 落**独立终态** `cancelled`（面板中性蓝「已取消 · 重试下载」，不与失败混同、不再回落成「安装失败（exit -15）」）。没有任务时是幂等 no-op（连点两次不报错），取消后单飞状态复位、同版本可立即重下；装完了才点取消按成功收尾、不删目录。
+- loopback 数据面聚合档位开关（#128）：桌面设置新增三档单选（全开 / 只关缓冲 / 全关），控制 #54 的 GET 单飞合并与响应整条缓冲，切换立即生效、无需重启。
 
 ### Changed
 - 托盘「重启 dsh 服务」升级为「重启应用」（#126）：整个应用退出并自动拉起（复用 #119 的接班式 relaunch），动作 id 同步改名为 `tray:restart-app`；面板的「重启 dsh 服务」仍是 DSH 侧重启，不变。
@@ -31,6 +32,7 @@
 - 移除外部 DSH CLI 支持：运行时只认随包内置或已下载版本；dsh 来源固定内置，历史配置 `dsh_mode=external` 静默回退（设置键保留），托盘/设置面板/命令面不再出现外部选项。
 - 移除兼容模式：端口被本壳旧实例或外部 dsh web 占用时自动清场后由壳自拉（不再弹「兼容 / 高级」选择框）；陌生程序占用且清理失败仍报错。壳 RPC 与页面环境载荷不再携带 mode 字段。
 - 页面 console 镜像与壳日志批量刷盘（#54）：桌面插件 client 的 console 镜像改攒批上报（新命令 `log_console_batch`，≤20 条/100ms 合并一次 RPC，旧壳自动回退逐条，guest/remote 白名单同步放行）；LogSink 新增 `bufferMs`（本壳 shell.log 与 dsh-desktop-webview.log 均 100ms 合并落盘，退出钩子同步 flush，崩溃最多丢一个缓冲窗口；行序/行格式/轮转/路径契约不变，不开缓冲仍逐行同步写）。
+- 壳 preload 注入脚本全面改走官方 Electrobun Typed RPC（#128）：boot 载荷、标题栏三键、开外链、右键菜单、输入确认弹窗不再打壳自答 HTTP 端点；通道边界与保留 HTTP 清单见 ADR-0003。
 - Windows 渲染后端由 CEF 切换为系统 WebView2（#84）：Electrobun 上游 win CEF 走 OSR 离屏渲染（`windowless_rendering_enabled`，未设 `windowless_frame_rate` 即 30fps 上限；`OnPaint` 全帧 memcpy + `UpdateLayeredWindow` GDI 提交，`OnAcceleratedPaint` 零拷贝路径未实现），是滚动/动画卡顿的结构性根因；WebView2 同为 Chromium 内核（窗口直绘，引擎层与 Electron 无性能差异）。三处渲染开关平台条件化：config `win: bundleCEF:false + defaultRenderer:'native'`、`src/bun/index.ts` 建窗 renderer 改随 `availableRenderers` 推导、启动断言平台化（win 不允许 CEF、mac/linux 必须有 CEF）、dev_tools 的 CEF CDP 桥在无 CEF 构建暂缺 win 载体（后经 #106 以 WebView2 CDP 补齐）。mac/linux 保持 CEF 不变；win 包体预计 -150MB（CEF 不再打包）。
 - CI 产物断言平台条件化（#84）：`scripts/assert-artifact.mjs` 的渲染器载荷口径改按平台双向核验——mac/linux 仍正断言 CEF 运行时必须存在（缺了即失败），win 改为反向断言（应用树/归档出现 `libcef.dll`、`chrome_elf.dll` 即策略回归/包体回胖）；build.yml 的产物断言行名与注释同步平台化。
 
@@ -44,6 +46,10 @@
 - 打包产物首启自解压会整树覆盖、把三层 ad-hoc 签名打回原形（UN 通知授权静默失效，#115 第十一轮实机）：payload 改为「解出完整树 → 三层签名 → 归属断言 → 重打回」（tar 不带 PAX/xattr，zig 解包器会把扩展头物化成 ._ 文件破坏 seal），DMG 复核新增 MacOS 内层归属断言（#132）。
 - macOS 打包 app 的通知授权此前永远弹不出系统授权窗（UNUserNotificationCenter 归属进程看的是【发起请求的进程自己的签名】是否认领 bundle id，而真正的 JS 主进程 `Contents/MacOS/bun` 构建期是 Apple 开发者签名——归属永远失败，requestAuthorization 恒 not_determined 且不弹窗；自首个包起就坏，一直靠系统设置手动开关兑底）。sign-app.mjs 改为三层 ad-hoc 重签：MacOS/ 下每个 Mach-O 以 `--identifier <CFBundleIdentifier>` 认领 bundle id（原样保留既有 entitlements）→ Frameworks 嵌套代码 → 外层（把 Info.plist 绑进 CFBundleExecutable 签名），弃用 `codesign --deep`（#115）。
 - Windows/Linux 右侧边栏经会话链接触发打开时间隔未生效（#112）：标题栏带改走官方声明式适配并上收壳 preload——壳给 <html> 打 data-windows-titlebar + --dsh-windows-titlebar-height（40px，对齐官方常量），host AppFrame CSS 结构性压下整帧并给右栏 panel 留出间隔（不再依赖插件 JS 观察器补 inline top，链接触发的首次挂载不再落盲区）；标题栏拖拽带与窗口三键随之上收壳 preload 注入（POST /__shell__/window 动作、GET 查最大化态，不依赖 dsh 页面与插件状态），插件退役 win32/linux 顶部 chrome（inline top 补丁、自绘三键及其样式与 RPC 面全部移除），darwin 系统红绿灯路径零变化。
+- 桌面设置「手机端改用桌面布局」开关没有卡片框（#128）：该块并回「手机访问」卡内成第二段，复用现有 SectionBox 样式。
+- 面板边框线在浅色主题下看不见（#128）：写的是宿主从未定义的 `--dsw-alias-border-l`（无数字），永远回退白色 `#ffffff1f`；改为实际存在的 `--dsw-alias-border-l2`（浅色值与原回退值逐字相同，深色下拿到 `#0000001a`）。
+- 桌面设置开关的保存方式不一致（#128）：「手机端改用桌面布局」原本勾选只改本地 state、要另点保存，而同形态的防休眠/开发者工具/聚合档位都是勾选即存；改为勾选即存（失败回拨），面板口径统一为「开关即存、文本输入才带保存按钮」。
+- 桌面设置「代理设置」的保存按钮与脚注跑到卡片框外（#128）：`</SectionBox>` 提前闭合，按钮漂在卡外（面板里唯一的例外，其余卡都是「按钮在卡内」）；按钮收回卡内，末尾那条覆盖四节的面板级脚注加分隔线与上边距。
 - Windows 系统通知改以应用名与应用图标显示（#107）：启动时 shell32 声明进程 AUMID 并注册 HKCU 通知身份（显示名 + 图标），失败降级不阻断启动。
 - 插件更新后不重启刷新页面不再卡「Loading plugins」：boot 载荷随宿主插件图变化即时刷新，boot 失败给出可重试的失败界面（#101）。
 - 设置里的开发者工具开关「保存即重启」实际不生效，调试口要手动重启桌面壳才开（#119）：开关的决策（探测 9333、C environ 双写）锁在壳进程加载那一刻，而保存后调的是 `restart_dsh_service`——只重起 DSH 树、壳不动，于是决策永不重跑，文案与实现长期背离。改为新命令 `restart_desktop_app`（整应用退出 + 自动拉起自身可执行文件；Electrobun 2.0.2 无 relaunch API，走 detached spawn 兜底），新实例经 `DSH_SHELL_RELAUNCH_PID` 认领接班身份、抢单实例锁前等旧壳退干净（`AcquireOptions.succeedsPid` 兜底），避免「激活旧实例后一起退、净结果什么都没起来」。保存前重探一次调试口并把结果带进通知。右键菜单的「开发者工具」勾选态改实时读设置，不必等重启（#119 C）。拉不起来时**不静默失败也不假装成功**：dev 构建与探测不到 launcher 各有可读原因，直接透到设置面板提示。

@@ -314,6 +314,27 @@ export interface WindowMaxState {
 }
 
 /**
+ * 自绘窗口控制的三个动作（页面三键 → 主进程操作 BrowserWindow）。
+ *
+ * 本模块既有职责就是「窗口动作的收口」，动作集合也归这里：service.ts 的 onWindowControl 签名、
+ * shell-server.ts 的 /__shell__/window 校验、titlebar.ts 的动作→RPC 方法映射三处各写一份联合类型，
+ * 迟早漂移（#128）。改成从这儿取，titlebar 的映射表就能被键集合锁住——
+ * 拼错的动作名在编译期报错，而不是在页面里静默不响应。
+ */
+export type WindowControlAction = 'minimize' | 'toggle-maximize' | 'close'
+
+/** 同上，运行期形态：HTTP 端点校验与「已知动作」判定用它，避免再写一遍三连比较。 */
+export const WINDOW_CONTROL_ACTIONS: readonly WindowControlAction[] = ['minimize', 'toggle-maximize', 'close']
+
+/**
+ * 字符串→动作的类型守卫。HTTP 路由拿到的永远是 string，没有守卫就没法收窄，
+ * 收窄不了就只能把 action 直接当 WindowControlAction 用——那等于没校验。
+ */
+export function isWindowControlAction(value: string): value is WindowControlAction {
+  return (WINDOW_CONTROL_ACTIONS as readonly string[]).includes(value)
+}
+
+/**
  * 最大化态聚合判定：win32 用工作区几何兑底原生旗标，其余平台只看旗标。
  * rpc-bridge（window_get_state）与 index.ts（onWindowState / toggle 判定）共用。
  */

@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import {
   DEFAULT_DOWNLOAD_CONCURRENCY,
   DEFAULT_MUX_HEARTBEAT_MS,
+  DEFAULT_LOOPBACK_AGGREGATION,
   DEFAULT_PROFILE,
   NOTIFICATION_SCENARIOS,
   activeProfile,
@@ -64,6 +65,20 @@ describe('normalizeSettings', () => {
     expect(normalizeSettings({ dsh_mode: 'external' }).dshMode).toBe('builtin') // 外部已移除：白名单外静默回退
     expect(normalizeSettings({ runtime_source: 'npm' }).runtimeSource).toBe('npm')
     expect(normalizeSettings({ runtime_source: 'ftp' }).runtimeSource).toBe('github')
+  })
+
+  // #128：loopback 聚合三档。老设置文件没这个键、或用户手改成不认识的值，都必须静默回
+  // 全开——默认值就等于升级前的行为，回错了会让老用户凭空掉一层响应合并。
+  test('loopback_aggregation：缺键与坏值回全开，落盘走下划线键', () => {
+    expect(normalizeSettings({}).loopbackAggregation).toBe(DEFAULT_LOOPBACK_AGGREGATION)
+    expect(normalizeSettings({ loopback_aggregation: 'stream' }).loopbackAggregation).toBe('stream')
+    expect(normalizeSettings({ loopbackAggregation: 'none' }).loopbackAggregation).toBe('none')
+    expect(normalizeSettings({ loopback_aggregation: 'bogus' }).loopbackAggregation).toBe(DEFAULT_LOOPBACK_AGGREGATION)
+    expect(normalizeSettings({ loopback_aggregation: 3 }).loopbackAggregation).toBe(DEFAULT_LOOPBACK_AGGREGATION)
+    expect(normalizeSettings({ loopback_aggregation: '  ' }).loopbackAggregation).toBe(DEFAULT_LOOPBACK_AGGREGATION)
+    const json = serializeSettings(normalizeSettings({ loopback_aggregation: 'none' })) as Record<string, unknown>
+    expect(json.loopback_aggregation).toBe('none')
+    expect(settingsSummary(normalizeSettings({ loopback_aggregation: 'none' }))).toContain('loopbackAggregation="none"')
   })
 
   test('空白字符串等于没设置（用户手改配置常见）', () => {

@@ -106,14 +106,14 @@ function DownloadsPanel(): React.ReactElement {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, fontSize: 12 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderBottom: '1px solid var(--dsw-alias-border-l, rgba(255,255,255,.08))' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.08))' }}>
         <span style={{ color: 'var(--dsw-alias-label-secondary, #9aa3af)' }}>并发 {concurrency}</span>
         <span style={{ flex: 1 }} />
         <button
           type="button"
           disabled={busy || finishedCount === 0}
           onClick={() => void act('clear_finished_downloads', {})}
-          style={{ padding: '2px 10px', borderRadius: 6, border: '1px solid var(--dsw-alias-border-l, rgba(255,255,255,.14))', background: 'transparent', color: 'inherit', cursor: 'pointer' }}
+          style={{ padding: '2px 10px', borderRadius: 6, border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))', background: 'transparent', color: 'inherit', cursor: 'pointer' }}
         >
           清空已完成
         </button>
@@ -125,7 +125,7 @@ function DownloadsPanel(): React.ReactElement {
           </div>
         ) : (
           tasks.map((t) => (
-            <div key={t.id} style={{ padding: '8px 10px', borderBottom: '1px solid var(--dsw-alias-border-l, rgba(255,255,255,.05))' }}>
+            <div key={t.id} style={{ padding: '8px 10px', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.05))' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dsw-alias-label-primary, #e7eaf0)' }} title={t.filename}>
                   {t.filename}
@@ -194,7 +194,7 @@ function TextButton({ children, onClick }: { children: React.ReactNode; onClick:
         padding: '1px 8px',
         fontSize: 11,
         borderRadius: 6,
-        border: '1px solid var(--dsw-alias-border-l, rgba(255,255,255,.14))',
+        border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))',
         background: 'transparent',
         color: 'inherit',
         cursor: 'pointer',

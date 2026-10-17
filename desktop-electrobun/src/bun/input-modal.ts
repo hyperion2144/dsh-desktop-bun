@@ -1,7 +1,9 @@
 // F12：壳注入到页面里的确认弹窗（旧壳 register/mod.rs confirm_modal_js 的等价物）。
-// 旧壳用 Tauri IPC `ui_input_confirm` 回填；新壳页面没有 Tauri，改 POST 壳自答端点
-// `/__shell__/input-confirm`。本模块只产 JS 文本与端点常量（纯逻辑，可单测）。
+// 旧壳用 Tauri IPC `ui_input_confirm` 回填；新壳页面没有 Tauri，#128 起改调官方 RPC
+// 显式方法 `ui_input_confirm`（commands.ts，同名命令在命令表里已经在了）。
+// 本模块只产 JS 文本与方法名常量（纯逻辑，可单测）。
 
+/** 确认回填的 HTTP 端点（壳侧路由保留，见 shell-server.ts）；#128 起注入脚本改走官方 RPC 显式方法。 */
 export const INPUT_CONFIRM_ENDPOINT = '/__shell__/input-confirm'
 
 export interface ConfirmModalSpec {
@@ -14,14 +16,17 @@ export interface ConfirmModalSpec {
   cancelLabel?: string
 }
 
-/** 确认弹窗 JS：确认回填 value='force'，取消/ESC 回填空串；POST 后自移除。 */
+/** 确认回填走的官方 RPC 方法名（commands.ts 的 ui_input_confirm；同名命令在命令表里已存在）。 */
+export const INPUT_CONFIRM_METHOD = 'ui_input_confirm'
+
+/** 确认弹窗 JS：确认回填 value='force'，取消/ESC 回填空串；RPC 发出后自移除。 */
 export function confirmModalScript(spec: ConfirmModalSpec): string {
   const flow = JSON.stringify(spec.flow)
   const title = JSON.stringify(spec.title)
   const body = JSON.stringify(spec.body)
   const okLabel = JSON.stringify(spec.okLabel ?? '仍要注册（覆盖）')
   const cancelLabel = JSON.stringify(spec.cancelLabel ?? '取消')
-  const endpoint = JSON.stringify(INPUT_CONFIRM_ENDPOINT)
+  const method = JSON.stringify(INPUT_CONFIRM_METHOD)
   return `(function(){
   var key = 'dshDesktopConfirmModal';
   var old = document.getElementById(key);
@@ -49,13 +54,14 @@ export function confirmModalScript(spec: ConfirmModalSpec): string {
   function submit(value) {
     if (done) return;
     done = true;
-    try {
-      fetch(${endpoint}, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ flow: ${flow}, value: value }),
-      }).catch(function(){});
-    } catch (e) {}
+    // #128：官方 RPC 分发器（preload 最早期装）。永远返回 Promise，桥缺失时 reject 不抛同步异常。
+    // 分发器缺席必须报出来：之前是 \`if (rpc.request)\` 守卫，缺席时按钮点了没反应也不留痕，
+    // 与另外三处注入脚本的 \`?? Promise.reject(...)\` 口径不一致（#128 复核）。
+    var rpc = globalThis.__DSH_SHELL_RPC__ || {};
+    var sent = typeof rpc.request === 'function'
+      ? rpc.request(${method}, { flow: ${flow}, value: value })
+      : Promise.reject(new Error('shell rpc unavailable'));
+    sent['catch'](function (err) { console.error('[shell] ui_input_confirm 发送失败', err); });
     overlay.remove();
   }
   ok.addEventListener('click', function(){ submit('force') });

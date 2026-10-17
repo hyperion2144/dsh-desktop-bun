@@ -4,7 +4,8 @@
 // .catch 直接抛 TypeError（unhandled rejection），且用户只能面对无声的永久 loading。
 // 这组用例锁三件事：脚本可被 JS 引擎解析、failed 返回 Promise、失败浮层可操作（刷新重试）。
 import { describe, expect, test } from 'bun:test'
-import { bootPreloadScript } from '../src/bun/preload.ts'
+import { BOOT_ENDPOINT, bootPreloadScript } from '../src/bun/preload.ts'
+import { VIEW_TOKEN_HEADER } from '../src/shared/view-grant.ts'
 
 describe('preload 脚本（#101 boot 失败路径）', () => {
   const script = bootPreloadScript('zh-CN', 'darwin', 'http://127.0.0.1:1', 'tok-test')
@@ -30,8 +31,15 @@ describe('preload 脚本（#101 boot 失败路径）', () => {
     expect(script).toContain('} catch {}')
   })
 
-  test('boot 载荷入口语义不变：no-store + 视图 token 头', () => {
-    expect(script).toContain("cache: 'no-store'")
-    expect(script).toContain('viewToken')
+  test('boot 载荷入口经官方 RPC：typed request 包形，不再打 HTTP 端点（#128）', () => {
+    // 旧断言「cache: no-store + 视图 token 头」的等强度替代：载荷请求必须是一条完整的 typed RPC
+    // request 包（type/id/method/params）经 __electrobunHostBridge 上送，宿主未就绪时 reject
+    // （与旧 /__shell__/boot 的 503「页面会等」同语义），且注入脚本不再碰该端点、不再自己带 token 头。
+    expect(script).toContain('request?.("get_boot_payload", {})')
+    expect(script).toContain('type: "request", id, method, params')
+    expect(script).toContain('bridge.postMessage.bind(bridge)')
+    expect(script).toContain('Promise.reject(new Error("shell rpc unavailable"))')
+    expect(script).not.toContain(BOOT_ENDPOINT)
+    expect(script).not.toContain(VIEW_TOKEN_HEADER)
   })
 })

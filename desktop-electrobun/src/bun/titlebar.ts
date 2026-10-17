@@ -10,8 +10,9 @@
 // 壳 preload 层，插件退役 win32 顶部 chrome。
 //
 // 分工（官方 Electron preload-windows.ts 的 syncWindowsAppearance 同构）：
-//   - 壳（本文件）：声明式标记 + 高度变量 + 三键。三键走 /__shell__/window 端点
-//     （POST 动作 / GET 最大化态），不依赖 dsh 页面与插件状态：页面加载中、插件未
+//   - 壳（本文件）：声明式标记 + 高度变量 + 三键。三键走官方 RPC 显式方法
+//     （window_minimize / window_toggle_maximize / window_close / window_get_state，
+//     见 rpc-bridge.ts），不依赖 dsh 页面与插件状态：页面加载中、插件未
 //     激活、实例崩溃时三键仍可见可点。
 //   - host CSS（属性驱动，零代码）：.frame padding-top 40px、::before 标题栏底色
 //     （sidebar fill）、右栏 panel 与浮动面的顶部间隔全部结构性生效。
@@ -27,13 +28,30 @@
 //   - darwin：系统红绿灯，不注入（返回空串，调用方跳过）。
 
 import type { CarrierPlatform } from './carrier.ts'
-import { VIEW_TOKEN_HEADER } from '../shared/view-grant.ts'
+import type { WindowControlAction } from './window-max.ts'
 
 /** 标题栏高度：对齐官方 WINDOWS_TITLEBAR_HEIGHT 常量（#112 Q1 拍板）。 */
 export const WINDOWS_TITLEBAR_HEIGHT = 40
 
-/** 标题栏带端点（shell-server.ts 同名路由：POST 动作 / GET 最大化态）。 */
+/** 标题栏带的 HTTP 端点（壳侧路由保留，见 shell-server.ts）；#128 起注入脚本改走官方 RPC 显式方法。 */
 export const TITLEBAR_WINDOW_ENDPOINT = '/__shell__/window'
+
+/**
+ * 三键动作 → 官方 RPC 方法名（rpc-bridge.ts 的显式方法表，与命令表共用同一漏斗授权）。
+ * 导到 shell 侧改端点时，改这里一处就够。
+ *
+ * 键集合用 {@link WindowControlAction} 锁死（#128）：之前是 Record<string, string>，
+ * 拼错的动作名能过编译，到页面里变成「点了没反应」。现在映射表与 service.ts 的签名、
+ * shell-server.ts 的 /__shell__/window 校验共用同一份动作集合。
+ */
+export const TITLEBAR_WINDOW_METHODS: Readonly<Record<WindowControlAction, string>> = {
+  minimize: 'window_minimize',
+  'toggle-maximize': 'window_toggle_maximize',
+  close: 'window_close',
+}
+
+/** 最大化态查询用的官方 RPC 方法名（同上，与三键同一张表）。 */
+export const WINDOW_STATE_METHOD = 'window_get_state'
 
 /** 三键单键宽（46px）：与注入脚本的 button CSS 同值。 */
 const CAPTION_BUTTON_WIDTH = 46
@@ -46,22 +64,23 @@ const LINUX_DRAG_MAIN_LEFT = 168
 
 /**
  * 生成标题栏带脚本（纯字符串，随 preload 进页面；darwin 返回空串）。
- * `viewToken` 用于 window 端点的每视图 token 头（external.ts 同款直传）。
+ * #128：三键与最大化态查询改走官方 RPC 显式方法，不再打 /__shell__/window。
  */
-export function titlebarScript(platform: CarrierPlatform, viewToken: string): string {
+export function titlebarScript(platform: CarrierPlatform): string {
   if (platform === 'darwin') return ''
   return [
     ';(() => {',
     '  if (globalThis.__DSH_SHELL_TITLEBAR__) return',
     '  globalThis.__DSH_SHELL_TITLEBAR__ = true',
-    `  const ENDPOINT = ${JSON.stringify(TITLEBAR_WINDOW_ENDPOINT)}`,
+    `  const WINDOW_METHODS = ${JSON.stringify(TITLEBAR_WINDOW_METHODS)}`,
+    `  const STATE_METHOD = ${JSON.stringify(WINDOW_STATE_METHOD)}`,
+    // #128：官方 RPC 分发器（preload 最早期装）。永远返回 Promise，桥缺失时 reject 不抛同步异常。
+    '  const call = (method, params) => (globalThis.__DSH_SHELL_RPC__ ?? {}).request?.(method, params) ?? Promise.reject(new Error("shell rpc unavailable"))',
     `  const HEIGHT = ${JSON.stringify(WINDOWS_TITLEBAR_HEIGHT)}`,
     `  const CONTROLS_WIDTH = ${JSON.stringify(CAPTION_CONTROLS_WIDTH)}`,
-    `  const TOKEN_HEADER = ${JSON.stringify(VIEW_TOKEN_HEADER)}`,
     `  const NATIVE_CAPTION = ${JSON.stringify(platform === 'win32')}`,
     `  const SEAT_WIDTH = ${JSON.stringify(LINUX_DRAG_SEAT_WIDTH)}`,
     `  const DRAG_MAIN_LEFT = ${JSON.stringify(LINUX_DRAG_MAIN_LEFT)}`,
-    `  const VIEW_TOKEN = ${JSON.stringify(viewToken)}`,
     '  // 官方声明式标记：host AppFrame CSS 的总开关（document-start 时 documentElement 可能未建，重试一次）',
     '  const mark = () => {',
     '    if (!document.documentElement) { setTimeout(mark, 0); return }',
@@ -77,14 +96,9 @@ export function titlebarScript(platform: CarrierPlatform, viewToken: string): st
     '  }',
     '  let queryState = () => {}',
     '  const post = (action) => {',
-    '    try {',
-    '      void fetch(ENDPOINT, {',
-    '        method: "POST",',
-    '        headers: { "content-type": "application/json", [TOKEN_HEADER]: VIEW_TOKEN },',
-    '        body: JSON.stringify({ action }),',
-    '        keepalive: true,',
-    '      }).then((res) => { if (!res.ok) console.warn("[titlebar] window action failed", action, res.status) })',
-    '    } catch {}',
+    '    const method = WINDOW_METHODS[action]',
+    '    if (method === undefined) return',
+    '    void call(method, {}).catch((error) => console.warn("[titlebar] window action failed", action, error))',
     '    if (action === "toggle-maximize") setTimeout(queryState, 150)',
     '  }',
     '  const makeButton = (action, aria, icon) => {',
@@ -149,15 +163,12 @@ export function titlebarScript(platform: CarrierPlatform, viewToken: string): st
     '    })',
     '    band.append(...dragParts, controls)',
     '    document.body.appendChild(band)',
-    '    // 最大化/还原图标：GET 状态查询（window_state_changed 推送属官方 RPC 通道，壳层带走 HTTP 不接，',
-    '    // resize/focus/可见性兜底与插件时代同一套）',
+    // 最大化/还原图标：window_state_changed 推送属官方 RPC 通道，壳层不订阅，',
+    // resize/focus/可见性兜底与插件时代同一套（改成查 window_get_state，不再 GET 端点）
     '    queryState = () => {',
-    '      try {',
-    '        void fetch(ENDPOINT, { headers: { [TOKEN_HEADER]: VIEW_TOKEN }, cache: "no-store" })',
-    '          .then((res) => (res.ok ? res.json() : null))',
-    '          .then((state) => { if (state !== null && typeof state.maximized === "boolean") setIcon(state.maximized) })',
-    '          .catch(() => {})',
-    '      } catch {}',
+    '      void call(STATE_METHOD, {})',
+    '        .then((state) => { if (state !== null && state !== undefined && typeof state.maximized === "boolean") setIcon(state.maximized) })',
+    '        .catch(() => {})',
     '    }',
     '    queryState()',
     '    let resizeTimer = 0',
