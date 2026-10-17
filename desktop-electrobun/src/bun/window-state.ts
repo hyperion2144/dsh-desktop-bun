@@ -106,3 +106,23 @@ export function clearWindowFrame(file: string): void {
     rmSync(file, { force: true })
   } catch {}
 }
+
+/**
+ * 默认窗口几何（首次启动 / 落盘帧不可用时的兜底）。
+ */
+export function defaultWindowFrame(): WindowFrame {
+  return { x: 0, y: 0, width: DEFAULT_WINDOW_WIDTH, height: DEFAULT_WINDOW_HEIGHT }
+}
+
+/**
+ * 落盘帧选择（#73 回归）：最大化帧不是还原帧。
+ *
+ * Windows 的 SW_RESTORE 会回到「最大化之前的常规帧」；如果落盘时把最大化帧写成了
+ * 常规帧，下次还原就会落到一个和工作区一样大的窗口——几何判定把窗口态误读成最大化，
+ * 标题栏恒显示还原图标、按钮也只能走 unmaximize。最大化收场时沿用上一次的常规帧
+ * （没有则默认帧），只把 maximized 记成 true。
+ */
+export function frameForPersist(current: WindowFrame, maximized: boolean, previous: WindowFrame | null): WindowFrame {
+  if (!maximized) return current
+  return previous ?? defaultWindowFrame()
+}

@@ -17,7 +17,7 @@
 // 超时：官方默认单请求 1000ms；「选择音效文件」「重启宿主」这类命令远超它，壳口径放宽。
 import { dispatchRpc, type RpcRouter } from './rpc.ts'
 import { denyReason, isCommandAllowed, type ViewGrant } from '../shared/view-grant.ts'
-import { ensureNativeMaximizeStyles, getWorkAreaForFrame, toggleWindowMaximize, windowMaxState, type WindowFrame, type WindowMaxState } from './window-max.ts'
+import { ensureNativeMaximizeStyles, toggleWindowMaximize, windowMaxState, type WorkAreaLookup, type WindowFrame, type WindowMaxState } from './window-max.ts'
 
 /** 壳的官方 RPC 单请求超时（官方默认 1000ms 对文件选择器/重启宿主太紧）。 */
 export const SHELL_RPC_MAX_REQUEST_TIME = 120_000
@@ -40,8 +40,8 @@ export interface ShellRpcDeps {
   grant: ViewGrant
   /** 三键作用的本窗（比「当前聚焦窗」精确：多窗口下不会打错窗）。 */
   window: ShellRpcWindow
-  /** 工作区取法（测试注入；缺省 win32 走 user32 ffi，其余平台恒 null）。 */
-  workArea?: (near: WindowFrame) => WindowFrame | null
+  /** 逻辑工作区取法（生产由 index.ts 注入 Screen 工作区；测试常用 () => null 只看原生旗标）。 */
+  workArea: WorkAreaLookup
   /** 样式补丁是否生效（测试注入；缺省 win32 走 window-max.ts 枚举补丁，其余平台恒 false）。 */
   maximizeStylesPatched?: () => boolean
   /** 平台（测试注入；缺省 process.platform）。 */
@@ -62,7 +62,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 export function createShellRpcFunnel(deps: ShellRpcDeps): ShellRpcFunnel {
   const platform = deps.platform ?? process.platform
-  const workAreaOf = deps.workArea ?? getWorkAreaForFrame
+  const workAreaOf = deps.workArea
   // 样式补丁按漏斗实例记忆：本窗首次 toggle 枚举补丁一次，多窗口后建的窗也能补到。
   const stylesPatched = deps.maximizeStylesPatched ?? (() => (platform === 'win32' ? ensureNativeMaximizeStyles() : false))
   const deriveState = (): WindowMaxState => windowMaxState(deps.window, { platform, workArea: workAreaOf })

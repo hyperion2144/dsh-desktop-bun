@@ -68,6 +68,7 @@
 ### Fixed
 - 更新提醒窗点「稍后」没反应（#160）：关窗改由壳代劳——页面里的 window.close 在 html: 文档上是空操作（Chromium 忽略非脚本打开文档的关窗），动作成功后的自动关窗同修。
 - inspector「NodeJS 诊断」面板快捷键首载静默失效（#68）：按声明物化 rc.2（宿主侧 bootstrap 路由与 Worker 就绪的竞态上游已修）；bun-preload 新增 Patch 16 给 client.js 的 bootstrap 失败加有界退避（250ms→8s、6 次）并补 F7 的页面注册失败日志；dev/test 前置新增物化树与声明版本不一致的 fail-fast。
+- 启动即恢复最大化的窗口，标题栏最大化按钮仍显示单方框（#73）：窗口态改按 Screen 逻辑工作区与逻辑帧逐边比对，启动时原生最大化旗标尚未落也能判出；最大化收场不再把最大化帧当成还原帧落盘，旧版写坏的位置在读取时丢弃——窗口还原后不会再被读成「已最大化」（按钮卡在还原态）。
 - 内置 PTC 模式下 run_code 报 worker-exit ERR_SOCKET_CLOSED（#152）：壳的 Bun preload 给 PTC worker 的 fd 7 控制通道补 Bun 侧 Duplex 兜底，覆盖 per-call 与 persistent 两个入口。
 - 重签后屏幕录制授权失效（#143）：`sign-app.mjs` 给各层签名指定以 `CFBundleIdentifier` 锚定的 designated requirement，取代默认的 cdhash——此前每次重签/换构建都会让系统已存的授权失配，开关亮着也照样反复弹窗。
 - 签名后运行时自改 sealed resource（#143）：内置运行时随包住在 `.app` 里，而 `runtime/bun-preload.mjs` 的兼容层补丁是就地写运行时树的（`DSH_BUN_PRELOAD_TREES` 把选中目录传进去，正好是内置树），每次启动都在签名之后改写 sealed resource——payload 里那棵树封了 36080 个文件，改 9 个就整体失效，`codesign --verify` 报 `file modified: node_modules/…`，而 TCC 的授权匹配正走代码校验，于是屏幕录制/麦克风开关亮着也照样弹窗。修法是把补丁提前到构建期：`prepare-bundle.mjs` 末尾用运行时同一套 preload 先把内置树打成「当前 rev 已就位」再交给签名，进程起来 `hasCurrentRev()` 全命中、一个字节都不写；没打上就直接 fail 构建。

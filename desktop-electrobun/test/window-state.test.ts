@@ -12,6 +12,8 @@ import {
   parseWindowFrame,
   readWindowMaximized,
   writeWindowFrame,
+  defaultWindowFrame,
+  frameForPersist,
   type WindowFrame,
 } from '../src/bun/window-state.ts'
 
@@ -52,6 +54,27 @@ describe('窗口态持久化：最大化标记', () => {
     expect(readWindowMaximized(file)).toBe(false)
     writeFileSync(file, '{oops')
     expect(readWindowMaximized(file)).toBe(false)
+  })
+})
+
+describe('最大化收场的落盘帧（#73 回归）', () => {
+  const normalFrame: WindowFrame = { x: 120, y: 90, width: 1280, height: 860 }
+
+  test('最大化时沿用上一次的常规帧，不把最大化帧当还原帧', () => {
+    const maximizedFrame: WindowFrame = { x: -7, y: -7, width: 2062, height: 1118 }
+    expect(frameForPersist(maximizedFrame, true, normalFrame)).toEqual(normalFrame)
+  })
+
+  test('最大化且没有上一次帧时退回默认帧', () => {
+    expect(frameForPersist(FRAME, true, null)).toEqual(defaultWindowFrame())
+  })
+
+  test('常规收场原样落盘当前帧', () => {
+    expect(frameForPersist(FRAME, false, normalFrame)).toEqual(FRAME)
+  })
+
+  test('默认帧沿用首次启动的 1280×860 @ 0,0', () => {
+    expect(defaultWindowFrame()).toEqual({ x: 0, y: 0, width: 1280, height: 860 })
   })
 })
 
