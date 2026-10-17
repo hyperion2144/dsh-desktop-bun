@@ -5,7 +5,7 @@
  * platform-keyboard（#187）的绑定匹配 / keybindings 解析与编辑。
  */
 import { build } from 'esbuild'
-import { mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { createContext, runInContext } from 'node:vm'
@@ -1058,7 +1058,32 @@ assert.ok(focusTabSource.includes('{focusSuppressHint()}'), '说明文案画进�
 // ── 桌面设置面板（#128）：结构性断言，不是快照 ──
 // 面板是 .tsx，跑不了纯函数断言；但两处改动都是「有没有卡框 / 档位键名对不对」，
 // 用源码文本锁死最省事，也最贴近真实回归形态（谁都可能顺手把它挪出 SectionBox）。
-const panelSource = readFileSync(join(root, 'src/client/desktop-settings.tsx'), 'utf8')
+// #144：面板从单个 2341 行的 .tsx 拆成了「入口 + desktop-settings/ 目录」。下面所有面板断言都跑在**模块集合**上，
+// 所以「断言只在某个文件里切片」这件事从此不会因为新增卡片而失效——新卡自动进集合。
+function collectPanelModules(dir, acc = []) {
+  for (const name of readdirSync(dir).sort()) {
+    const full = join(dir, name)
+    if (statSync(full).isDirectory()) collectPanelModules(full, acc)
+    else if (name.endsWith('.ts') || name.endsWith('.tsx')) acc.push(full)
+  }
+  return acc
+}
+const panelModules = [
+  join(root, 'src/client/desktop-settings.tsx'),
+  ...collectPanelModules(join(root, 'src/client/desktop-settings')),
+]
+const panelSource = panelModules.map((f) => readFileSync(f, 'utf8')).join('\n')
+
+// 剥掉 JSX 注释再切片：注释里出现 `</SectionBox>` 字样会让「找第一个闭合标签」误判到注释上。
+const panelNoJsxComments = panelSource.replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
+
+// 卡片切片：取某张 SectionBox 到它自己闭合标签之间的正文。
+function sliceCard(source, title) {
+  const start = source.indexOf(`<SectionBox title="${title}">`)
+  const end = source.indexOf('</SectionBox>', start)
+  assert.ok(start !== -1 && end !== -1, `${title} 卡还在`)
+  return source.slice(start, end)
+}
 
 // ① 聚合档位：面板写出去的键必须与壳 serializeSettings 写的下划线键逐字一致，
 // 值域三档也与壳 LOOPBACK_AGGREGATION_MODES 一致——任一边改名，这里当场红。
@@ -1069,25 +1094,39 @@ for (const mode of ['full', 'stream', 'none']) {
     `聚合档位表含 ${mode}（与壳白名单同值）`,
   )
 }
+// 默认档：面板不跨包 import 壳代码（lib/client.js 是随插件单独发布的产物），所以「壳的默认值」
+// 在面板这边有三份手写字面量要跟着改：档位表的标签、loopbackAggregationMode 的回退值、
+// use-initial-data 的占位值。漏改任何一份，用户看到的 radio 会与壳实际跑的路子不一致。
+{
+  const shellDefault = readFileSync(
+    join(dirname(root), 'desktop-electrobun/src/shared/settings.ts'),
+    'utf8',
+  ).match(/DEFAULT_LOOPBACK_AGGREGATION: LoopbackAggregation = '([a-z]+)'/)[1]
+  assert.strictEqual(shellDefault, 'stream', `壳的默认档是 stream（当前 ${shellDefault}）`)
+  assert.ok(
+    panelSource.includes(`value: '${shellDefault}', label: '只关缓冲（默认）'`),
+    '档位表把「只关缓冲」标成默认',
+  )
+  assert.ok(
+    panelSource.includes(`hit === undefined ? '${shellDefault}'`),
+    '面板的坏值回退与壳的默认档一致',
+  )
+  assert.ok(
+    panelSource.includes(`loopbackAggregation: '${shellDefault}'`),
+    '面板首回话前的占位档与壳的默认档一致',
+  )
+}
 // 聚合卡自己的文案不许出现「重启」：切档即时生效，写了重启就是骗用户。
 {
-  const aggStart = panelSource.indexOf('<SectionBox title="loopback 数据面聚合">')
-  const aggEnd = panelSource.indexOf('</SectionBox>', aggStart)
-  assert.ok(aggStart !== -1 && aggEnd !== -1, '聚合卡在面板里')
-  const aggCard = panelSource.slice(aggStart, aggEnd)
+  const aggCard = sliceCard(panelNoJsxComments, 'loopback 数据面聚合')
   assert.ok(aggCard.includes('立即生效'), '聚合卡写明「立即生效」')
   assert.ok(!aggCard.includes('重启 dsh 生效'), '聚合卡不写「重启 dsh 生效」（切档即时生效）')
 }
 
 // ② 手机端桌面布局开关：必须在「手机访问（远程连接）」这张卡的 </SectionBox> 之前。
 // #128 的原症状就是它掉在 </SectionBox> 之后裸奔（没有卡片框），所以直接卡位置。
-// 先剥 JSX 注释再定位：注释里出现 `</SectionBox>` 字样会让「找第一个闭合标签」误判到注释上。
 {
-  const panel = panelSource.replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
-  const cardStart = panel.indexOf('<SectionBox title="手机访问（远程连接）">')
-  const cardEnd = panel.indexOf('</SectionBox>', cardStart)
-  assert.ok(cardStart !== -1 && cardEnd !== -1, '「手机访问（远程连接）」卡还在')
-  const card = panel.slice(cardStart, cardEnd)
+  const card = sliceCard(panelNoJsxComments, '手机访问（远程连接）')
   assert.ok(card.includes('移动端布局'), '手机端桌面布局开关在「手机访问」卡内（有卡片框）')
   assert.ok(card.includes('desktopLayoutOnPhones'), '卡内绑着布局开关自己的状态')
 }
@@ -1095,10 +1134,9 @@ for (const mode of ['full', 'stream', 'none']) {
 // ③ 手机布局开关：与同面板其它 checkbox（#69 开发者工具 / #186 防休眠 / #128 聚合档位）口径一致——勾选即存。
 // 原症状是它只 setState、旁边挂一个「保存」按钮，而同形态的防休眠是勾选即存，形态相同行为不同。
 {
-  const panel = panelSource.replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
-  const at = panel.indexOf('data-desktop-settings="desktop-layout-on-phones"')
+  const at = panelNoJsxComments.indexOf('data-desktop-settings="desktop-layout-on-phones"')
   assert.ok(at !== -1, '布局开关还在')
-  const row = panel.slice(at, panel.indexOf('</div>', at))
+  const row = panelNoJsxComments.slice(at, panelNoJsxComments.indexOf('</div>', at))
   assert.ok(
     row.includes('onChange={(e) => handleToggleMobileLayout(e.target.checked)}'),
     '布局开关勾选直接落盘（不再只改本地 state 等点保存）',
@@ -1112,27 +1150,89 @@ for (const mode of ['full', 'stream', 'none']) {
 
 // ④ 边框 token：dsh 宿主只定义 --dsw-alias-border-l1..l4 四档（每档各有浅色/深色两套值），
 // 写成不带数字的 -l 永远取不到变量、只能落回白色 #ffffff1f ⇒ 浅色主题白底白线看不见（#128）。
-// 任一文件写回 `-l,` 即红。
-{
-  for (const f of ['desktop-settings.tsx', 'notifications-tab.tsx', 'downloads-tab.tsx']) {
-    const src = readFileSync(join(root, 'src/client', f), 'utf8')
-    assert.ok(
-      !src.includes('--dsw-alias-border-l,'),
-      `${f}：不再用宿主未定义的 --dsw-alias-border-l（会永远回退白色，浅色主题看不见边框）`,
-    )
-  }
+// 清单覆盖整个面板模块集合（#144）：新增卡片自动被扫到，不需要谁记得补一行。
+for (const f of panelModules) {
+  const src = readFileSync(f, 'utf8')
+  assert.ok(
+    !src.includes('--dsw-alias-border-l,'),
+    `${f.slice(root.length + 1)}：不再用宿主未定义的 --dsw-alias-border-l（会永远回退白色，浅色主题看不见边框）`,
+  )
+}
+for (const f of ['notifications-tab.tsx', 'downloads-tab.tsx']) {
+  const src = readFileSync(join(root, 'src/client', f), 'utf8')
+  assert.ok(
+    !src.includes('--dsw-alias-border-l,'),
+    `${f}：不再用宿主未定义的 --dsw-alias-border-l（会永远回退白色，浅色主题看不见边框）`,
+  )
 }
 
 // ⑤ 代理设置卡：保存按钮必须落在 </SectionBox> 之内。
 // 回归形态是「保存按钮和说明跑到框外」——SectionBox 提前闭合，按钮漂在卡外；面板里其余卡都是「按钮在卡内」。
 {
-  const panel = panelSource.replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
-  const cardStart = panel.indexOf('<SectionBox title="代理设置">')
-  const cardEnd = panel.indexOf('</SectionBox>', cardStart)
-  assert.ok(cardStart !== -1 && cardEnd !== -1, '「代理设置」卡还在')
-  const card = panel.slice(cardStart, cardEnd)
+  const card = sliceCard(panelNoJsxComments, '代理设置')
   assert.ok(card.includes('onClick={handleSaveProxy}'), '保存按钮在「代理设置」卡内（没漂到框外）')
   assert.ok(card.includes('保存代理设置'), '卡内就是那个保存按钮（不是别的同名文案）')
 }
+
+// ⑥ 卡片顺序：#144 把面板拆成 15 个 cards/*.tsx 后，顺序从「单文件里的物理位置」变成了「入口 JSX 的排列」，
+// 这是一处**肉眼扫不出来**的退化：拆分时把相邻的两张卡写反，页面照样渲染，只是顺序变了。
+// 本断言已经抓到过一次（日志与诊断/应用更新 与 dsh 运行时 互相错位）。
+//
+// 断言链：入口 JSX 里卡片组件的先后 → 各自文件里唯一的 SectionBox title → 冻结列表。
+// 两头都比：组件顺序错、或某张卡的 title 漂了，都会红。
+{
+  const entry = readFileSync(join(root, 'src/client/desktop-settings.tsx'), 'utf8')
+  const cardDir = join(root, 'src/client/desktop-settings/cards')
+  const kebab = (name) =>
+    name.replace(/Card$/, '').replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()
+  const used = [...entry.matchAll(/<([A-Z][A-Za-z]*Card)\b/g)].map((m) => m[1])
+  assert.deepStrictEqual(
+    // 比的是「同一张卡」，不是文件名长相：`DevToolsCard` 驼峰转 kebab 得 `dev-tools`，而文件叫 `devtools-card.tsx`
+    // （仓库里数据属性也一律写 `dev-tools`，卡片组件名是 `DevToolsCard`）。两边去连字符再比。
+    used.map((n) => kebab(n).replace(/-/g, '')).sort(),
+    readdirSync(cardDir)
+      .filter((f) => f.endsWith('-card.tsx'))
+      .map((f) => f.replace('-card.tsx', '').replace(/-/g, ''))
+      .sort(),
+    'cards/ 下每张卡都在入口被编排（不多不少）',
+  )
+  // 按「去掉连字符的名字」找文件，而不是拿 kebab 直接拼路径（devtools ↔ dev-tools 那条对不上）。
+  const fileByCard = new Map(
+    readdirSync(cardDir)
+      .filter((f) => f.endsWith('-card.tsx'))
+      .map((f) => [f.replace('-card.tsx', '').replace(/-/g, ''), f]),
+  )
+  const titles = used.map((name) => {
+    const key = kebab(name).replace(/-/g, '')
+    const file = fileByCard.get(key)
+    assert.ok(file !== undefined, `${name} 对应的卡片文件存在（找 ${key}-card.tsx）`)
+    const src = readFileSync(join(cardDir, file), 'utf8')
+    const found = [...src.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/<SectionBox title="([^"]+)"/g)]
+    assert.strictEqual(found.length, 1, `${name} 恰好一张 SectionBox（实际 ${found.length} 张）`)
+    return found[0][1]
+  })
+  assert.deepStrictEqual(
+    titles,
+    [
+      'dsh 来源',
+      'dsh 服务地址',
+      'Profile',
+      'Profile 端口',
+      '迁移 Profile',
+      '日志与诊断',
+      '应用更新',
+      'dsh 运行时（版本下载 / 切换）',
+      '依赖状态（pnpm store 一致性）',
+      '下载',
+      '手机访问（远程连接）',
+      'loopback 数据面聚合',
+      '电源',
+      '开发者工具',
+      '代理设置',
+    ],
+    '卡片顺序＝拆分前单文件的真实 DOM 顺序（相邻卡写反时肉眼扫不出来，靠这条拦）',
+  )
+}
+
 rmSync(tmp, { recursive: true, force: true })
 console.log('client 纯函数测试：全部通过 ✓')

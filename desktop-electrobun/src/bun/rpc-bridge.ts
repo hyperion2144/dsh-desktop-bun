@@ -114,31 +114,17 @@ export function createShellRpcFunnel(deps: ShellRpcDeps): ShellRpcFunnel {
 
 /**
  * 官方 defineRPC 挂点：requests 表 = 窗口三键显式方法 + `_` 通配进命令表。
- * 返回 ShellRpcHandle：rpc 喂 `new BrowserWindow({ rpc })`（框架接到窗口主视图），
- * notifyWindowState 供壳侧状态变化点推送（#73）。
+ * 返回 ShellRpcHandle：只有 rpc 一个字段，喂给 `new BrowserWindow({ rpc })`（框架接到窗口主视图）。
+ * 没有状态推送口：窗口状态一律由页面主动查 window_get_state（#144：旧的窗口状态推送
+ * 整条删除，从未被任何订阅方消费过）。
  */
-/** attachShellRpc 的返回：rpc 实例喂给 BrowserWindow，推送口给壳侧状态变化点用。 */
+/** attachShellRpc 的返回：只有官方 rpc 实例，原样喂给 BrowserWindow。 */
 export interface ShellRpcHandle {
   /** 官方 rpc 实例，原样喂给 `new BrowserWindow({ rpc })`。 */
   rpc: unknown
-  /** 壳侧改了窗口状态（启动 dom-ready 补 maximize 等）时主动推给页面。 */
-  notifyWindowState: () => void
 }
 
-/**
- * 窗口状态推送（#73）：消息只是触发器——载荷不携带状态，客户端收到就重查
- * window_get_state（壳侧 deriveState 仍是唯一状态源，两处推导必然漂移）。
- * 发送失败只记日志：推送是尽力而为，图标同步还有 resize/focus/可见性兜底。
- */
-export function createWindowStateNotifier(send: (payload: unknown) => void): () => void {
-  return () => {
-    try {
-      send({})
-    } catch (error) {
-      console.error('[shell] window_state_changed 推送失败', error)
-    }
-  }
-}
+
 
 export async function attachShellRpc(deps: ShellRpcDeps): Promise<ShellRpcHandle> {
   // 惰性加载：漏斗保持纯逻辑可单测；electrobun 运行时只在真挂点（建窗）时才需要。
@@ -156,9 +142,8 @@ export async function attachShellRpc(deps: ShellRpcDeps): Promise<ShellRpcHandle
         _: (method: string, params: unknown) => funnel(method, params),
       },
     },
-  }) as { send: { window_state_changed: (payload: unknown) => void } }
-  // bun→webview 的 messages 通道（官方 createRPC 的 send proxy）：Windows 无 socket 全走
-  // 原生桥 executeJS，mac/linux 未连 socket 时官方同样回退 executeJS——页面只接桥即覆盖。
-  const notifyWindowState = createWindowStateNotifier((payload) => rpc.send.window_state_changed(payload))
-  return { rpc, notifyWindowState }
+  })
+  // 只挂收：壳侧没有向页面主动推送的通道，窗口状态一律由页面反向查 window_get_state
+  // （#144：旧的窗口状态推送整条删除，浏览器侧也从无订阅方）。
+  return { rpc }
 }
