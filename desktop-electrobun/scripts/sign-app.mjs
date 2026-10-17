@@ -13,6 +13,8 @@
 //    disable-executable-page-protection，丢了会 Fatal OOM）；
 // ② Contents/Frameworks 的 .framework / 内嵌 .app / dylib；
 // ③ 外层 bundle 带 --entitlements（这一步才把 Info.plist 绑进 CFBundleExecutable 的签名）。
+//    各层都用 `-r 'designated => identifier "<CFBundleIdentifier>"'` 换掉默认的 cdhash 型
+//    designated requirement（#143）：TCC 把授权记在 csreq 里，cdhash 一变就匹配不上。
 //
 // 不需要 Developer ID、不做公证；规格 #220 的「代码签名与公证」仍在 Out of Scope（这只是
 // 本机封装层的一致性）。也不能用 `codesign --deep` 一步签：--deep 之后可执行体仍是构建期
@@ -117,6 +119,7 @@ function signInsideBootstrapPayload(appPath, bundleId) {
       process.exit(1)
     }
     signAppLayers(innerApp)
+    ensureUsageDescriptions(innerApp)
     execFileSync('codesign', [...outerSignArgs, innerApp], { stdio: 'inherit' })
     assertMacosAttribution(innerApp, bundleId)
     const packedTar = join(work, 'repacked.tar')
@@ -149,6 +152,28 @@ function preservedEntitlements(path) {
   return file
 }
 
+// #143：hutch 生成的 Info.plist 只有 6 个基础键，没有任何 NS*UsageDescription。macOS 的麦克风授权
+// 会先看 usage description 再弹窗，缺了就直接拒——tccd 日志原文：`Refusing authorization request for
+// service kTCCServiceMicrophone and subject Sub:{com.hyperion.dsh-desktop-bun}… without
+// NSMicrophoneUsageDescription key`。屏幕录制不走这个键（没有对应 usage description，系统提示是
+// 固定的），所以这里只补麦克风。
+//
+// 必须在签之前写入：Info.plist 是签名的一部分，先签后改会破 seal（#143 另一处根因同形）。
+// 首启解压用的是 payload 里那棵树，所以内层也要补（见 signInsideBootstrapPayload）。
+const usageDescriptions = {
+  NSMicrophoneUsageDescription: '用于语音输入：把你说的话转成会话里的文字。',
+}
+
+function ensureUsageDescriptions(appPath) {
+  const plist = join(appPath, 'Contents', 'Info.plist')
+  for (const [key, value] of Object.entries(usageDescriptions)) {
+    const got = spawnSync('/usr/libexec/PlistBuddy', ['-c', `Print :${key}`, plist], { encoding: 'utf8' })
+    if (got.status === 0 && (got.stdout ?? '').trim() !== '') continue
+    execFileSync('/usr/libexec/PlistBuddy', ['-c', `Add :${key} string ${value}`, plist], { stdio: 'inherit' })
+    console.log(`[sign-app] Info.plist 补上 ${key}`)
+  }
+}
+
 const target = process.argv[2] ?? process.env.DSH_SHELL_SIGN_APP ?? newestApp()
 if (target === null || target === undefined) {
   console.error('[sign-app] 没找到要签的 .app（先跑 hutch electrobun build，或把路径当参数传进来）')
@@ -165,6 +190,13 @@ const entitlements = join(projectRoot, 'resources', 'entitlements.plist')
 const outerSignArgs = ['--force', '--sign', '-']
 if (existsSync(entitlements)) outerSignArgs.push('--entitlements', entitlements)
 const bundleId = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIdentifier', join(target, 'Contents', 'Info.plist')], { encoding: 'utf8' }).trim()
+// #143：默认 ad-hoc 签名的 designated requirement 是 **cdhash**，重签或换个构建就变；而 macOS 把
+// 「已授权」记成 (bundle id, service, csreq)，csreq 里钉的就是授权那一刻的 cdhash。于是重签之后
+// requirement 匹配不上——屏幕录制开关亮着也照样反复弹窗（tccd 日志原文：Failed to match existing
+// code requirement for subject com.hyperion.dsh-desktop-bun and service kTCCServiceScreenCapture）。
+// 换成 identifier 锚定后，同一 bundle id 的任何构建都满足要求（实测：换掉源码重签仍校验通过）。
+const designatedRequirement = `=designated => identifier "${bundleId}"`
+outerSignArgs.push('-r', designatedRequirement)
 // 层①②：MacOS 执行体认领 bundle id + Frameworks。对 bootstrap 自身与 payload 解出的完整树复用（#132）。
 function signAppLayers(appPath) {
   // ① Contents/MacOS 下的每个 Mach-O 自己认领 bundle id（#115 实机：真正的 JS 主进程是 bun，
@@ -176,7 +208,7 @@ function signAppLayers(appPath) {
       const full = join(macosDir, entry)
       if (!statSync(full).isFile()) continue
       const preserved = preservedEntitlements(full)
-      const args = ['--force', '--sign', '-', '--identifier', bundleId]
+      const args = ['--force', '--sign', '-', '--identifier', bundleId, '-r', designatedRequirement]
       if (preserved !== null) args.push('--entitlements', preserved)
       execFileSync('codesign', [...args, full], { stdio: 'inherit' })
     }
@@ -192,6 +224,7 @@ function signAppLayers(appPath) {
 }
 
 // ②⑤ payload 在外层签名【前】处理：payload 是外层 seal 覆盖的资源，改完必须重签外层（#132）。
+ensureUsageDescriptions(target)
 signAppLayers(target)
 signInsideBootstrapPayload(target, bundleId)
 // ③ 外层最后签：这一步才把 Info.plist 绑进 CFBundleExecutable 的签名。
