@@ -176,3 +176,47 @@ if (plan.kind === 'reuse') {
   finishBuiltin(`npm:${NPM_PACKAGE}@${declared.dsh}`)
   rmSync(stage, { recursive: true, force: true })
 }
+
+// ── 5. 预打 bun 兼容层补丁（#143）────────────────────────────────────────
+// 为什么必须在构建期打：内置运行时随包住在 .app 里，而 bun-preload.mjs 的补丁是**就地写入
+// 运行时树**的；启动后才写 = 在签名之后改 sealed resource，整个 app 的 resource seal 当场作废
+// （codesign --verify 报 `file modified: node_modules/…/index.js`）。而 macOS 的 TCC 把授权记成
+// (bundle id, service, csreq)，匹配时走的就是「这段代码通不通得过校验」——seal 一破，屏幕录制/
+// 麦克风的授权永远对不上，于是闸门亮着也照样反复弹窗。
+//
+// 所以这里用运行时同一套补丁逻辑先把树打成「当前 rev 已就位」，再交给 sign-app 签名：进程起来
+// 时 hasCurrentRev() 全命中，一个字节都不写，seal 保持完整。
+function prepatchBuiltinRuntime() {
+  const preload = join(projectRoot, 'runtime', 'bun-preload.mjs')
+  if (!existsSync(preload)) {
+    console.error(`[prepare-bundle] 找不到兼容层 preload：${preload}`)
+    process.exit(1)
+  }
+  const ran = spawnSync(process.execPath, ['--preload', preload, '-e', '0'], {
+    cwd: builtinTarget,
+    env: { ...process.env, DSH_BUN_PRELOAD_TREES: builtinTarget },
+    stdio: 'inherit',
+    timeout: 5 * 60_000,
+  })
+  if (ran.status !== 0) {
+    console.error(`[prepare-bundle] 预打兼容层补丁失败（exit ${String(ran.status)}）`)
+    process.exit(1)
+  }
+  // 断言：至少 node-pty 已被打成当前 rev，否则说明 roots 没指到内置树（运行时还会去写）
+  const marker = 'bun-preload-rev:'
+  const probe = join(builtinTarget, 'node_modules', 'node-pty', 'lib', 'index.js')
+  let ok = false
+  try {
+    ok = readFileSync(probe, 'utf8').includes(marker)
+  } catch {
+    ok = false
+  }
+  if (!ok) {
+    console.error('[prepare-bundle] 内置树没有预打上兼容层补丁（node-pty 仍是原样）——',
+      '运行时会在签名后改写它，TCC 授权会因此失配（#143）')
+    process.exit(1)
+  }
+  console.log('[prepare-bundle] 内置运行时已预打兼容层补丁（rev 已就位，运行时不会再写这棵树）')
+}
+
+prepatchBuiltinRuntime()

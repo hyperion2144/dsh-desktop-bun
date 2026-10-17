@@ -36,6 +36,7 @@
 ### Changed
 
 - 随包内置的 dsh 运行时由 0.2.1-alpha.2 升到 0.2.1-rc.1（#133）；壳侧对运行时的既有契约逐条核实无破坏性变更，代码不改，只动声明。
+- 随包内置的 dsh 运行时由 0.2.1-rc.1 升到 0.2.1-rc.2；壳侧对运行时的既有契约逐条核实无破坏性变更，代码不改，只动声明。
 - 托盘「重启 dsh 服务」升级为「重启应用」（#126）：整个应用退出并自动拉起（复用 #119 的接班式 relaunch），动作 id 同步改名为 `tray:restart-app`；面板的「重启 dsh 服务」仍是 DSH 侧重启，不变。
 - 进度页照官方机制接入 `window-frame.dll` 覆盖层（#103，用户拍板「照抄官方」）：移植官方 `progress.h`（阶段目标值+缓动动画时间线，本仓无 7za 改时间估算）与 `window-frame.cpp` 的四个导出（`InstallerShowProgress`=subclass 藏 stock 页+16ms 自绘子窗口、`InstallerFinishProgress`=750ms 完成动画、`InstallerApplyFrame`=DWM 圆角/阴影/吞非客户区、`HiddenPageProc`/`FrameProc`），绘制层换成我们的原型（瓦片+标题+四步清单+百分比+8px 圆角进度条+自绘窗钮，明暗双主题）；CI（installer-ui.yml 与 build.yml 的 Windows job）用移植的 `scripts/build-window-frame.ps1`（vswhere→vcvars32→cl /LD /MT /O1 /W4 /WX）现场编 x86 DLL，本机无 MSVC 时生成器不注入 `DSH_WINDOW_FRAME_DLL`，进度页整段编译剔除回退纯 NSIS restyle（Z 序遍历找内页对话框、`uxtheme::SetWindowTheme(" ")` 剥 v6 主题让 PBM 配色/按钮 SetCtlColors 生效、段尾再藏 Back/Next），阶段推进由安装段三个 `SetPropW("HarnessInstaller.Stage")` 驱动。
 - 安装器对齐原型第二轮（#103）：目录选择弃用 `nsDialogs::SelectFolderDialog`（真机两连崩）直接调 `SHBrowseForFolder`（老式对话框，不带 `BIF_NEWDIALOGSTYLE`）；位置卡片高度 220→140（贴内容，去掉底部大片空白）；ghost 按钮（取消/选择…/窗钮）只在悬停上灰（原型 `.btn-ghost`，focus 不再发灰发胖）；输入框 `EM_SETMARGINS` 留 12 逻辑像素内边距；默认语言改为简中（中文优先，`/LANG=en` 可切英文）；「可用 N GB」改为实测磁盘剩余空间（`GetDiskFreeSpaceExW`，修复 System::Call 字符串参数以反斜杠结尾导致调用静默失败恒显 0）；取消按钮改为与主按钮同宽，目录对话框增加逐步痕迹（`%TEMP%\dsh-browse-trace.txt`）；窗口在 Win11 启用系统圆角（DWM 33→ROUND）；品牌文案统一为 DeepSeek Harness DesktopBUN。
@@ -63,6 +64,8 @@
 - 移除无消费者的窗口状态推送（#144）：壳侧的 `window_state_changed` 推送没有任何接收方，删除其构造器、发送面与断言；窗口态一律走已有的 `window_get_state` 查询。
 
 ### Fixed
+- 重签后屏幕录制授权失效（#143）：`sign-app.mjs` 给各层签名指定以 `CFBundleIdentifier` 锚定的 designated requirement，取代默认的 cdhash——此前每次重签/换构建都会让系统已存的授权失配，开关亮着也照样反复弹窗。
+- 签名后运行时自改 sealed resource（#143）：内置运行时随包住在 `.app` 里，而 `runtime/bun-preload.mjs` 的兼容层补丁是就地写运行时树的（`DSH_BUN_PRELOAD_TREES` 把选中目录传进去，正好是内置树），每次启动都在签名之后改写 sealed resource——payload 里那棵树封了 36080 个文件，改 9 个就整体失效，`codesign --verify` 报 `file modified: node_modules/…`，而 TCC 的授权匹配正走代码校验，于是屏幕录制/麦克风开关亮着也照样弹窗。修法是把补丁提前到构建期：`prepare-bundle.mjs` 末尾用运行时同一套 preload 先把内置树打成「当前 rev 已就位」再交给签名，进程起来 `hasCurrentRev()` 全命中、一个字节都不写；没打上就直接 fail 构建。
 - 壳自答端点补齐视图鉴权（#130）：`context-menu`、`window`（变更态）、`input-confirm`、`batch` 四条以前只过同源准入、不验视图 token（本机进程可直接弹菜单 / 关窗 / 代答确认弹窗），现与 `open-external` 同级叠 `authorize()`；「哪些端点豁免鉴权」写进 ADR-0003 权限附录。
 - 更新提醒窗高度跟着内容走（#130）：「另有 …」一多就把页脚裁掉、多出一条滚动条；现在页面量完内容高经原生桥报给壳只改高度（带上下限、同高不重复发），补了一条真跑生成脚本的执行测试。
 - 安装完窗口直接关掉、没有完成页（#103 真机）：完成页 create 回调的第一行宏 `DshBrowseTrace` 在 `FileOpen` 后按 `${If} ${Errors} Return` 判断——安装段末尾的 `Delete`/`RMDir` 失败会把 NSIS 错误标志留着，宏据此提前 `Return`，于是自定义页在 `nsDialogs::Show` 之前就返回了，NSIS 把该页当成已结束直接前进，向导 `EndDialog`（退出码 0），完成页从未渲染。改为 `ClearErrors` + 只在 `FileOpen` 真失败时跳过写入（绝不提前退出页面回调）；Wine 复现与修复验证（`finish: function enter` → `shot: 05-finish`），CI 出图步骤同时上传 `%TEMP%\dsh-t` 逐行 trace（强杀不丢行，是判定页面推进的唯一可靠通道）。
