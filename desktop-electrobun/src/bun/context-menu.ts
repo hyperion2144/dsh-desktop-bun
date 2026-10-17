@@ -61,7 +61,8 @@ export function isOpenablePath(path: string): boolean {
  *
  * 两条入口共用它：commands.ts 的 `show_context_menu`（官方 RPC，args 是 Record<string, unknown>）
  * 与 shell-server.ts 的 `/__shell__/context-menu`（壳自答 HTTP 端点，body 是解析后的 JSON）。
- * 之前两份解析逐字段相同（triage 已核验），但分处两个文件，改一边忘另一边就会漂移。
+ * 后者自 #128 起就没有壳内生产者了（注入脚本走 RPC），按 ADR-0003 作为兼容面保留；#130 给它叠了
+ * 与 `open-external` 同级的视图鉴权。两边的归一化逐字段相同，改一边忘另一边就会漂移。
  *
  * 归一化口径（对外行为零变化）：空串归 null；布尔只认严格 `=== true`；
  * `filesEntry` 走 `file | directory | other` 白名单；`filesPath` 走 isOpenablePath（只认绝对路径，

@@ -63,7 +63,8 @@
 - 移除无消费者的窗口状态推送（#144）：壳侧的 `window_state_changed` 推送没有任何接收方，删除其构造器、发送面与断言；窗口态一律走已有的 `window_get_state` 查询。
 
 ### Fixed
-
+- 壳自答端点补齐视图鉴权（#130）：`context-menu`、`window`（变更态）、`input-confirm`、`batch` 四条以前只过同源准入、不验视图 token（本机进程可直接弹菜单 / 关窗 / 代答确认弹窗），现与 `open-external` 同级叠 `authorize()`；「哪些端点豁免鉴权」写进 ADR-0003 权限附录。
+- 更新提醒窗高度跟着内容走（#130）：「另有 …」一多就把页脚裁掉、多出一条滚动条；现在页面量完内容高经原生桥报给壳只改高度（带上下限、同高不重复发），补了一条真跑生成脚本的执行测试。
 - 安装完窗口直接关掉、没有完成页（#103 真机）：完成页 create 回调的第一行宏 `DshBrowseTrace` 在 `FileOpen` 后按 `${If} ${Errors} Return` 判断——安装段末尾的 `Delete`/`RMDir` 失败会把 NSIS 错误标志留着，宏据此提前 `Return`，于是自定义页在 `nsDialogs::Show` 之前就返回了，NSIS 把该页当成已结束直接前进，向导 `EndDialog`（退出码 0），完成页从未渲染。改为 `ClearErrors` + 只在 `FileOpen` 真失败时跳过写入（绝不提前退出页面回调）；Wine 复现与修复验证（`finish: function enter` → `shot: 05-finish`），CI 出图步骤同时上传 `%TEMP%\dsh-t` 逐行 trace（强杀不丢行，是判定页面推进的唯一可靠通道）。
 - 解压进度条看起来是假的（#103 真机）：stock 进度条量程是 0..30000（`instfiles` 里 `PBM_SETRANGE` 0..30000、`exec.c` 用 `MulDiv(barpos,30000,len)` 摆位置），覆盖层 `WM_TIMER` 读 `PBM_GETPOS` 后按 `/100` 当百分比，过 1% 就封顶，进度条从 0 直接跳满。改为 `/30000` 归一化。
 - 托盘「新建 / 迁移 Profile」弹窗点提交毫无反应（#129）：页面脚本里漏了一处模板变量插值，抛出的 `ReferenceError` 又落在 `try` 之外，async 提交处理器静默失败；弹窗同时从「内嵌脚本发 HTTP」迁到官方 Electrobun 原生桥（新增 `profile_op` 通道），随之删掉无用的 `/__shell__/profile-op` 端点与 `ShellServerOptions.onProfileOp`，并补了一条真跑生成脚本的回归测试（含反向用例）。实机验证又带出两处：新 profile 窗口只起页面 origin、没拉 DSH 而永远卡在 Loading plugins（`openProfileWindow` 漏了一句 `ensureRunning()`，与 #117 拆开后的冷启动路径对齐）；弹窗漏插主题变量块，`var(--dsw-alias-*)` 全落到暗色兜底，于是弹窗不跟主题——顺带把「读不到主题偏好」的缺省从跟随系统改为浅色（本壳 CEF 的 `prefers-color-scheme` 报 dark 而产品渲染浅色，跟系统会把深色弹窗贴在浅色应用上），并把主题测试改成断言变量**定义**而不是名字（旧断言对漏插那一行不敏感）。

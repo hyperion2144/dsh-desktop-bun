@@ -55,7 +55,7 @@ export interface CommandDeps {
   openExternal?: (url: string) => void
   /** #128：页面注入脚本的 boot 包（`/__shell__/boot` 的同一份数据）；宿主未就绪返回 null。 */
   bootPayload?: () => BootPayload | null
-  /** #128：页面右键菜单（`/__shell__/context-menu` 的同一个回调，由主进程弹原生菜单）。 */
+  /** #128：页面右键菜单（`/__shell__/context-menu` 的同一个回调，由主进程弹原生菜单）；#130 起那条 HTTP 路由也叠视图鉴权。 */
   showContextMenu?: (request: ContextMenuRequest) => void
   closeWindow?: () => void
   /** 试听音效（设置面板的「试听」）：真的出声才 true；没后端时 false，面板据此提示（不再假报成功） */

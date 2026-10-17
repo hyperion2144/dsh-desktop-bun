@@ -46,6 +46,30 @@ export const UPDATE_NOTICE_STATUS_METHOD = 'runtime_download_status'
 export const UPDATE_NOTICE_WIDTH = 560
 export const UPDATE_NOTICE_HEIGHT = 300
 
+/**
+ * 页面量出内容高后叫壳改窗高（#130 实机反馈）。
+ *
+ * 窗是固定 560×300 开的，而「另有 …」那一行会随候选版本个数换行、页脚又多一行——条目一多，
+ * 页脚就被裁掉、还多一条滚动条。壳侧算不出渲染后的高度（得先渲染），所以这笔账交给页面量。
+ */
+export const UPDATE_NOTICE_RESIZE_METHOD = 'update_notice_resize'
+
+/** 窗高上下限：低于下限页脚没处站，高于上限屏幕放不下。 */
+export const UPDATE_NOTICE_MIN_HEIGHT = 260
+export const UPDATE_NOTICE_MAX_HEIGHT = 900
+
+/**
+ * 页面报来的窗高 → 夹在上下限里的整数；不认的负载返回 null（不猜）。
+ *
+ * 页面量的是 `document.body.getBoundingClientRect().height`（含 padding），所以这就是它真想要的高度。
+ */
+export function updateNoticeResizeHeight(value: unknown): number | null {
+  if (typeof value !== 'object' || value === null) return null
+  const raw = (value as Record<string, unknown>)['height']
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return null
+  return Math.min(UPDATE_NOTICE_MAX_HEIGHT, Math.max(UPDATE_NOTICE_MIN_HEIGHT, Math.round(raw)))
+}
+
 export interface UpdateNoticePayload {
   /** 产品主题偏好（缺省跟随系统）。服务端按 profile 的 ui-theme 配置填。 */
   theme?: ShellThemePreference
@@ -427,6 +451,23 @@ ${shellCol}${runtimeCol}
     renderStatus(status)
     if (status && status.active === true) setBusy(true)
   }).catch(function () {})
+  // 窗高跟着内容走（#130 实机反馈）：窗是固定 560×300 开的，而「另有 …」那一行会随候选版本
+  // 个数换行、页脚又多一行——条目一多，页脚就被裁掉、还多一条滚动条。壳先开窗才知道渲染高，
+  // 所以这里量一次 body 的盒高（含 padding）报给壳去 setFrame；内容再变（进度条出现、红字变多行）
+  // 时由 MutationObserver 再报一次。返回值会变的是窗高，所以自己去重，不靠壳去抖。
+  var lastFit = 0
+  function fit() {
+    var h = Math.ceil(document.body.getBoundingClientRect().height)
+    if (h <= 0 || Math.abs(h - lastFit) < 2) return
+    lastFit = h
+    invokeShell(${jsString(UPDATE_NOTICE_RESIZE_METHOD)}, { height: h }).catch(function () {})
+  }
+  fit()
+  if (typeof MutationObserver === 'function') {
+    new MutationObserver(function () { fit() }).observe(document.body, {
+      childList: true, subtree: true, characterData: true, attributes: true,
+    })
+  }
 </script>
 </body>
 </html>

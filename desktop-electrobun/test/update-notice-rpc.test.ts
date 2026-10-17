@@ -6,6 +6,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   UPDATE_NOTICE_OP_METHOD,
+  UPDATE_NOTICE_RESIZE_METHOD,
   UPDATE_NOTICE_STATUS_METHOD,
   type UpdateNoticeOp,
 } from '../src/bun/update-notice-dialog.ts'
@@ -20,6 +21,7 @@ function deps(over: Partial<UpdateNoticeRpcDeps> = {}): UpdateNoticeRpcDeps {
   return {
     run: async () => ({ ok: true, message: '走好了' }),
     downloadStatus: () => ({ active: false, version: '', resolved: 0, downloaded: 0 }),
+    resize: () => {},
     ...over,
   }
 }
@@ -28,6 +30,7 @@ function harness(over: Partial<UpdateNoticeRpcDeps> = {}): {
   seen: UpdateNoticeOp[]
   invoke: (params: unknown) => Promise<unknown>
   status: (params?: unknown) => Promise<unknown>
+  resize: (params: unknown) => Promise<unknown>
 } {
   const seen: UpdateNoticeOp[] = []
   const { requests } = updateNoticeRpcRequests(
@@ -41,14 +44,15 @@ function harness(over: Partial<UpdateNoticeRpcDeps> = {}): {
   )
   const invoke = requests[UPDATE_NOTICE_OP_METHOD]
   const status = requests[STATUS_METHOD]
-  if (invoke === undefined || status === undefined) throw new Error('handler 缺失')
-  return { seen, invoke, status }
+  const resize = requests[UPDATE_NOTICE_RESIZE_METHOD]
+  if (invoke === undefined || status === undefined || resize === undefined) throw new Error('handler 缺失')
+  return { seen, invoke, status, resize }
 }
 
 describe('提醒卡动作的官方 RPC 通道', () => {
   test('动作与只读查询各占一个方法名，页面与壳各认这一处', () => {
     const { requests } = updateNoticeRpcRequests(deps())
-    expect(Object.keys(requests)).toEqual([UPDATE_NOTICE_OP_METHOD, STATUS_METHOD])
+    expect(Object.keys(requests)).toEqual([UPDATE_NOTICE_OP_METHOD, STATUS_METHOD, UPDATE_NOTICE_RESIZE_METHOD])
     expect(UPDATE_NOTICE_OP_METHOD).toBe('update_notice_op')
     expect(STATUS_METHOD).toBe('runtime_download_status')
     // 同一串在两处定义：页面引 dialog 的常量，壳命令表也按这个名字注册。
@@ -135,5 +139,22 @@ describe('提醒卡画进度用的只读查询', () => {
   test('查询不带参数也不抛：页面每次轮询都传 null', async () => {
     const { status } = harness()
     await expect(status(undefined)).resolves.toMatchObject({ active: false })
+  })
+
+  // #130：窗高是页面量出来的，壳只负责夹在上下限里再 setFrame。
+  test('页面报来的窗高夹在上下限里再交给壳', async () => {
+    const heights: number[] = []
+    const { resize } = harness({ resize: (height) => void heights.push(height) })
+    await resize({ height: 420 })
+    await resize({ height: 120 }) // 低于下限 → 260
+    await resize({ height: 5000 }) // 高于上限 → 900
+    expect(heights).toEqual([420, 260, 900])
+  })
+
+  test('窗高形状不认就抛，不静默回退到默认高', async () => {
+    const { resize } = harness()
+    await expect(resize(null)).rejects.toThrow('窗高不认这个负载')
+    await expect(resize({ height: '420' })).rejects.toThrow('窗高不认这个负载')
+    await expect(resize(420)).rejects.toThrow('窗高不认这个负载')
   })
 })

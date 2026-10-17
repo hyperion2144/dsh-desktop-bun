@@ -3,10 +3,14 @@ import {
   UPDATE_NOTICE_HEIGHT,
   UPDATE_NOTICE_OP_METHOD,
   UPDATE_NOTICE_STATUS_METHOD,
+  UPDATE_NOTICE_MAX_HEIGHT,
+  UPDATE_NOTICE_MIN_HEIGHT,
+  UPDATE_NOTICE_RESIZE_METHOD,
   UPDATE_NOTICE_WIDTH,
   updateNoticeHtml,
   updateNoticeModel,
   updateNoticeOp,
+  updateNoticeResizeHeight,
   type UpdateNoticePayload,
 } from '../src/bun/update-notice-dialog.ts'
 import { evaluateRuntimeUpdates } from '../src/shared/runtime-update.ts'
@@ -203,6 +207,29 @@ describe('updateNoticeHtml：内嵌页面', () => {
     expect(html).toContain('id="dl"')
     expect(html).toContain('id="dlfill"')
     expect(html).toContain("document.getElementById('dlfill').style.width")
+  })
+
+  // #130 实机反馈：窗是固定 560×300 开的，而「另有 …」会随候选版本个数换行、页脚又多一行，
+  // 条目一多就把页脚裁掉、还多一条滚动条。壳先开窗才知道渲染高，所以这项真的得页面量。
+  test('窗高由页面量完报给壳：量 body 盒高、内容再变再报', () => {
+    const html = updateNoticeHtml(payload())
+    // 报的是 body 盒高（含 padding），不是 scrollHeight——后者被视口托底，永远看不出溢出。
+    expect(html).toContain('document.body.getBoundingClientRect().height')
+    expect(html).not.toContain('scrollHeight')
+    expect(html).toContain(`invokeShell(${JSON.stringify(UPDATE_NOTICE_RESIZE_METHOD)}, { height: h })`)
+    // 内容变了（进度条出现、红字变多行）要重新报一次，但同一个高度不重复发。
+    expect(html).toContain('new MutationObserver(function () { fit() })')
+    expect(html).toContain('if (h <= 0 || Math.abs(h - lastFit) < 2) return')
+  })
+
+  test('窗高夹在上下限里，不认的负载不猜', () => {
+    expect(updateNoticeResizeHeight({ height: 412.4 })).toBe(412)
+    expect(updateNoticeResizeHeight({ height: 20 })).toBe(UPDATE_NOTICE_MIN_HEIGHT)
+    expect(updateNoticeResizeHeight({ height: 5000 })).toBe(UPDATE_NOTICE_MAX_HEIGHT)
+    expect(updateNoticeResizeHeight({ height: Number.NaN })).toBeNull()
+    expect(updateNoticeResizeHeight({ height: '412' })).toBeNull()
+    expect(updateNoticeResizeHeight(null)).toBeNull()
+    expect(updateNoticeResizeHeight(412)).toBeNull()
   })
 
   /** 抽页面脚本：断言函数体里的东西时用，免得每条都重写一遍切片。 */

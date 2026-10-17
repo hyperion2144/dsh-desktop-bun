@@ -548,8 +548,12 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
         if (decision.rel === 'context-menu') {
           if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
           if (options.onContextMenu === undefined) return new Response('no window host', { status: 501 })
+          // 鉴权与 open-external 同级（#130）：任何**已登记视图**都能弹，不再按命令白名单细分。
+          // 叠在解析之前：未登记视图连请求体都不读。
+          const menuAuth = authorize(request, null)
+          if (menuAuth.deny !== null) return menuAuth.deny
           // 字段归一化只有一份实现（#144-2）：与 commands.ts 的 show_context_menu 共用同一个解析器，
-          // 改一边忘另一边导致的漂移就此消失。本分支**不**叠 authorize()——HTTP 分支缺鉴权是另一张票（#130）。
+          // 改一边忘另一边导致的漂移就此消失。
           options.onContextMenu(parseContextMenuRequest(await request.json().catch(() => null)))
           return new Response(null, { status: 204 })
         }
@@ -569,6 +573,9 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           }
           if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
           if (options.onWindowControl === undefined) return new Response('no window host', { status: 501 })
+          // 变更态也叠鉴权（#130）；上面的 GET 只读 window state，保持不鉴权（与 window_get_state 一致）。
+          const windowAuth = authorize(request, null)
+          if (windowAuth.deny !== null) return windowAuth.deny
           let action = ''
           try {
             const body = (await request.json()) as { action?: unknown }
@@ -587,6 +594,9 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
         if (decision.rel === 'input-confirm') {
           if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
           if (options.onInputConfirm === undefined) return new Response('no listener', { status: 501 })
+          // 回填能解答挂起的确认弹窗，不鉴权等于任何人可代答（#130）。
+          const confirmAuth = authorize(request, null)
+          if (confirmAuth.deny !== null) return confirmAuth.deny
           let body: { flow?: unknown; value?: unknown }
           try {
             body = (await request.json()) as { flow?: unknown; value?: unknown }
@@ -601,6 +611,9 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
         // 单个子请求失败不拖垮整批（各自回状态码）。整包响应 no-store。
         if (decision.rel === 'batch') {
           if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
+          // 批量转发会替调用方打上游，叠鉴权（#130）；手机端走 lane 纯 TCP 转发，早已被同源闸门挡在外。
+          const batchAuth = authorize(request, null)
+          if (batchAuth.deny !== null) return batchAuth.deny
           const parsed = (await request.json().catch(() => null)) as { requests?: unknown } | null
           const items = Array.isArray(parsed?.requests) ? (parsed as { requests: unknown[] }).requests : null
           if (items === null || items.length === 0) return new Response('bad batch', { status: 400 })
