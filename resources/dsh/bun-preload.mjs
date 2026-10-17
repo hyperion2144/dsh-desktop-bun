@@ -14,6 +14,7 @@
  * 10. Patch 13/14: inspector CDP 桥（#61）——worker 侧把 Runtime 求值族与 HeapProfiler 堆快照
  *     转给主线程的 vm/v8 服务端，DevTools 面板在 Bun 下可用；全部 typeof Bun 守卫，Node 零变化
  * 15. PTC worker 继承控制通道的 Bun 兜底（fd 7 Duplex；process.js + persistent-process.js）
+ * 16. inspector Client bootstrap 有界退避重试 + F7 可观测性（#68）——rc.2 已修宿主侧，客户端兜底
  *
  * 补丁落盘策略（#210）：物化后**不还原**，带 rev 指纹幂等——运行时树是被多个 dsh 进程共享的，
  * 任何进程退出时回写原文件都会把别的进程正在用的补丁抹掉（实测会把终端与 inspector 打回失败态）。
@@ -317,7 +318,7 @@ process.env.DSH_BUN_COMPAT_DISABLE_HMR = "1";
 // 抹掉——实测：黑盒测试宿主退出后，运行中的窗口终端立刻变回「进程已退出（1）」、inspector
 // 也起不来。改为「打上就不动」：目标文件是 dispatcher 形态（Bun 走 shim、其它运行时转
 // index.original.js），对 Node 无害；每条补丁带 rev 指纹，rev 变了才重写。
-const PATCH_REV = 10;
+const PATCH_REV = 11;
 const REV_MARK = `bun-preload-rev:${PATCH_REV}`;
 /** 已处理的文件，仅用于结尾汇总日志。 */
 const _patches = new Set();
@@ -1293,4 +1294,105 @@ function patchPtcControlEntry(relativePath) {
 patchPtcControlEntry('@deepseek-ai/dsh-ptc-runtime-node/lib/process.js');
 patchPtcControlEntry('@deepseek-ai/dsh-ptc-runtime-node/lib/persistent-process.js');
 
-_trace(`[bun-preload] ${REV_MARK} 应用完成：stripTypeScriptTypes / node-addon-require-builtin 桩 / HMR 关闭 / Bun.Terminal PTY / xterm 同步写 / 插件展示元数据解析 / 插件说明符 baseUrl 解析 / inspector fetch 归一+spread 修复 / inspector CDP 桥 / PTC worker 控制通道（不还原）`);
+// ── Patch 16: inspector Client bootstrap 有界退避重试 + F7 可观测性（#68）──
+// 缘起：#68 首载快捷键静默失效。alpha.2 宿主把 bootstrap 路由排在 startInspector()
+// 之后，Worker 起得慢时首载 fetch 拿到 404；客户端 readBootstrap() 仅 warn 一次、
+// 无重试，唯一补发机会是 connection/reset（rc.2 已修宿主侧，此处兜客户端）。
+// 另：replace() 里 ctx.inject 的注册回调没有被 await（F7），失败时一行日志都不留，
+// 面板与快捷键纯静默失效；这里补一条 warn。上游文本没命中只警告，不报错。
+const INSPECTOR_BOOTSTRAP_RETRY_MARK = 'bun-preload: bootstrap 有界退避重试';
+const INSPECTOR_BOOTSTRAP_RETRY_DELAYS = [250, 500, 1000, 2000, 4000, 8000];
+const INSPECTOR_BOOTSTRAP_FETCH_FROM = [
+  '\t\t\t\t\tresponse = await fetch(INSPECTOR_BOOTSTRAP_ROUTE, { signal: this.lifetime.signal });',
+  '\t\t\t\t} catch (error) {',
+  '\t\t\t\t\tthis.connectionFailed(error);',
+  '\t\t\t\t\treturn;',
+  '\t\t\t\t}',
+].join('\n');
+const INSPECTOR_BOOTSTRAP_FETCH_TO = [
+  '\t\t\t\t\tresponse = await fetch(INSPECTOR_BOOTSTRAP_ROUTE, { signal: this.lifetime.signal });',
+  '\t\t\t\t} catch (error) {',
+  '\t\t\t\t\tawait this.retryBootstrap(error);',
+  '\t\t\t\t\treturn;',
+  '\t\t\t\t}',
+].join('\n');
+const INSPECTOR_BOOTSTRAP_NOT_OK_FROM = [
+  '\t\t\t\tif (!response.ok) {',
+  '\t\t\t\t\tthis.connectionFailed(/* @__PURE__ */ new Error(`Inspector bootstrap failed: HTTP ${response.status}`));',
+  '\t\t\t\t\treturn;',
+  '\t\t\t\t}',
+].join('\n');
+const INSPECTOR_BOOTSTRAP_NOT_OK_TO = [
+  '\t\t\t\tif (!response.ok) {',
+  '\t\t\t\t\tawait this.retryBootstrap(/* @__PURE__ */ new Error(`Inspector bootstrap failed: HTTP ${response.status}`));',
+  '\t\t\t\t\treturn;',
+  '\t\t\t\t}',
+].join('\n');
+const INSPECTOR_BOOTSTRAP_INJECT_FROM = [
+  '\t\t\t\t\t\tconst { registerInspectorPage } = await require.async("./client.page.js");',
+  '\t\t\t\t\t\tregisterInspectorPage(ctx, source.sourceId);',
+].join('\n');
+const INSPECTOR_BOOTSTRAP_INJECT_TO = [
+  '\t\t\t\t\t\ttry {',
+  '\t\t\t\t\t\t\tconst { registerInspectorPage } = await require.async("./client.page.js");',
+  '\t\t\t\t\t\t\tregisterInspectorPage(ctx, source.sourceId);',
+  '\t\t\t\t\t\t} catch (error) {',
+  '\t\t\t\t\t\t\tthis.ctx.logger.warn("experimental-inspector: Client page registration failed; inspector panel and shortcut are unavailable", error);',
+  '\t\t\t\t\t\t\tthrow error;',
+  '\t\t\t\t\t\t}',
+].join('\n');
+const INSPECTOR_CONNECTION_FAILED_ANCHOR = '\t\t\tconnectionFailed(error) {';
+const INSPECTOR_BOOTSTRAP_RETRY_METHOD = [
+  `\t\t\t// ${REV_MARK} ${INSPECTOR_BOOTSTRAP_RETRY_MARK}（#68：首载 bootstrap 失败时补齐补发机会）`,
+  '\t\t\tasync retryBootstrap(lastError) {',
+  `\t\t\t\tconst delays = ${JSON.stringify(INSPECTOR_BOOTSTRAP_RETRY_DELAYS)};`,
+  '\t\t\t\tfor (const delay of delays) {',
+  '\t\t\t\t\tif (this.lifetime.signal.aborted) return;',
+  '\t\t\t\t\tawait new Promise((resolve) => setTimeout(resolve, delay));',
+  '\t\t\t\t\tif (this.lifetime.signal.aborted) return;',
+  '\t\t\t\t\ttry {',
+  '\t\t\t\t\t\tconst response = await fetch(INSPECTOR_BOOTSTRAP_ROUTE, { signal: this.lifetime.signal });',
+  '\t\t\t\t\t\tif (!response.ok) {',
+  '\t\t\t\t\t\t\tlastError = /* @__PURE__ */ new Error(`Inspector bootstrap failed: HTTP ${response.status}`);',
+  '\t\t\t\t\t\t\tcontinue;',
+  '\t\t\t\t\t\t}',
+  '\t\t\t\t\t\tconst value = await response.json();',
+  '\t\t\t\t\t\tawait this.replace(parseInspectorClientBootstrap(value));',
+  '\t\t\t\t\t\treturn;',
+  '\t\t\t\t\t} catch (error) {',
+  '\t\t\t\t\t\tif (this.lifetime.signal.aborted) return;',
+  '\t\t\t\t\t\tlastError = error;',
+  '\t\t\t\t\t}',
+  '\t\t\t\t}',
+  '\t\t\t\tif (this.lifetime.signal.aborted) return;',
+  '\t\t\t\tthis.ctx.logger.warn(`experimental-inspector: Client connection failed after ${delays.length + 1} attempts; reconnect or reload the page to retry`, lastError);',
+  '\t\t\t}',
+].join('\n');
+function patchInspectorBootstrapRetry() {
+  for (const target of packageTargets('@deepseek-ai/dsh-experimental-inspector/lib/client.js')) {
+    const source = readFileSync(target, 'utf8');
+    if (source.includes(INSPECTOR_BOOTSTRAP_RETRY_MARK)) {
+      refreshBridgeFingerprint('Patch 16', target, source);
+      continue;
+    }
+    if (
+      !source.includes(INSPECTOR_BOOTSTRAP_FETCH_FROM) ||
+      !source.includes(INSPECTOR_BOOTSTRAP_NOT_OK_FROM) ||
+      !source.includes(INSPECTOR_BOOTSTRAP_INJECT_FROM) ||
+      !source.includes(INSPECTOR_CONNECTION_FAILED_ANCHOR)
+    ) {
+      console.warn(`[bun-preload] Patch 16: 未找到上游 Client bootstrap 失败分支文本，跳过 ${target}（上游版本不符）`);
+      continue;
+    }
+    const patched = source
+      .replace(INSPECTOR_BOOTSTRAP_FETCH_FROM, INSPECTOR_BOOTSTRAP_FETCH_TO)
+      .replace(INSPECTOR_BOOTSTRAP_NOT_OK_FROM, INSPECTOR_BOOTSTRAP_NOT_OK_TO)
+      .replace(INSPECTOR_BOOTSTRAP_INJECT_FROM, INSPECTOR_BOOTSTRAP_INJECT_TO)
+      .replace(INSPECTOR_CONNECTION_FAILED_ANCHOR, `${INSPECTOR_BOOTSTRAP_RETRY_METHOD}\n${INSPECTOR_CONNECTION_FAILED_ANCHOR}`);
+    writePatch(target, patched);
+    _trace(`[bun-preload] Patch 16: inspector Client bootstrap 退避重试（${INSPECTOR_BOOTSTRAP_RETRY_DELAYS.length} 次）applied to ${target}`);
+  }
+}
+patchInspectorBootstrapRetry();
+
+_trace(`[bun-preload] ${REV_MARK} 应用完成：stripTypeScriptTypes / node-addon-require-builtin 桩 / HMR 关闭 / Bun.Terminal PTY / xterm 同步写 / 插件展示元数据解析 / 插件说明符 baseUrl 解析 / inspector fetch 归一+spread 修复 / inspector CDP 桥 / PTC worker 控制通道 / inspector Client bootstrap 退避重试 + F7 可观测性（不还原）`);
