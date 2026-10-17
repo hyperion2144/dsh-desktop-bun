@@ -17,6 +17,7 @@ import { permissionHint, type NotifyPermission } from '../shared/notify-permissi
 import type { PortClaim } from '../shared/ports.ts'
 import { EMPTY_TASK, startupAction, validProfileName, type MigrationStatus, type ProfileDependencyRow, type StartupHealth, type TaskSnapshot } from '../shared/profile-ops.ts'
 import type { ShellUpdater } from './updater.ts'
+import type { UpdateNoticeStore, UpdateNoticeTarget } from './update-notice-store.ts'
 import type { ProxyEnv } from '../shared/proxy-env.ts'
 import type { KeepAwakeCapability } from './keep-awake.ts'
 import type { BootPayload } from './shell-server.ts'
@@ -122,6 +123,11 @@ export interface CommandDeps {
   testProxy?: (url: string) => Promise<number>
   /** 应用更新（`src/bun/updater.ts` 包住的框架 Updater）；无窗口单测可以不接 */
   updater?: ShellUpdater
+  /**
+   * #136：启动更新提醒的开关与拉黑列表。状态住在 `app-support/update-notice.json`，
+   * **不经 `desktop-settings.json`**——设置文件的键名是契约红线，壳内部状态不往里塞。
+   */
+  updateNotice?: UpdateNoticeStore
   /** 桌面档快捷键偏好（旧壳 `shortcuts.rs`；壳只做上限 + 原子写，不解析 JSON） */
   keybindings?: { read: () => string | null; write: (raw: string) => void }
   /** 各 profile 的依赖状态（`list_profile_dependency_status`；旧壳比 pnpm 大版本） */
@@ -142,6 +148,33 @@ export interface CommandDeps {
 function runningPort(deps: CommandDeps): number {
   const running = deps.status?.() ?? {}
   return typeof running.upstreamPort === 'number' ? running.upstreamPort : 0
+}
+
+/** #136：面板没接提醒状态时显式报错，不静默回默认值——开关显示成「开」而实际关着是最坏的一种撒谎。 */
+function noticeStore(deps: CommandDeps): UpdateNoticeStore {
+  const store = deps.updateNotice
+  if (store === undefined) throw new Error('桌面壳未接启动更新提醒状态')
+  return store
+}
+
+/**
+ * #136：把面板传来的 `{kind, version}[]` 收干净再进 store。
+ * 非数组、元素形状不对、空版本号一律拒——拉黑表是持久状态，宁可报错也不能被垃圾参数写脏。
+ */
+function noticeTargets(args: Record<string, unknown>, command: string): UpdateNoticeTarget[] {
+  const raw = args['targets']
+  if (!Array.isArray(raw) || raw.length === 0) throw new Error(`${command}: targets 必须是非空数组`)
+  const targets: UpdateNoticeTarget[] = []
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) throw new Error(`${command}: targets 元素必须是对象`)
+    const row = item as Record<string, unknown>
+    const kind = row['kind']
+    const version = row['version']
+    if (kind !== 'shell' && kind !== 'runtime') throw new Error(`${command}: kind 必须是 shell 或 runtime`)
+    if (typeof version !== 'string' || version.trim() === '') throw new Error(`${command}: version 必须是非空字符串`)
+    targets.push({ kind, version: version.trim() })
+  }
+  return targets
 }
 
 export interface RuntimeSnapshot {
@@ -801,6 +834,20 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       if (updater === undefined) throw new Error('apply_update：壳未接应用更新')
       return updater.apply()
     },
+    // ---- 启动更新提醒的开关与拉黑列表（#136）----
+    // 面板只改 `update-notice.json`；不碰 desktop-settings.json（键名是契约红线）。
+    get_update_notice_state: () => {
+      return noticeStore(deps).read()
+    },
+    set_update_notice_enabled: (args) => {
+      const enabled = args['enabled']
+      if (typeof enabled !== 'boolean') throw new Error('set_update_notice_enabled: enabled 必须是布尔值')
+      return noticeStore(deps).setEnabled(enabled)
+    },
+    restore_update_notice: (args) => {
+      return noticeStore(deps).restore(noticeTargets(args, 'restore_update_notice'))
+    },
+    clear_update_notice_ignored: () => noticeStore(deps).clearIgnored(),
   }
 
   for (const [name, reason] of Object.entries(NOT_PORTED)) {

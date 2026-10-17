@@ -17,7 +17,7 @@ import {
   statusLabel,
   trayTitle,
 } from '../src/bun/tray-menu.ts'
-import { TRAY_LABEL_MAX, truncateTrayLabel } from '../src/bun/tray-menu.ts'
+import { TRAY_LABEL_MAX, truncateTrayLabel, updateCheckLabel } from '../src/bun/tray-menu.ts'
 import {
   DEFAULT_WINDOW_HEIGHT,
   DEFAULT_WINDOW_WIDTH,
@@ -202,12 +202,14 @@ describe('trayMenu', () => {
     expect(trayTitle(baseState({ profile: 'web' }))).toBe('DSH · web')
   })
 
-  test('菜单结构稳定：两条分隔线，动作行只有三处', () => {
+  test('菜单结构稳定：两条分隔线，动作行只有四处（#141 加了「检查更新」）', () => {
     const items = trayMenu(baseState({ profile: 'web', profiles: ['web', 'app'] }))
     expect(items.filter((item) => item.type === 'divider').length).toBe(2)
     const actionable = items.filter((item): item is NormalItem => isNormal(item) && item.action !== undefined)
-    // 子菜单父项只挂 submenu、不带 action；真正可点的顶层动作只有三个
-    expect(actionable.map((item) => item.label).sort()).toEqual(['退出', '隐藏窗口', '重启应用'].sort())
+    // 子菜单父项只挂 submenu、不带 action；真正可点的顶层动作只有四个
+    expect(actionable.map((item) => item.label).sort()).toEqual(
+      ['退出', '隐藏窗口', '重启应用', '检查更新'].sort(),
+    )
   })
 })
 
@@ -494,5 +496,59 @@ describe('托盘菜单限宽（A6）', () => {
     if (runtime?.type !== 'normal') throw new Error('unreachable')
     expect(Array.from(runtime.label).length).toBeLessThanOrEqual(TRAY_LABEL_MAX)
     expect(runtime.enabled).toBe(false)
+  })
+})
+
+// #141：托盘「检查更新」。状态行讲「上一次查到什么」，菜单项讲「现在去查」，两件事分开。
+describe('托盘「检查更新」（#141）', () => {
+  test('没查过就不摆这一行（旧调用方不受影响）', () => {
+    expect(updateCheckLabel(undefined)).toBeNull()
+    expect(trayMenu(baseState()).some((item) => isNormal(item) && item.label.startsWith('更新：'))).toBe(false)
+  })
+
+  test('检查中 / 有更新 / 无更新 / 查不成，四种说法各自不同', () => {
+    expect(updateCheckLabel({ checking: true, result: null })).toBe('更新：正在检查…')
+    expect(updateCheckLabel({ checking: false, result: null })).toBe('更新：未检查')
+    expect(
+      updateCheckLabel({ checking: false, result: { notify: true, reason: '有可用更新', updates: 2 } }),
+    ).toBe('更新：有 2 项可用更新')
+    expect(
+      updateCheckLabel({ checking: false, result: { notify: false, reason: '没有新的可用更新', updates: 0 } }),
+    ).toBe('更新：没有新的可用更新')
+  })
+
+  test('查不成就把原因摆上灰字，而不是抿一句「已是最新」', () => {
+    const label = updateCheckLabel({
+      checking: false,
+      result: { notify: false, reason: 'DSH 运行时这次没查成（离线 / 超时 / 未配置更新源），静默', updates: 0 },
+    })
+    expect(label).toContain('这次没查成')
+    // 灰字行也要限宽，否则长原因会把菜单摆得跟窗口一样宽
+    expect(Array.from(label ?? '').length).toBeLessThanOrEqual(TRAY_LABEL_MAX + 3)
+  })
+
+  test('状态行只读（enabled:false），检查中菜单项置灰防连点', () => {
+    const idle = trayMenu(baseState({ updateCheck: { checking: false, result: null } }))
+    const status = findItem(idle, '更新：未检查')
+    expect(status?.enabled).toBe(false)
+    expect(findItem(idle, '检查更新')?.enabled).toBe(true)
+
+    const busy = trayMenu(baseState({ updateCheck: { checking: true, result: null } }))
+    expect(findItem(busy, '更新：正在检查…')?.enabled).toBe(false)
+    expect(findItem(busy, '检查更新')?.enabled).toBe(false)
+  })
+
+  test('位置与「运行时版本」子菜单同区：状态行 → 检查更新，紧跟在它后面', () => {
+    const items = trayMenu(baseState({ updateCheck: { checking: false, result: { notify: true, reason: 'x', updates: 1 } } }))
+    const at = (label: string): number => items.findIndex((item) => isNormal(item) && item.label === label)
+    const runtimeSub = at('运行时版本')
+    expect(runtimeSub).toBeGreaterThan(-1)
+    expect(at('更新：有 1 项可用更新')).toBe(runtimeSub + 1)
+    expect(at('检查更新')).toBe(runtimeSub + 2)
+  })
+
+  test('action 一路派发到 check-updates', () => {
+    expect(TRAY_MENU_ACTIONS.checkUpdates).toBe('tray:check-updates')
+    expect(parseTrayAction(TRAY_MENU_ACTIONS.checkUpdates)).toEqual({ kind: 'check-updates' })
   })
 })

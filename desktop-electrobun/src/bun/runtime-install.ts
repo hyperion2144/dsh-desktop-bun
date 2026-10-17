@@ -9,11 +9,12 @@
 // 旧壳踩过的坑全部照抄：独立 store（#114）、`packages: []` 截断 workspace 向上搜索（#95）、
 // hoisted 平铺（#95）、allowBuilds 白名单（#135）、错误尾巴优先 stderr 再回退 stdout（#95 Bug 1）。
 
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { delimiter, join } from 'node:path'
 import { NPM_PACKAGE, isRuntimeVersion } from '../shared/runtime-catalog.ts'
 import { runtimeNpmrc, runtimeWorkspaceYaml } from '../shared/profile-template.ts'
-import { isRuntimeTreeValid, runtimeDirOf, runtimesDir } from './runtime-store.ts'
+import { isRuntimeTreeValid, runtimeDirOf, runtimeStagingDirOf, runtimesDir } from './runtime-store.ts'
 import { SCENARIO } from '../shared/notify-policy.ts'
 import type { RuntimeSource } from '../shared/settings.ts'
 import { createPlatformProbe, stopProcessTree } from './process-tree.ts'
@@ -242,10 +243,13 @@ export interface InstallRuntimeInput {
  */
 export async function installRuntime(input: InstallRuntimeInput): Promise<void> {
   if (!isRuntimeVersion(input.version)) throw new Error(`版本号不合法：${input.version}`)
-  const dir = runtimeDirOf(input.appSupport, input.version)
-  if (isRuntimeTreeValid(dir)) throw new Error(`dsh ${input.version} 已经装好了`)
+  const finalDir = runtimeDirOf(input.appSupport, input.version)
+  if (isRuntimeTreeValid(finalDir)) throw new Error(`dsh ${input.version} 已经装好了`)
+  // 半成品不发布：装在点目录里，成功后整棵 rename 成正式目录（#139 真机发现——直接在正式目录里装，
+  // pnpm 早期就把 node_modules/@deepseek-ai/dsh/lib/bin.js 链好，isRuntimeTreeValid 在 89% 时就为真，
+  // 面板与提醒卡会把半装树渲染成「已下载 · 可切换」）。点目录扫描本来就跳过，崩了也不会留假版本。
+  const dir = runtimeStagingDirOf(input.appSupport, input.version, randomUUID())
   const storeDir = join(runtimesDir(input.appSupport), '.pnpm-store')
-  rmSync(dir, { recursive: true, force: true })
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'package.json'), `${JSON.stringify({ name: `dsh-runtime-${input.version}`, private: true }, null, 2)}\n`)
   writeFileSync(join(dir, 'pnpm-workspace.yaml'), runtimeWorkspaceYaml(storeDir))
@@ -364,6 +368,10 @@ export async function installRuntime(input: InstallRuntimeInput): Promise<void> 
     rmSync(dir, { recursive: true, force: true })
     throw new Error(`dsh ${input.version} 装完了但运行时树不完整（缺 node_modules/@deepseek-ai/dsh/lib/bin.js）`)
   }
+  // 发布：同盘 rename 是原子的。清掉可能残留的无效旧目录（POSIX 下 rename 到非空目录会失败）。
+  rmSync(finalDir, { recursive: true, force: true })
+  renameSync(dir, finalDir)
+  input.onLog?.(`运行时安装：已发布到 ${finalDir}`)
 }
 
 /** 面板轮询读到的下载状态（旧壳 `runtime_download_status` 同形状 + #97 的 cancelled）。 */

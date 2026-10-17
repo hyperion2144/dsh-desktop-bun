@@ -1234,5 +1234,82 @@ for (const f of ['notifications-tab.tsx', 'downloads-tab.tsx']) {
   )
 }
 
+
+// ── update-notice-settings（#136）：启动更新提醒的开关与已忽略版本列表 ──
+await build({
+  entryPoints: [join(root, 'src/client/update-notice-settings.ts')],
+  outfile: join(tmp, 'update-notice-settings.mjs'),
+  format: 'esm',
+  platform: 'node',
+  bundle: true,
+  target: 'node20',
+  logLevel: 'silent',
+})
+const notice = await import(pathToFileURL(join(tmp, 'update-notice-settings.mjs')).href)
+
+// ── parseUpdateNoticeState：回包形状校验。读不到就该读不到，不能默认「开着」──
+assert.equal(notice.parseUpdateNoticeState(null), null, 'null 回包 = 读不到')
+assert.equal(notice.parseUpdateNoticeState('[1,2]'), null, '数组不是合法状态')
+assert.equal(notice.parseUpdateNoticeState('nope'), null, '字符串不是合法状态')
+assert.equal(notice.parseUpdateNoticeState({}).enabled, true, '缺 enabled 字段 = 默认开（缺字段的老文件不该被当成用户关掉了）')
+assert.equal(notice.parseUpdateNoticeState({ enabled: false }).enabled, false, '显式 false = 关')
+assert.equal(notice.parseUpdateNoticeState({ enabled: 'no' }).enabled, true, '非布尔值不当成关')
+assert.deepEqual(
+  notice.parseUpdateNoticeState({ ignored: ['runtime:0.2.2', ' runtime:0.2.2 ', 'shell:0.3.0', 7, ''] }).ignored,
+  ['runtime:0.2.2', 'shell:0.3.0'],
+  '拉黑键去重、去空白、丢掉非字符串',
+)
+assert.deepEqual(notice.parseUpdateNoticeState({ ignored: 'nope' }).ignored, [], 'ignored 不是数组就当空')
+assert.deepEqual(
+  notice.parseUpdateNoticeState({ lastNotified: { shell: '0.3.0', runtime: '   ' } }).lastNotified,
+  { shell: '0.3.0', runtime: null },
+  '空白版本号回落 null（不参与比较）',
+)
+assert.deepEqual(notice.parseUpdateNoticeState({}).lastNotified, { shell: null, runtime: null }, '缺 lastNotified 回落空')
+
+// ── parseIgnoredKey：带前缀拆路。同号的壳与运行时是两件事，绝不能合并 ──
+assert.deepEqual(notice.parseIgnoredKey('shell:0.3.0'), { kind: 'shell', version: '0.3.0' }, '壳键')
+assert.deepEqual(notice.parseIgnoredKey('runtime:0.2.2-alpha.1'), { kind: 'runtime', version: '0.2.2-alpha.1' }, '运行时键')
+assert.deepEqual(notice.parseIgnoredKey('0.3.0'), { kind: null, version: '0.3.0' }, '无前缀 = 未知来源（照样能显示、能被清空）')
+assert.deepEqual(notice.parseIgnoredKey('plugin:0.3.0'), { kind: null, version: 'plugin:0.3.0' }, '不认识的前缀也当未知来源，原样保留')
+assert.deepEqual(notice.parseIgnoredKey('shell:'), { kind: null, version: 'shell:' }, '前缀后版本号为空 = 未知来源')
+assert.deepEqual(notice.parseIgnoredKey(':0.3.0'), { kind: null, version: ':0.3.0' }, '空前缀 = 未知来源')
+
+// ── ignoredRows：壳在前、运行时在后，各按版本从高到低 ──
+const rows = notice.ignoredRows(['runtime:0.2.9', 'shell:0.3.0', 'runtime:0.2.10', 'shell:0.3.0', 'weird-key'])
+assert.deepEqual(
+  rows.map((r) => r.label),
+  ['桌面壳 0.3.0', 'DSH 运行时 0.2.10', 'DSH 运行时 0.2.9', 'weird-key'],
+  '壳在前；同路按版本从高到低（0.2.10 > 0.2.9，不是字典序）；未知来源殿后',
+)
+assert.equal(rows.length, 4, '重复键去重')
+assert.equal(notice.ignoredRows([]).length, 0, '空列表没有行')
+assert.equal(notice.ignoredRows(['shell:0.3.0'])[0].kind, 'shell', '行上带着路（恢复按钮靠它回传）')
+assert.equal(notice.ignoredRows(['weird-key'])[0].kind, null, '未知来源那行的 kind 是 null（面板据此禁用「恢复」）')
+
+// ── 文案：开关语义必须写在面板上，不能只写在票面 ──
+const hintOn = notice.updateNoticeEnabledHint(true)
+const hintOff = notice.updateNoticeEnabledHint(false)
+assert.ok(hintOn.includes('弹窗'), '开着时说清会弹窗提醒')
+assert.ok(hintOn.includes('托盘'), '开着时也点明托盘随时可查')
+assert.ok(hintOff.includes('启动不再弹'), '关掉时说清启动不再弹')
+assert.ok(hintOff.includes('不受这个开关约束'), '关掉后仍说清手动检查不受约束（票面第 4 条硬要求）')
+assert.ok(!hintOff.includes('不会再检查'), '不说成「连检查都不做了」——托盘那次照做')
+assert.equal(notice.ignoredEmptyHint(), '没有被忽略的版本。', '空列表灰字')
+
+// 源码级接线门禁：这一段必须真的画进设置面板
+// #144 之后面板拆成 src/client/desktop-settings/ 下的卡片模块，开关与列表都住在
+// cards/update-card.tsx；红线断言必须扫模块集合，否则新模块天然逃过检查。
+const settingsSource = panelSource
+for (const cmd of ['get_update_notice_state', 'set_update_notice_enabled', 'restore_update_notice', 'clear_update_notice_ignored']) {
+  assert.ok(settingsSource.includes(`'${cmd}'`), `面板调了 ${cmd}`)
+}
+assert.ok(settingsSource.includes('{updateNoticeEnabledHint(updateNotice.enabled)}'), '说明文案画进面板')
+assert.ok(settingsSource.includes('清空全部'), '「清空全部」画进面板')
+assert.ok(settingsSource.includes('恢复'), '「恢复」画进面板')
+assert.ok(
+  !/desktop\.[a-z_]*update_notice[a-z_]*/.test(settingsSource),
+  '不把提醒开关当普通设置键写进 desktop-settings.json（键名是契约红线）',
+)
 rmSync(tmp, { recursive: true, force: true })
 console.log('client 纯函数测试：全部通过 ✓')

@@ -38,6 +38,7 @@ export const TRAY_MENU_ACTIONS = {
   stopProfile: 'tray:profile:stop:',
   newProfile: 'tray:profile:new',
   migrateProfile: 'tray:profile:migrate',
+  checkUpdates: 'tray:check-updates',
 } as const
 export type TrayActionKind =
   | 'toggle-window'
@@ -51,6 +52,7 @@ export type TrayActionKind =
   | 'stop-profile'
   | 'new-profile'
   | 'migrate-profile'
+  | 'check-updates'
 
 export interface TrayAction {
   kind: TrayActionKind
@@ -103,12 +105,24 @@ export interface TrayState {
   remoteList: readonly string[]
   /** 「注册 dsh 命令」项的文案；null = 已注册或还没探出 ⇒ 不摆这一项（旧壳 #175 三态） */
   registerLabel: string | null
+  /**
+   * #141：「检查更新」的状态行。缺省（undefined）时菜单不摆这一行，旧调用方不受影响。
+   */
+  updateCheck?: TrayUpdateCheck
 }
 
 /** 版本目录里的一项（与 shared/runtime-catalog.ts 的 CatalogEntry 同名，这里只取菜单要用的两个字段）。 */
 export interface TrayCatalogItem {
   version: string
   channel: string
+}
+
+/** #141：托盘「检查更新」的进程态（壳主进程维护，事件驱动下发，不定时刷新）。 */
+export interface TrayUpdateCheck {
+  /** 正在检查（菜单项置灰，防连点） */
+  checking: boolean
+  /** 上一次检查的结果；null = 还没查过 */
+  result: { notify: boolean; reason: string; updates: number } | null
 }
 
 /** 与 Electrobun 的 MenuItemConfig 对齐（只声明我们用到的字段）。 */
@@ -139,6 +153,7 @@ export function parseTrayAction(action: string | undefined | null): TrayAction |
   }
   if (action === TRAY_MENU_ACTIONS.registerCli) return { kind: 'register-cli' }
   if (action === TRAY_MENU_ACTIONS.restartApp) return { kind: 'restart-app' }
+  if (action === TRAY_MENU_ACTIONS.checkUpdates) return { kind: 'check-updates' }
   if (action === TRAY_MENU_ACTIONS.runtimeBuiltin) return { kind: 'switch-runtime' }
   if (action.startsWith(TRAY_MENU_ACTIONS.runtimeVersionPrefix)) {
     const version = action.slice(TRAY_MENU_ACTIONS.runtimeVersionPrefix.length)
@@ -311,6 +326,37 @@ export function statusLabel(state: TrayState): string {
   if (status === 'blocked') return `状态：已阻塞${why}`
   return `状态：dsh 未起来${why}`
 }
+
+/**
+ * #141：「检查更新」状态行的文案。产品语义，跟着菜单模型一起单测。
+ *
+ * 口径：查不了就直说查不成（原因跟在后面），而不是抿一句「已是最新」——用户会把它当成真结论。
+ */
+export function updateCheckLabel(check: TrayUpdateCheck | undefined): string | null {
+  if (check === undefined) return null
+  if (check.checking) return '更新：正在检查…'
+  if (check.result === null) return '更新：未检查'
+  if (check.result.notify) return `更新：有 ${String(check.result.updates)} 项可用更新`
+  return `更新：${truncateTrayLabel(check.result.reason)}`
+}
+
+/**
+ * #141：「检查更新」那两格——只在用户问过一次之后才出现（状态行），但「检查更新」始终在。
+ * 状态行 enabled:false（只读），菜单项在检查中置灰防连点。
+ */
+function updateCheckItems(state: Pick<TrayState, 'updateCheck'>): TrayMenuItem[] {
+  const status = updateCheckLabel(state.updateCheck)
+  const items: TrayMenuItem[] = []
+  if (status !== null) items.push({ type: 'normal', label: status, enabled: false })
+  items.push({
+    type: 'normal',
+    label: '检查更新',
+    action: TRAY_MENU_ACTIONS.checkUpdates,
+    enabled: state.updateCheck?.checking !== true,
+  })
+  return items
+}
+
 export function trayMenu(state: TrayState): TrayMenuItem[] {
   const profiles = orderedProfiles(state)
   const items: TrayMenuItem[] = [
@@ -375,6 +421,8 @@ export function trayMenu(state: TrayState): TrayMenuItem[] {
       label: '运行时版本',
       submenu: runtimeMenuItems(state),
     },
+    // #141：「检查更新」与运行时子菜单同区（都是“把自己这套弄到最新”）。
+    ...updateCheckItems(state),
     {
       type: 'normal',
       label: 'dsh 服务地址',
