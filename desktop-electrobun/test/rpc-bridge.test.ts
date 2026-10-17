@@ -16,6 +16,8 @@ function makeDeps(overrides: Partial<ShellRpcDeps> = {}): ShellRpcDeps {
   return {
     // 默认 darwin（原生路径语义）；win32 系统最大化语义由显式用例钉死，别依赖 runner 平台
     platform: 'darwin',
+    // 测试缺省不取工作区：只看原生旗标；win32 语义用例显式注入。
+    workArea: () => null,
     router: () =>
       createRpcRouter({
         get_desktop_client_environment: () => ({ platform: 'win32', profile: 'main' }),
@@ -181,6 +183,22 @@ describe('壳 RPC 漏斗（官方 Typed RPC → 命令表）', () => {
       expect(deriveMaximized(WORK, null, false)).toBe(false)
       // 实机回归：旗标为 true 时无论几何坐标空间差多少（逻辑 px vs 物理 px）都算已最大化
       expect(deriveMaximized({ x: 100, y: 80, width: 800, height: 600 }, WORK, true)).toBe(true)
+    })
+
+    test('#73 启动即最大化：旗标未落时首查也须为真（逻辑帧 vs 逻辑工作区）', async () => {
+      // 实机日志原值（#73 第五轮，2K@125%）：getFrame 返回逻辑 px，最大化帧
+      // 2062.4×1118.4 = (2560+18)/1.25；Screen 工作区同为逻辑 px：2048×1104。
+      // 启动时 WS_MAXIMIZE 旗标可能还没落，window_get_state 必须靠几何判出。
+      const win = makeStateWindow({ x: -7, y: -7, width: 2062.4, height: 1118.4 })
+      const funnel = createShellRpcFunnel(
+        makeDeps({
+          platform: 'win32',
+          maximizeStylesPatched: () => true,
+          workArea: () => ({ x: 0, y: 0, width: 2048, height: 1104 }),
+          window: win,
+        }),
+      )
+      await expect(funnel('window_get_state', undefined)).resolves.toEqual({ maximized: true })
     })
   }),
 
