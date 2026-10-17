@@ -1,11 +1,20 @@
 // 系统语言：壳要知道它，页面才知道该用哪种语言渲染。
 //
-// 为什么不能直接问 `Intl`：Bun 从终端启动时 `Intl.DateTimeFormat().resolvedOptions().locale`
-// 给的是 ICU 默认值（本机实测 en-US），不是 macOS 用户的 AppleLocale（实测 zh_CN）。
+// 为什么不能直接问 `Intl`：Bun 在 macOS 上从终端启动时
+// `Intl.DateTimeFormat().resolvedOptions().locale` 给的是 en-US（Bun 不调用
+// setlocale，WTF 把 libc 的 C locale 映射成 en-US；本机实测），
+// 不是 macOS 用户的 AppleLocale（实测 zh_CN），所以要下面那条 defaults 分支补。
+// Windows 不走这条路：#76 实测（2026-10-17，Bun 1.4.0 / Win11 24H2 zh-CN），
+// 进程环境没有 LANG/LC_*（SYSTEM 与登录用户两种上下文都测了）时 Intl 返回 zh-CN；
+// 源码上 Windows 的 Intl 取系统 UI 语言（GetUserDefaultUILanguage，经 JSC/WTF
+// LanguageWin.cpp），不是 ICU 的区域格式，也不读环境变量。UI 语言 ≠ 区域格式
+// （要区域格式需显式读 GetUserDefaultLocaleName），但页面语言要的正是 UI 语言，
+// 所以不需要 win32 专属探测；证据见
+// docs/research/2026-10-17-windows-intl-default-locale.md。
 // 旧壳是 WKWebView，`navigator.language` 天然跟随系统；换到 CEF 后这个信息得由壳自己带进去。
 //
 // 取值顺序：LC_ALL / LC_MESSAGES / LANG（非 C/ POSIX）> macOS `defaults read -g AppleLocale`
-// > Intl > en-US。
+// > Intl（Windows 上实测即系统 UI 语言）> en-US。
 
 export const FALLBACK_LOCALE = 'en-US'
 
