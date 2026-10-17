@@ -13,6 +13,7 @@
  * 9. node-addon-require-builtin dispatcher — the stub must exist in worker contexts too (#205)
  * 10. Patch 13/14: inspector CDP 桥（#61）——worker 侧把 Runtime 求值族与 HeapProfiler 堆快照
  *     转给主线程的 vm/v8 服务端，DevTools 面板在 Bun 下可用；全部 typeof Bun 守卫，Node 零变化
+ * 15. PTC worker 继承控制通道的 Bun 兜底（fd 7 Duplex；process.js + persistent-process.js）
  *
  * 补丁落盘策略（#210）：物化后**不还原**，带 rev 指纹幂等——运行时树是被多个 dsh 进程共享的，
  * 任何进程退出时回写原文件都会把别的进程正在用的补丁抹掉（实测会把终端与 inspector 打回失败态）。
@@ -316,7 +317,7 @@ process.env.DSH_BUN_COMPAT_DISABLE_HMR = "1";
 // 抹掉——实测：黑盒测试宿主退出后，运行中的窗口终端立刻变回「进程已退出（1）」、inspector
 // 也起不来。改为「打上就不动」：目标文件是 dispatcher 形态（Bun 走 shim、其它运行时转
 // index.original.js），对 Node 无害；每条补丁带 rev 指纹，rev 变了才重写。
-const PATCH_REV = 8;
+const PATCH_REV = 10;
 const REV_MARK = `bun-preload-rev:${PATCH_REV}`;
 /** 已处理的文件，仅用于结尾汇总日志。 */
 const _patches = new Set();
@@ -1193,4 +1194,103 @@ for (const target of packageTargets('@deepseek-ai/dsh-experimental-inspector/lib
 	_trace(`[bun-preload] Patch 14: inspector CDP 桥（主线程侧）applied to ${target}`);
 }
 
-_trace(`[bun-preload] ${REV_MARK} 应用完成：stripTypeScriptTypes / node-addon-require-builtin 桩 / HMR 关闭 / Bun.Terminal PTY / xterm 同步写 / 插件展示元数据解析 / 插件说明符 baseUrl 解析 / inspector fetch 归一+spread 修复 / inspector CDP 桥（不还原）`);
+// ── Patch 15: PTC worker 继承控制通道（Bun fd 7）──
+// Bun 的 net.Socket({ fd }) 不能接管继承的已连接 socket fd：构造时 fd 被关掉，
+// 第一次写 ready 帧就在 uncork() 抛 ERR_SOCKET_CLOSED（Bun 1.3.14/1.4.0 实测）。
+// PTC worker 由宿主 executable 启动；桌面壳宿主是 Bun 时 worker 也是 Bun，必中。
+// Node 保持原 net.Socket 路径；Bun（非 Windows）用 fs.read/fs.write/fs.close 包一个 Duplex。
+const PTC_CONTROL_MARK = 'bun-preload: PTC worker 控制通道（Bun fd 7）';
+const PTC_CONTROL_ANCHOR = /return new Socket\(\{\s+fd: 7,\s+readable: true,\s+writable: true,\s+allowHalfOpen: true\s+\}\);/;
+const PTC_CONTROL_GUARD = [
+  `  // ${REV_MARK} ${PTC_CONTROL_MARK}`,
+  '  // Windows 的 fd 7 继承通道行为未验证，先保留上游 net.Socket；',
+  '  if (typeof Bun !== "undefined" && process.platform !== "win32") return __dshOpenBunInheritedControlChannel();',
+  '  return new Socket({',
+  '    fd: 7,',
+  '    readable: true,',
+  '    writable: true,',
+  '    allowHalfOpen: true',
+  '  });',
+].join('\n');
+const PTC_CONTROL_IMPORT_ANCHOR = 'import { Socket } from "node:net";';
+const PTC_CONTROL_IMPORTS = [
+  'import { Duplex as __dshBunDuplex } from "node:stream";',
+  'import { read as __dshBunFsRead, write as __dshBunFsWrite, close as __dshBunFsClose } from "node:fs";',
+].join('\n');
+const PTC_CONTROL_HELPER = [
+  `// ${REV_MARK} ${PTC_CONTROL_MARK}`,
+  '// Bun 的 net.Socket({fd}) 不能接管继承的已连接 socket fd（构造时 fd 被关掉，',
+  '// 首次写 ready 帧即 ERR_SOCKET_CLOSED）。用 fs.read/write/close 包一个 Duplex，',
+  '// 保留 write(callback)/cork()/uncork()/data/end/error/off()/destroy() 语义。',
+  'function __dshBunIsWouldBlock(error) { return error.code === "EAGAIN" || error.code === "EWOULDBLOCK"; }',
+  'function __dshOpenBunInheritedControlChannel() {',
+  '  const stream = new __dshBunDuplex({',
+  '    allowHalfOpen: true,',
+  '    read() {',
+  '      if (this.__dshreading || this.destroyed) return;',
+  '      this.__dshreading = true;',
+  '      const buffer = Buffer.allocUnsafe(65536);',
+  '      __dshBunFsRead(this.__dshfd, buffer, 0, buffer.length, null, (error, bytes) => {',
+  '        this.__dshreading = false;',
+  '        if (this.destroyed) return;',
+  '        if (error) {',
+  '          if (__dshBunIsWouldBlock(error)) { setTimeout(() => this.read(), 5); return; }',
+  '          this.destroy(error);',
+  '          return;',
+  '        }',
+  '        if (bytes === 0) { this.push(null); return; }',
+  '        this.push(buffer.subarray(0, bytes));',
+  '      });',
+  '    },',
+  '    write(chunk, _encoding, callback) {',
+  '      let offset = 0;',
+  '      const step = () => {',
+  '        if (offset >= chunk.length) { callback(); return; }',
+  '        __dshBunFsWrite(this.__dshfd, chunk, offset, chunk.length - offset, null, (error, bytes) => {',
+  '          if (error) {',
+  '            if (__dshBunIsWouldBlock(error)) { setTimeout(step, 5); return; }',
+  '            callback(error);',
+  '            return;',
+  '          }',
+  '          if (bytes === 0) { callback(new Error("PTC control channel: write returned 0 bytes")); return; }',
+  '          offset += bytes;',
+  '          step();',
+  '        });',
+  '      };',
+  '      step();',
+  '    },',
+  '    destroy(error, callback) {',
+  '      if (this.__dshclosed) { callback(error); return; }',
+  '      this.__dshclosed = true;',
+  '      __dshBunFsClose(this.__dshfd, () => callback(error));',
+  '    },',
+  '  });',
+  '  stream.__dshfd = 7;',
+  '  stream.__dshreading = false;',
+  '  stream.__dshclosed = false;',
+  '  return stream;',
+  '}',
+  '',
+].join('\n');
+function patchPtcControlEntry(relativePath) {
+  for (const target of packageTargets(relativePath)) {
+    const source = readFileSync(target, 'utf8');
+    if (source.includes(PTC_CONTROL_MARK)) {
+      refreshBridgeFingerprint('Patch 15', target, source);
+      continue;
+    }
+    if (!PTC_CONTROL_ANCHOR.test(source) || !source.includes(PTC_CONTROL_IMPORT_ANCHOR)) {
+      console.warn(`[bun-preload] Patch 15: 未找到上游 PTC 控制通道的 net.Socket 文本，跳过 ${target}（上游版本不符）`);
+      continue;
+    }
+    const guarded = source
+      .replace(PTC_CONTROL_IMPORT_ANCHOR, `${PTC_CONTROL_IMPORT_ANCHOR}\n${PTC_CONTROL_IMPORTS}`)
+      .replace(PTC_CONTROL_ANCHOR, PTC_CONTROL_GUARD);
+    writePatch(target, `${guarded}\n${PTC_CONTROL_HELPER}`);
+    _trace(`[bun-preload] Patch 15: PTC worker 控制通道（Bun fd 7）applied to ${target}`);
+  }
+}
+patchPtcControlEntry('@deepseek-ai/dsh-ptc-runtime-node/lib/process.js');
+patchPtcControlEntry('@deepseek-ai/dsh-ptc-runtime-node/lib/persistent-process.js');
+
+_trace(`[bun-preload] ${REV_MARK} 应用完成：stripTypeScriptTypes / node-addon-require-builtin 桩 / HMR 关闭 / Bun.Terminal PTY / xterm 同步写 / 插件展示元数据解析 / 插件说明符 baseUrl 解析 / inspector fetch 归一+spread 修复 / inspector CDP 桥 / PTC worker 控制通道（不还原）`);

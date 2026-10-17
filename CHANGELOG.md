@@ -65,6 +65,7 @@
 - dev_tools 的 CEF / WebView2 分叉收进渲染后端描述符（#110）：调试口 env 名与值编码、C environ 写入器、DevTools 打开方式统一由新文件 `render-backend.ts` 提供，`applyCdpDebugPort` 改收必传的 `backend`；删除无人消费的 `plan.menuEnabled` 与未用 import。纯重构，运行行为不变。
 
 ### Fixed
+- 内置 PTC 模式下 run_code 报 worker-exit ERR_SOCKET_CLOSED（#152）：壳的 Bun preload 给 PTC worker 的 fd 7 控制通道补 Bun 侧 Duplex 兜底，覆盖 per-call 与 persistent 两个入口。
 - 重签后屏幕录制授权失效（#143）：`sign-app.mjs` 给各层签名指定以 `CFBundleIdentifier` 锚定的 designated requirement，取代默认的 cdhash——此前每次重签/换构建都会让系统已存的授权失配，开关亮着也照样反复弹窗。
 - 签名后运行时自改 sealed resource（#143）：内置运行时随包住在 `.app` 里，而 `runtime/bun-preload.mjs` 的兼容层补丁是就地写运行时树的（`DSH_BUN_PRELOAD_TREES` 把选中目录传进去，正好是内置树），每次启动都在签名之后改写 sealed resource——payload 里那棵树封了 36080 个文件，改 9 个就整体失效，`codesign --verify` 报 `file modified: node_modules/…`，而 TCC 的授权匹配正走代码校验，于是屏幕录制/麦克风开关亮着也照样弹窗。修法是把补丁提前到构建期：`prepare-bundle.mjs` 末尾用运行时同一套 preload 先把内置树打成「当前 rev 已就位」再交给签名，进程起来 `hasCurrentRev()` 全命中、一个字节都不写；没打上就直接 fail 构建。
 - 壳自答端点补齐视图鉴权（#130）：`context-menu`、`window`（变更态）、`input-confirm`、`batch` 四条以前只过同源准入、不验视图 token（本机进程可直接弹菜单 / 关窗 / 代答确认弹窗），现与 `open-external` 同级叠 `authorize()`；「哪些端点豁免鉴权」写进 ADR-0003 权限附录。
