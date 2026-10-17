@@ -62,6 +62,7 @@
 - 数据面档位判别收进穷尽策略表（#144）：loopback 转发原本同时维护「档位字符串」「派生的是否合并布尔」「在飞表里有没有领头」三个量、散在五处；改为一张 `Record<LoopbackAggregation, AggregationPolicy>` 映射（给档位加值即编译报错）与一个在飞登记表，右键菜单请求的字段归一化也收成唯一一份实现（官方 RPC 与 `/__shell__/context-menu` 两条入口共用，改一处就够）。
 - loopback 数据面聚合默认档改为「只关缓冲」（#144）：原先缺省是 `full`（合并并发 GET 且整条缓冲 ≤256KB 后才下发，首字节要等整条读完），现缺省改为 `stream`——合并照旧，响应边到边下发。两者对跟随者都保证「同一份字节」，差别只在没有跟随者的单请求要不要白等一次整条传输。已显式选过档的用户不受影响（盘上写死了值）。
 - 移除无消费者的窗口状态推送（#144）：壳侧的 `window_state_changed` 推送没有任何接收方，删除其构造器、发送面与断言；窗口态一律走已有的 `window_get_state` 查询。
+- dev_tools 的 CEF / WebView2 分叉收进渲染后端描述符（#110）：调试口 env 名与值编码、C environ 写入器、DevTools 打开方式统一由新文件 `render-backend.ts` 提供，`applyCdpDebugPort` 改收必传的 `backend`；删除无人消费的 `plan.menuEnabled` 与未用 import。纯重构，运行行为不变。
 
 ### Fixed
 - 重签后屏幕录制授权失效（#143）：`sign-app.mjs` 给各层签名指定以 `CFBundleIdentifier` 锚定的 designated requirement，取代默认的 cdhash——此前每次重签/换构建都会让系统已存的授权失配，开关亮着也照样反复弹窗。

@@ -64,7 +64,8 @@ import {
   type WindowFrame,
 } from './window-state.ts'
 import { loadSettings } from './settings-store.ts'
-import { applyCdpDebugPort, DEVTOOLS_PORT_ENV, DEVTOOLS_PORT_OVERRIDE_ENV, devToolsMenuEnabled, isPortBindable, planDevToolsBoot, sendDevToolsKeystroke } from './devtools.ts'
+import { applyCdpDebugPort, DEVTOOLS_PORT_OVERRIDE_ENV, devToolsMenuEnabled, isPortBindable, planDevToolsBoot, sendDevToolsKeystroke } from './devtools.ts'
+import { resolveRenderBackend } from './render-backend.ts'
 import { activeProfile, type DesktopSettings } from '../shared/settings.ts'
 import { closeAction, offsetFrame, planWindowOpen, windowKey } from '../shared/window-targets.ts'
 import type { LaneForwarder } from './lane-forwarder.ts'
@@ -93,8 +94,9 @@ function fail(message: string, code: number): never {
 // renderer 请求不可用的渲染器会被静默回落（mac 回落 WKWebView），断言把静默变显式。
 const build = BuildConfig.getSync()
 const available: string[] = build.availableRenderers ?? []
-const wantsCef = available.includes('cef')
-const renderer: 'cef' | 'native' = wantsCef ? 'cef' : 'native'
+const backend = resolveRenderBackend({ availableRenderers: available })
+const wantsCef = backend.kind === 'cef'
+const renderer: 'cef' | 'native' = backend.renderer
 const isWinBuild = process.platform === 'win32'
 if (isWinBuild && wantsCef) {
   fail(`win 构建不应打 CEF（#84 切 WebView2；availableRenderers：${available.join(',')}）：检查 electrobun.config.ts 的 win.bundleCEF`, 3)
@@ -172,9 +174,9 @@ const windowStateFile = join(appSupportDir(), 'window.json')
 const bootSettings: DesktopSettings = loadSettings({ home: dshHome() }).settings
 const instanceProfile = activeProfile(bootSettings, process.env)
 
-// ---- #69 开发者工具开关：打包态是否给 CEF 开远程调试口 ----
-// env 必须在任何 CEF 进程起来前就位（splash 就是 CEF 窗、native core 也在下面），
-// 所以启动决策放这里做完；菜单可见 ⇔ 口已开（同一份 plan 推出，禁中间态）。
+// ---- #69 开发者工具开关：打包态是否开远程调试口（CEF / WebView2 载体见 render-backend.ts） ----
+// env 必须在任何渲染进程起来前就位（splash 就是第一个窗、native core 也在下面），
+// 所以启动决策放这里做完；菜单可见 ⇔ 口已开（cdpReady 来自同一份启动决策，禁中间态）。
 const devToolsPlan = await planDevToolsBoot({
   isPackaged: build.isPackaged,
   settingOn: bootSettings.devTools === true,
@@ -184,13 +186,13 @@ const devToolsPlan = await planDevToolsBoot({
 // C environ 双写（dylib 用 C getenv 读开关；Bun map 写入不穿透，实测见 devtools.ts 头注）。
 // 写入失败 = CDP 开不了：cdpReady 落 false，菜单同批不出现（禁中间态，fail-closed）。
 const devToolsCdpReady = devToolsPlan.enableCdp && devToolsPlan.port !== null
-  ? applyCdpDebugPort(devToolsPlan.port, { cefAvailable: wantsCef })
+  ? applyCdpDebugPort(devToolsPlan.port, { backend })
   : false
 if (devToolsPlan.enableCdp && !devToolsCdpReady) {
   console.error('[shell] 开发者工具：调试口 env 写入失败（C environ 写入不可用），本次不开口、不出菜单')
 }
 if (devToolsPlan.reason === 'enabled-by-setting') {
-  console.log(`[shell] 开发者工具：已开启，${wantsCef ? 'CEF' : 'WebView2'} 远程调试口 127.0.0.1:${String(devToolsPlan.port)}（重启后生效${wantsCef ? '' : '；DevTools 按需打开：F12 或右键菜单（合成 F12），不自动弹窗'}；本机任意进程可借该口在页面里执行代码）`)
+  console.log(`[shell] 开发者工具：已开启，${backend.label} 远程调试口 127.0.0.1:${String(devToolsPlan.port)}（重启后生效${backend.devToolsLogHint}；本机任意进程可借该口在页面里执行代码）`)
 } else if (devToolsPlan.reason === 'port-unavailable') {
   console.error(`[shell] 开发者工具：端口 ${String(devToolsPlan.port)} 被占用，本次不开调试口、不出菜单（可用 ${DEVTOOLS_PORT_OVERRIDE_ENV} 换口）`)
 } else if (devToolsPlan.reason === 'port-invalid') {
@@ -1738,10 +1740,10 @@ if (!noWindow) {
       }
       return
     }
-    // 菜单：打开当前聚焦窗口的 DevTools——CEF 走 openDevTools（应用内 inspector）；
-    // win 走合成 F12（#106 返工：上游 WebView2 壳无 openDevTools 实现，物理 F12 由 WebView2 默认能力响应）。
+    // 菜单：打开当前聚焦窗口的 DevTools——落地方式来自后端描述符（#110）：
+    // CEF 走 openDevTools（应用内 inspector）；WebView2 走合成 F12（#106 返工：上游 WebView2 壳无 openDevTools 实现）。
     if (action === SHELL_MENU_ACTIONS.openDevTools) {
-      if (process.platform === 'win32') {
+      if (backend.devToolsOpen === 'keystroke') {
         if (sendDevToolsKeystroke()) {
           console.log('[shell] 开发者工具：已发送 F12 键击（WebView2 原生响应，与物理按键同路径）')
         } else {

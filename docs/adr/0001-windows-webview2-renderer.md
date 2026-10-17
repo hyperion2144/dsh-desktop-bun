@@ -44,6 +44,7 @@ macOS 保持 CEF 的理由不变：WKWebView 是 WebKit，渲染一致性是当�
 - win WebView2：`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`（kernel32 SetEnvironmentVariableA 双写，已有值追加不覆盖）＝`--remote-debugging-port=N`：CDP 口可外部附加；DevTools 不自动弹窗（`--auto-open-devtools-for-tabs` 曾随返工一引入，实测逐窗都弹、含 splash，维护者否决，返工二移除）
 - win（dev/打包同形态）：菜单「打开 DevTools」＝壳经 user32 `keybd_event` 合成 F12（与物理按键同路径；WebView2 默认 `AreDevToolsEnabled=true`，上游壳未关）。初版「复制 DevTools 调试地址」（edge://inspect 形态）经维护者实测否决——CDP 地址贴浏览器是空白页——返工废弃；dev_tools 设置键名不变
 - 语义边界：dev_tools 开关管控 CDP 口与菜单入口；F12 是 WebView2 默认能力（settings 层在 native），开关管不住——要关需上游接线 AreDevToolsEnabled（#106 Q3 拍板不去上游）
+- 实现收拢（#110）：上述载体差异（env 名/值编码、C environ 写入器、DevTools 打开方式）统一收在 `src/bun/render-backend.ts` 的渲染后端描述符；`applyCdpDebugPort` 的 `cefAvailable` 入参与 `plan.menuEnabled` 字段已不存在，行为与本节口径一致。
 ## 验证边界
 
 本机为 macOS，Windows 产物验证（WebView2 加载 dsh、token 准入、xterm 终端、包体对比）依赖 native runner 构建，由 CI Windows 兜底 job 与维护者实机完成；macOS 侧以门禁（typecheck + bun test 全绿）与单测覆盖决策层语义。
