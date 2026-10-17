@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DSH Windows 安装程序 · UI 原型</title>
+<style>
+  /* ─────────────────────────────────────────────────────────────
+     设计令牌。两套主题的色值就是 NSIS 侧要照抄的常量
+     （SetCtlColors / GDI+ GdipCreateSolidFill 都只能吃编译期常量）。
+     ───────────────────────────────────────────────────────────── */
+  :root{
+    --accent:#4D6BFE; --accent-hover:#3D5BEE; --accent-active:#3350D8;
+    --accent-soft:rgba(77,107,254,.12);
+    --r-win:14px; --r-card:14px; --r-ctl:10px; --r-pill:999px;
+    --font:"Microsoft YaHei UI","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"PingFang SC",sans-serif;
+  }
+  .frame[data-theme="dark"]{
+    --bg:#141417; --bg-elev:#1B1B1F; --surface:#1E1E23; --surface-2:#26262C;
+    --border:#2C2C33; --border-strong:#3A3A43;
+    --text:#F2F3F5; --text-dim:#A7ACB4; --text-mute:#7C828B;
+    --shadow:0 30px 70px rgba(0,0,0,.60);
+  }
+  .frame[data-theme="light"]{
+    --bg:#FFFFFF; --bg-elev:#F7F8FA; --surface:#F3F4F7; --surface-2:#E7E9EE;
+    --border:#E3E5EA; --border-strong:#D2D6DE;
+    --text:#0F1115; --text-dim:#5A6069; --text-mute:#868C96;
+    --shadow:0 30px 70px rgba(15,17,21,.22);
+  }
+
+  *{box-sizing:border-box}
+  html,body{margin:0;background:#0B0B0E;color:#E8E9EC;font-family:var(--font)}
+  body{padding:32px 24px 64px;display:flex;justify-content:center}
+  .stage{width:100%;max-width:1040px;display:flex;flex-direction:column;gap:22px;align-items:center}
+
+  /* ── 原型外壳（不属于安装器本身） ── */
+  .proto-head{width:100%;display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  .proto-head h1{margin:0;font-size:17px;font-weight:650;letter-spacing:-.01em}
+  .proto-head p{margin:6px 0 0;font-size:12.5px;color:#8C9199;line-height:1.6}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;background:#141418;border:1px solid #232329;padding:6px;border-radius:12px}
+  .toolbar button{appearance:none;border:0;background:transparent;color:#B9BEC6;font:inherit;font-size:12.5px;
+    padding:7px 13px;border-radius:8px;cursor:pointer;transition:background .15s,color .15s}
+  .toolbar button:hover{background:#1F1F26;color:#fff}
+  .toolbar button[aria-pressed="true"]{background:var(--accent);color:#fff}
+  .toolbar .sep{width:1px;background:#232329;margin:2px 2px}
+
+  /* ── 安装器窗口：600 × 600，逻辑像素 ── */
+  .frame{width:600px;height:600px;flex:0 0 auto;position:relative;overflow:hidden;
+    background:var(--bg);color:var(--text);border-radius:var(--r-win);box-shadow:var(--shadow);
+    display:flex;flex-direction:column;transition:background .2s,color .2s}
+  /* 无边框窗没有系统阴影/圆角（SetWindowSubclass 才拿得到）；这里 14px 圆角是「如果将来加
+     DWM 圆角就是它」的预览，真机上先按 0 圆角方窗渲染，内容留 1px 安全边。 */
+  .frame[data-chrome="square"]{border-radius:0}
+
+  /* ?bare=1：只留 600×600 窗口本身（评审截图用） */
+  body.bare{padding:0;background:#0B0B0E;display:block}
+  body.bare .proto-head, body.bare .spec{display:none}
+  body.bare .stage{max-width:none;gap:0}
+  body.bare .frame{box-shadow:none}
+
+  .titlebar{height:44px;flex:0 0 44px;display:flex;align-items:center;justify-content:space-between;
+    padding:0 10px 0 16px;-webkit-app-region:drag;user-select:none}
+  .titlebar .caption{font-size:12.5px;color:var(--text-mute);letter-spacing:.01em}
+  .winbtns{display:flex;gap:4px}
+  .winbtn{width:28px;height:28px;border:0;border-radius:8px;background:transparent;color:var(--text-dim);
+    display:grid;place-items:center;cursor:pointer;transition:background .15s,color .15s}
+  .winbtn:hover{background:var(--surface-2);color:var(--text)}
+  .winbtn.close:hover{background:#E5484D;color:#fff}
+  .winbtn svg{width:12px;height:12px;stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round}
+
+  .page{flex:1;min-height:0;padding:8px 32px 28px;display:none;flex-direction:column}
+  .page[data-active]{display:flex}
+  .page.anim{animation:fade .28s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+  /* 品牌行 */
+  .brand{display:flex;align-items:center;gap:12px;margin:6px 0 26px}
+  .brand .tile{width:44px;height:44px;border-radius:12px;background:var(--surface);border:1px solid var(--border);
+    display:grid;place-items:center;overflow:hidden}
+  .brand .tile img{width:32px;height:32px;display:block}
+  .brand .name{font-size:15px;font-weight:600;letter-spacing:-.01em}
+  .brand .sub{font-size:11.5px;color:var(--text-mute);margin-top:3px}
+
+  h2.h1{margin:0 0 10px;font-size:26px;line-height:1.25;font-weight:650;letter-spacing:-.02em}
+  p.lede{margin:0;font-size:13px;line-height:1.65;color:var(--text-dim);max-width:460px}
+
+  /* 卡片 */
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-card);padding:16px;margin-top:26px}
+  .card .row{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+  .card .label{font-size:12px;color:var(--text-mute);letter-spacing:.01em}
+  .card .hint{font-size:12px;color:var(--text-mute);font-variant-numeric:tabular-nums}
+  .pathrow{display:flex;gap:10px;margin-top:10px}
+  .pathbox{flex:1;min-width:0;height:40px;border-radius:var(--r-ctl);background:var(--bg-elev);
+    border:1px solid var(--border);display:flex;align-items:center;padding:0 12px;
+    font-size:12.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pathbox.mono{font-variant-numeric:tabular-nums}
+  .ghost{height:40px;padding:0 16px;border-radius:var(--r-ctl);background:transparent;color:var(--text);
+    border:1px solid var(--border-strong);font:inherit;font-size:12.5px;cursor:pointer;transition:background .15s,border-color .15s}
+  .ghost:hover{background:var(--surface-2);border-color:var(--text-mute)}
+  .ghost.sm{height:36px;font-size:12.5px}
+  .foot{margin-top:12px;font-size:11.5px;color:var(--text-mute);display:flex;align-items:center;gap:8px}
+  .dot{width:3px;height:3px;border-radius:50%;background:var(--text-mute);opacity:.7}
+
+  .spacer{flex:1;min-height:18px}
+
+  /* 主按钮 / 文本按钮 */
+  .primary{width:100%;height:48px;border:0;border-radius:12px;background:var(--accent);color:#fff;
+    font:inherit;font-size:15px;font-weight:600;letter-spacing:.01em;cursor:pointer;
+    box-shadow:0 8px 22px rgba(77,107,254,.28);transition:background .15s,transform .06s,box-shadow .15s}
+  .primary:hover{background:var(--accent-hover);box-shadow:0 10px 26px rgba(77,107,254,.34)}
+  .primary:active{background:var(--accent-active);transform:translateY(1px);box-shadow:0 6px 16px rgba(77,107,254,.24)}
+  .primary:disabled{background:var(--surface-2);color:var(--text-mute);box-shadow:none;cursor:default;transform:none}
+  .textbtn{margin-top:12px;align-self:center;border:0;background:transparent;color:var(--text-mute);
+    font:inherit;font-size:12.5px;cursor:pointer;padding:6px 10px;border-radius:8px;transition:color .15s,background .15s}
+  .textbtn:hover{color:var(--text-dim);background:var(--surface)}
+
+  /* 进度页 */
+  .pctrow{display:flex;align-items:baseline;justify-content:space-between;margin:26px 0 10px}
+  .pctrow .k{font-size:12.5px;color:var(--text-dim)}
+  .pctrow .v{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
+  .track{height:8px;border-radius:var(--r-pill);background:var(--surface-2);overflow:hidden}
+  .fill{height:100%;width:0;border-radius:var(--r-pill);
+    background:linear-gradient(90deg,var(--accent) 0%,#6E86FF 100%);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.25);transition:width .45s cubic-bezier(.2,.7,.2,1)}
+  .steps{margin-top:26px;display:flex;flex-direction:column;gap:2px}
+  .step{display:flex;align-items:center;gap:12px;padding:9px 10px;border-radius:10px;font-size:12.5px;color:var(--text-mute)}
+  .step .mark{width:18px;height:18px;border-radius:50%;flex:0 0 18px;display:grid;place-items:center;
+    border:1.5px solid var(--border-strong);color:transparent}
+  .step .mark svg{width:10px;height:10px;stroke:currentColor;stroke-width:2.2;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .step[data-state="done"]{color:var(--text-dim)}
+  .step[data-state="done"] .mark{background:var(--accent);border-color:var(--accent);color:#fff}
+  .step[data-state="current"]{color:var(--text);background:var(--surface)}
+  .step[data-state="current"] .mark{border-color:var(--accent);border-top-color:transparent;animation:spin .9s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .step .tail{margin-left:auto;font-size:11.5px;color:var(--text-mute);font-variant-numeric:tabular-nums}
+  .progfoot{display:flex;align-items:center;justify-content:space-between;gap:12px}
+
+  /* 完成页 */
+  .checkmark{width:64px;height:64px;border-radius:50%;background:var(--accent-soft);display:grid;place-items:center;margin:8px 0 22px}
+  .checkmark svg{width:30px;height:30px;stroke:var(--accent);stroke-width:2.4;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .mono{font-variant-numeric:tabular-nums}
+  .switchrow{display:flex;align-items:center;gap:12px;margin-top:24px;padding:14px 16px;
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--r-card);cursor:pointer}
+  .switchrow .txt{font-size:13px;color:var(--text)}
+  .switchrow .sub{font-size:11.5px;color:var(--text-mute);margin-top:2px}
+  .switch{margin-left:auto;width:44px;height:24px;border-radius:var(--r-pill);background:var(--surface-2);
+    border:1px solid var(--border-strong);position:relative;transition:background .18s,border-color .18s}
+  .switch .knob{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;
+    box-shadow:0 2px 6px rgba(0,0,0,.32);transition:left .18s cubic-bezier(.2,.7,.2,1)}
+  .switchrow[aria-checked="true"] .switch{background:var(--accent);border-color:var(--accent)}
+  .switchrow[aria-checked="true"] .switch .knob{left:22px}
+
+  /* ── 规格表（原型外壳） ── */
+  .spec{width:100%;background:#111116;border:1px solid #1F1F26;border-radius:16px;padding:22px 24px}
+  .spec h3{margin:0 0 4px;font-size:14px;font-weight:620}
+  .spec p.note{margin:0 0 16px;font-size:12px;color:#8C9199;line-height:1.7}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #1F1F26;vertical-align:top}
+  th{color:#8C9199;font-weight:600;white-space:nowrap}
+  td{color:#D6D8DC}
+  td code{background:#1A1A20;border:1px solid #26262E;border-radius:6px;padding:1px 6px;font-size:11.5px;color:#E8E9EC}
+  .sw{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+  .chip{width:12px;height:12px;border-radius:4px;border:1px solid rgba(255,255,255,.16);display:inline-block}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:14px;font-size:11.5px;color:#8C9199}
+  .legend b{color:#D6D8DC;font-weight:600}
+</style>
+</head>
+<body>
+<div class="stage">
+
+  <div class="proto-head">
+    <div>
+      <h1>DeepSeek Harness · Windows 安装程序 UI 原型</h1>
+      <p>600 × 600 无边框窗，三页 × 明暗两套。此页是设计闸门：NSIS 侧按下面的规格表自绘（owner-draw + GDI+）。</p>
+    </div>
+    <div class="toolbar">
+      <button data-page="welcome" aria-pressed="true">欢迎</button>
+      <button data-page="progress">进度</button>
+      <button data-page="finish">完成</button>
+      <span class="sep"></span>
+      <button data-theme="dark" aria-pressed="true">深色</button>
+      <button data-theme="light">浅色</button>
+      <span class="sep"></span>
+      <button id="play">▶ 播放安装动画</button>
+    </div>
+  </div>
+
+  <!-- 600 × 600 安装器窗口 -->
+  <div class="frame" id="frame" data-theme="dark" data-chrome="round">
+
+    <div class="titlebar">
+      <div class="caption" id="caption">安装 DeepSeek Harness</div>
+      <div class="winbtns">
+        <button class="winbtn" title="最小化"><svg viewBox="0 0 12 12"><path d="M2 6h8"/></svg></button>
+        <button class="winbtn close" title="关闭"><svg viewBox="0 0 12 12"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg></button>
+      </div>
+    </div>
+
+    <!-- ── 欢迎 ── -->
+    <section class="page anim" data-page="welcome" data-active>
+      <div class="brand">
+        <div class="tile"><img src="./whale.png" alt="DeepSeek Harness"></div>
+        <div>
+          <div class="name">DeepSeek Harness</div>
+          <div class="sub">桌面版 · Windows 安装程序</div>
+        </div>
+      </div>
+
+      <h2 class="h1">安装 DeepSeek Harness</h2>
+      <p class="lede">为当前用户安装，无需管理员权限。安装包已内置运行所需的一切，卸载时一并清理。</p>
+
+      <div class="card">
+        <div class="row">
+          <span class="label">安装位置</span>
+          <span class="hint">可用 42.6 GB</span>
+        </div>
+        <div class="pathrow">
+          <div class="pathbox mono" id="pathbox">C:\Users\mutou\AppData\Local\DSHDesktopBun</div>
+          <button class="ghost" id="browse">选择…</button>
+        </div>
+        <div class="foot">
+          <span>需要 1.2 GB 磁盘空间</span><span class="dot"></span><span class="mono">%LOCALAPPDATA%\DSHDesktopBun</span>
+        </div>
+      </div>
+
+      <div class="spacer"></div>
+      <button class="primary" id="install">立即安装</button>
+      <button class="textbtn">取消</button>
+    </section>
+
+    <!-- ── 进度 ── -->
+    <section class="page" data-page="progress">
+      <div class="brand">
+        <div class="tile"><img src="./whale.png" alt=""></div>
+        <div>
+          <div class="name">正在安装</div>
+          <div class="sub">DeepSeek Harness · 桌面版</div>
+        </div>
+      </div>
+
+      <h2 class="h1">正在安装 DeepSeek Harness</h2>
+      <p class="lede" id="statusline">正在校验安装包完整性…</p>
+
+      <div class="pctrow">
+        <span class="k" id="steplabel">第 1 / 4 步</span>
+        <span class="v" id="pct">0%</span>
+      </div>
+      <div class="track"><div class="fill" id="fill"></div></div>
+
+      <div class="steps" id="steps">
+        <div class="step" data-state="current"><span class="mark"><svg viewBox="0 0 10 10"><path d="M1.5 5.4l2.2 2.2L8.5 2.8"/></svg></span><span>准备安装目录</span><span class="tail" data-tail></span></div>
+        <div class="step"><span class="mark"><svg viewBox="0 0 10 10"><path d="M1.5 5.4l2.2 2.2L8.5 2.8"/></svg></span><span>写入程序文件</span><span class="tail" data-tail></span></div>
+        <div class="step"><span class="mark"><svg viewBox="0 0 10 10"><path d="M1.5 5.4l2.2 2.2L8.5 2.8"/></svg></span><span>注册并创建快捷方式</span><span class="tail" data-tail></span></div>
+        <div class="step"><span class="mark"><svg viewBox="0 0 10 10"><path d="M1.5 5.4l2.2 2.2L8.5 2.8"/></svg></span><span>完成收尾</span><span class="tail" data-tail></span></div>
+      </div>
+
+      <div class="spacer"></div>
+      <div class="progfoot">
+        <span class="foot" style="margin:0"><span>安装过程中断会自动回滚，不会留下半个版本</span></span>
+        <button class="ghost sm">取消</button>
+      </div>
+    </section>
+
+    <!-- ── 完成 ── -->
+    <section class="page" data-page="finish">
+      <div class="brand">
+        <div class="tile"><img src="./whale.png" alt=""></div>
+        <div>
+          <div class="name">DeepSeek Harness</div>
+          <div class="sub">桌面版 · 安装完成</div>
+        </div>
+      </div>
+
+      <div class="checkmark"><svg viewBox="0 0 30 30"><path d="M7 15.5l5.5 5.5L23 10"/></svg></div>
+      <h2 class="h1">安装完成</h2>
+      <p class="lede">已安装到 <span class="mono" id="donePath">C:\Users\mutou\AppData\Local\DSHDesktopBun</span>。开始菜单与桌面快捷方式已就绪。</p>
+
+      <div class="switchrow" id="launchrow" role="checkbox" aria-checked="true" tabindex="0">
+        <div>
+          <div class="txt">立即启动 DeepSeek Harness</div>
+          <div class="sub">可以稍后从开始菜单启动</div>
+        </div>
+        <div class="switch"><span class="knob"></span></div>
+      </div>
+
+      <div class="spacer"></div>
+      <button class="primary" id="finish">完成</button>
+      <button class="textbtn">打开安装目录</button>
+    </section>
+  </div>
+
+  <!-- ── 实现规格表 ── -->
+  <div class="spec">
+    <h3>实现规格表（NSIS 自绘照抄）</h3>
+    <p class="note">颜色是编译期常量（<code>SetCtlColors</code> / <code>GdipCreateSolidFill</code> 都不吃变量）；坐标写 96 DPI 逻辑像素，落位一律 <code>MulDiv(v, $DshDpi, 96)</code>。</p>
+    <table>
+      <thead><tr><th>元素</th><th>尺寸 / 圆角</th><th>深色</th><th>浅色</th><th>字体</th><th>自绘方式</th></tr></thead>
+      <tbody>
+        <tr><td>窗口</td><td>600 × 600</td><td colspan="2"><span class="sw"><span class="chip" style="background:#141417"></span>#141417 / <span class="sw"><span class="chip" style="background:#fff"></span>#FFFFFF</span></span></td><td>—</td><td>无边框 + <code>SetWindowPos(0x34)</code>；圆角需 <code>SetWindowSubclass</code> ⇒ 真机方窗，内容留 1px 边</td></tr>
+        <tr><td>标题栏</td><td>h 44 · 拖动区整条</td><td colspan="2">文字 #7C828B / #868C96</td><td>12.5 / 400</td><td>空 label + <code>SS_NOTIFY</code> 拖动；两个 28×28 按钮 owner-draw</td></tr>
+        <tr><td>品牌瓦片</td><td>44 × 44 · r12</td><td colspan="2">底 #1E1E23 / #F3F4F7，1px #2C2C33 / #E3E5EA</td><td>—</td><td>bitmap（<code>whale.png</code> 32×32 居中）</td></tr>
+        <tr><td>标题 H1</td><td>26 / 650 · 行高 1.25</td><td colspan="2">#F2F3F5 / #0F1115</td><td>Microsoft YaHei UI</td><td>透明 static（<code>SetCtlColors text+bg</code>）或 GDI+ 直绘页面</td></tr>
+        <tr><td>正文</td><td>13 / 400 · 行高 1.65</td><td colspan="2">#A7ACB4 / #5A6069</td><td>同上</td><td>同上</td></tr>
+        <tr><td>卡片</td><td>r14 · padding 16 · 1px</td><td colspan="2">底 #1E1E23 / #F3F4F7，边 #2C2C33 / #E3E5EA</td><td>—</td><td>GDI+ <code>GdipCreatePath</code> + <code>AddPathArcI</code> 圆角矩形</td></tr>
+        <tr><td>路径框</td><td>h 40 · r10</td><td colspan="2">底 #1B1B1F / #F7F8FA，边 #2C2C33 / #E3E5EA</td><td>12.5 / 400</td><td>原生 edit（无边框 + <code>SetCtlColors</code>）或只读 static + 自绘光标</td></tr>
+        <tr><td>次按钮</td><td>h 40 · r10 · padding 16</td><td colspan="2">边 #3A3A43 / #D2D6DE，hover 底 #26262C / #E7E9EE</td><td>12.5 / 500</td><td>owner-draw（<code>NM_CUSTOMDRAW</code>），三态：常态 / hover / pressed</td></tr>
+        <tr><td>主按钮</td><td>h 48 · r12 · 全宽</td><td colspan="2">#4D6BFE，hover #3D5BEE，pressed #3350D8，禁用 #26262C / #E7E9EE</td><td>15 / 600</td><td>owner-draw + GDI+ 圆角填充 + 阴影（叠一层 alpha 描边）</td></tr>
+        <tr><td>文本按钮</td><td>h 32 · r8</td><td colspan="2">#7C828B / #868C96，hover #A7ACB4 / #5A6069</td><td>12.5 / 400</td><td>owner-draw（无边框）</td></tr>
+        <tr><td>进度条</td><td>h 8 · r999</td><td colspan="2">轨道 #26262C / #E7E9EE，填充 #4D6BFE → #6E86FF</td><td>—</td><td>GDI+ 直绘到 static 的 DC（<code>GetDC</code> → <code>GdipFillRectangle</code> → <code>ReleaseDC</code>）</td></tr>
+        <tr><td>步骤行</td><td>h 36 · r10 · 图标 18</td><td colspan="2">完成 #4D6BFE 实心，当前描边转圈，待办 #3A3A43 / #D2D6DE</td><td>12.5 / 400</td><td>图标 + 文本两次 GDI+ 绘制；转圈用 <code>${NSD_CreateTimer}</code> 换帧</td></tr>
+        <tr><td>开关</td><td>44 × 24 · 滑块 18</td><td colspan="2">开 #4D6BFE，关 #26262C / #E7E9EE</td><td>13 / 400</td><td>自绘复选框（<code>drawing.nsh</code> 同款）+ 自绘滑块</td></tr>
+        <tr><td>完成标记</td><td>64 圆 · 勾 30</td><td colspan="2">底 rgba(77,107,254,.12)，勾 #4D6BFE</td><td>—</td><td>GDI+ 圆 + 折线（<code>GdipDrawLinesI</code>）</td></tr>
+      </tbody>
+    </table>
+    <div class="legend">
+      <span><b>owner-draw</b>：<code>NM_CUSTOMDRAW</code> 回调里画，官方 <code>pages.nsh InstallerPaintButton</code> 同款</span>
+      <span><b>GDI+</b>：<code>gdiplus::Gdip*</code> 系统 DLL，零新增依赖</span>
+      <span><b>bitmap</b>：打包期生成资源，<code>File /oname=$PLUGINSDIR\…</code> 释放</span>
+    </div>
+    <p class="note" style="margin:16px 0 0">
+      待定位（真机截图上出现的问题）：① 品牌图整块没渲染出来（<code>${NSD_SetStretchedImage}</code> / 2x 切换 / <code>File</code> 释放哪一环断）；② 文字 label 后面有灰底（<code>SetCtlColors</code> 的底色没对上页面底色）；③ push button / edit / static 全是 Windows 原生 3D 样式。这三条都要在本原型对应的实现票里消掉。
+    </p>
+  </div>
+</div>
+
+<script>
+  const frame = document.getElementById('frame')
+  const captions = { welcome:'安装 DeepSeek Harness', progress:'正在安装', finish:'安装完成' }
+
+  function showPage(name){
+    for (const p of document.querySelectorAll('.page')){
+      const on = p.dataset.page === name
+      p.toggleAttribute('data-active', on)
+      if (on){ p.classList.remove('anim'); void p.offsetWidth; p.classList.add('anim') }
+    }
+    document.getElementById('caption').textContent = captions[name]
+    for (const b of document.querySelectorAll('.toolbar [data-page]'))
+      b.setAttribute('aria-pressed', String(b.dataset.page === name))
+  }
+  function setTheme(name){
+    frame.dataset.theme = name
+    for (const b of document.querySelectorAll('.toolbar [data-theme]'))
+      b.setAttribute('aria-pressed', String(b.dataset.theme === name))
+  }
+  for (const b of document.querySelectorAll('.toolbar [data-page]')) b.onclick = () => showPage(b.dataset.page)
+  for (const b of document.querySelectorAll('.toolbar [data-theme]')) b.onclick = () => setTheme(b.dataset.theme)
+
+  document.getElementById('launchrow').onclick = (e) => {
+    const row = e.currentTarget
+    row.setAttribute('aria-checked', String(row.getAttribute('aria-checked') !== 'true'))
+  }
+
+  // 安装动画：进度条 + 状态文案 + 四个步骤状态依次推进
+  const steps = [...document.querySelectorAll('#steps .step')]
+  const phase = (i) => [
+    ['正在校验安装包完整性…','正在准备安装目录…'],
+    ['正在写入程序文件…','正在写入程序文件…'],
+    ['正在注册并创建快捷方式…','正在注册并创建快捷方式…'],
+    ['正在完成收尾…','正在完成收尾…'],
+  ][i][0]
+  const marks = ['校验完成','目录就绪','已写入','已注册','收尾完成']
+  let timer = null
+
+  document.getElementById('play').onclick = () => {
+    if (timer) { clearInterval(timer); timer = null; return }
+    showPage('progress')
+    let pct = 0
+    const fill = document.getElementById('fill')
+    const knob = document.getElementById('pct')
+    const line = document.getElementById('statusline')
+    const label = document.getElementById('steplabel')
+    fill.style.width = '0%'; knob.textContent = '0%'
+    steps.forEach((s, i) => { s.dataset.state = i === 0 ? 'current' : 'todo'; s.querySelector('[data-tail]').textContent = '' })
+    timer = setInterval(() => {
+      pct = Math.min(100, pct + 1.6)
+      fill.style.width = pct + '%'
+      knob.textContent = Math.round(pct) + '%'
+      const idx = Math.min(3, Math.floor(pct / 25))
+      label.textContent = '第 ' + (idx + 1) + ' / 4 步'
+      line.textContent = phase(idx)
+      steps.forEach((s, i) => {
+        s.dataset.state = pct >= (i + 1) * 25 ? 'done' : (i === idx ? 'current' : 'todo')
+        if (pct >= (i + 1) * 25) s.querySelector('[data-tail]').textContent = marks[i + 1] || ''
+      })
+      if (pct >= 100) { clearInterval(timer); timer = null; setTimeout(() => showPage('finish'), 550) }
+    }, 40)
+  }
+
+  document.getElementById('install').onclick = () => document.getElementById('play').click()
+  document.getElementById('finish').onclick = () => showPage('welcome')
+  document.getElementById('browse').onclick = () => {
+    const box = document.getElementById('pathbox')
+    box.textContent = 'D:\\Apps\\DSHDesktopBun'
+    document.getElementById('donePath').textContent = box.textContent
+  }
+
+  // 截图/评审用：?page=progress&theme=dark&pct=62 直接渲染指定状态（不跑动画）
+  const q = new URLSearchParams(location.search)
+  if (q.get('bare')) document.body.classList.add('bare')
+  if (q.get('theme')) setTheme(q.get('theme'))
+  if (q.get('page')) showPage(q.get('page'))
+  if (q.get('pct') !== null) {
+    const pct = Math.max(0, Math.min(100, Number(q.get('pct')) || 0))
+    const idx = Math.min(3, Math.floor(pct / 25))
+    document.getElementById('fill').style.width = pct + '%'
+    document.getElementById('pct').textContent = Math.round(pct) + '%'
+    document.getElementById('steplabel').textContent = '第 ' + (idx + 1) + ' / 4 步'
+    document.getElementById('statusline').textContent = phase(idx)
+    steps.forEach((s, i) => {
+      s.dataset.state = pct >= (i + 1) * 25 ? 'done' : (i === idx ? 'current' : 'todo')
+      if (pct >= (i + 1) * 25) s.querySelector('[data-tail]').textContent = marks[i + 1] || ''
+    })
+  }
+</script>
+</body>
+</html>

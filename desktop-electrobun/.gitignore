@@ -2,6 +2,8 @@ node_modules/
 runtime/bun-preload.mjs
 resources/tray.png
 resources/tray.ico
+# 安装程序品牌图是构建产物：由 `bun run prepare:installer-assets` 从 resources/app-icon.ico 生成
+installer/assets/
 icon.iconset/
 build/
 artifacts/

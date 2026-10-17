@@ -1,0 +1,140 @@
+name: Installer UI Shots
+
+# #103 安装器 UI 的专用视觉验证（与 build/check 完全解耦，只手动触发）。
+# 载荷是随便造的 stub——打包 installer/*.nsh 源码本身——不构建真实桌面、不跑任何产品测试；
+# 只做三件事：生成品牌图 → makensis 打出安装器 → 在真 Windows 上用内置 --shot 跑完整
+# 安装流程，把每页实际渲染出的位图落成 PNG 传回，供维护者在 macOS 上目视验收。
+# （2026-10-16 教训：/PREVIEW 绿 ≠ 真机对——真路径的崩溃只有真 Windows 出图能兜住。）
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  shots:
+    name: 安装器 UI 真机出图（stub 载荷，明暗两轮）
+    runs-on: windows-latest
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: desktop-electrobun
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      # 品牌图不入库：从 resources/app-icon.ico 现场生成（#92）
+      - name: 品牌图（app-icon.ico → BMP）
+        run: bun run prepare:installer-assets
+
+      # 官方同款进度覆盖层/窗体（window-frame.dll）：真机出图与真机验收都要它；
+      # 本机无 MSVC 时不存在 ⇒ 生成器自动回退纯 NSIS 样式
+      - name: window-frame.dll（MSVC x86）
+        run: |
+          pwsh -File scripts/build-window-frame.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }   # DLL 编译失败必须拦住出图（别拿回退样式当验收依据）
+
+      # stub 构建树 = 安装器自己的源码（任意文件都行，验证样式不需要真实载荷）；
+      # 无 Resources/*.tar.zst ⇒ 生成器走「跳过自解压重命名」分支，不会去下载 zstd
+      - name: stub 载荷（打包安装器自己的源码）
+        run: |
+          $tree = 'build/stable-windows-x64/DeepSeekHarnessDesktopBUN'
+          New-Item -ItemType Directory -Force -Path "$tree/bin" | Out-Null
+          Copy-Item installer/*.nsh $tree/
+          # 生成器按名字找 bin/launcher.exe：这里放一个手写占位文本（不是任何构建产物，
+          # 也不参与任何构建）；载荷=安装器自己的源码，样式验证不关心里面装了什么
+          Set-Content -Path "$tree/bin/launcher.exe" -Value 'stub launcher (hand-written placeholder, no build involved)'
+          Get-ChildItem $tree -Recurse -File | ForEach-Object { Write-Host ("stub 载荷：{0}（{1} B）" -f $_.Name, $_.Length) }
+
+      # DSH_INSTALLER_ALLOW_STUB=1：放行 stub 小产物（远小于 1MB 断言）；不设时断言照旧
+      - name: 打包安装器（makensis）
+        env:
+          DSH_INSTALLER_ALLOW_STUB: '1'
+        run: |
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) { choco install nsis -y --no-progress }
+          bun run build:installer
+
+      - name: 真机出图（--shot，明暗两轮）
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Get-ChildItem artifacts -Recurse -Filter *-setup.exe | Select-Object -First 1
+          if ($null -eq $setup) { throw '找不到 setup.exe' }
+          $shotRoot = Join-Path $env:RUNNER_TEMP 'dsh-shot'
+          New-Item -ItemType Directory -Force -Path $shotRoot | Out-Null
+          foreach ($mode in @('light', 'dark')) {
+            $dir = Join-Path $shotRoot $mode
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            Remove-Item (Join-Path $env:TEMP 'dsh-trace.txt') -ErrorAction SilentlyContinue
+            $argList = @("--shot=$dir")
+            if ($mode -eq 'dark') { $argList += '/THEME=dark' }
+            Write-Host "运行：$($setup.FullName) $($argList -join ' ')"
+            $p = Start-Process -FilePath $setup.FullName -ArgumentList $argList -PassThru
+            # 连拍 10 帧真屏采集（--shot 页切仅 ~700ms/页，单帧会错过 welcome）：
+            # PrintWindow 走 WM_PRINT，owner-draw（NM_CUSTOMDRAW）不会触发——只有屏幕合成像素能判定自绘按钮
+            Add-Type -AssemblyName System.Windows.Forms
+            Add-Type -AssemblyName System.Drawing
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            for ($f = 1; $f -le 10; $f++) {
+              Start-Sleep -Milliseconds 500
+              $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+              $g = [System.Drawing.Graphics]::FromImage($bmp)
+              $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+              $g.Dispose()
+              $bmp.Save((Join-Path $dir ('screen-{0:d2}.png' -f $f)))
+              $bmp.Dispose()
+            }
+            Write-Host '已保存 screen-01..10.png（真实屏幕合成像素连拍）'
+            $deadline = (Get-Date).AddMinutes(2)
+            while (-not $p.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; Write-Host '警告：2 分钟未退出，强制结束' }
+            Write-Host ("{0} 轮退出码：{1}" -f $mode, $p.ExitCode)
+            Get-ChildItem $dir | ForEach-Object { Write-Host ("{0}  {1} B" -f $_.Name, $_.Length) }
+            if (Test-Path (Join-Path $env:TEMP 'dsh-trace.txt')) {
+              Copy-Item (Join-Path $env:TEMP 'dsh-trace.txt') (Join-Path $dir 'trace.txt') -Force
+              Write-Host "--- $mode 轮 trace ---"
+              Get-Content (Join-Path $dir 'trace.txt') | Write-Host
+            }
+            # 一行一文件 trace（%TEMP%\dsh-t）：每次宏调用立即落盘，强杀/崩溃也不丢行——
+            # 判定「完成页回调到底有没有进」只能看它（共享文件句柄那路会被缓冲区拖尾）
+            if (Test-Path (Join-Path $env:TEMP 'dsh-t')) {
+              Copy-Item (Join-Path $env:TEMP 'dsh-t') (Join-Path $dir 'trace-lines') -Recurse -Force
+              Write-Host "--- $mode 轮逐行 trace（尾部 12 条）---"
+              Get-ChildItem (Join-Path $dir 'trace-lines') | Sort-Object { [int]$_.BaseName } | Select-Object -Last 12 | ForEach-Object { Write-Host ("{0}: {1}" -f $_.BaseName, (Get-Content $_.FullName -Raw)) }
+            }
+          }
+          # 白板断路器：welcome 两张图必须存在，且 PNG 体积不能小到像一张纯色白板
+          foreach ($mode in @('light', 'dark')) {
+            $png = Join-Path $shotRoot "$mode\01-welcome.png"
+            if (-not (Test-Path $png)) { throw "$mode 轮没有 01-welcome.png——安装器 UI 没走到出图" }
+            $len = (Get-Item $png).Length
+            if ($len -lt 5000) { throw "$mode 的 01-welcome.png 只有 $len B——疑似白板" }
+          }
+          Write-Host '安装器 UI 真机出图通过（明暗两轮 welcome 均非白板）'
+
+      - name: 上传截图与 trace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-ui-shots
+          path: |
+            ${{ runner.temp }}/dsh-shot/**/*.png
+            ${{ runner.temp }}/dsh-shot/**/trace.txt
+            ${{ runner.temp }}/dsh-shot/**/trace-lines/*
+            ${{ runner.temp }}/dsh-trace.txt
+          if-no-files-found: warn
+
+      - name: 上传 stub 安装器（真机手测）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-stub-setup
+          path: desktop-electrobun/artifacts/windows-x64-DeepSeekHarnessDesktopBUN-setup.exe
+          if-no-files-found: error

@@ -7,3 +7,8 @@ desktop-electrobun/build/
 desktop-electrobun/artifacts/
 desktop-electrobun/builtin-runtime/
 desktop-electrobun/.hutch/
+# window-frame.dll 编译产物（CI 由 scripts/build-window-frame.ps1 现场生成，不入库）
+desktop-electrobun/installer/window-frame.dll
+desktop-electrobun/installer/window-frame.obj
+desktop-electrobun/installer/window-frame.lib
+desktop-electrobun/installer/compile-frame.cmd
