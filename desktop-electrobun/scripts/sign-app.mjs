@@ -267,6 +267,21 @@ if (dmgFiles.length === 0) {
   }
 }
 
+/** hdiutil create 在 runner 上偶发 Resource busy；重试三次，别把可恢复的构建抖动当签名失败。 */
+function createDmgWithRetry(args) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      execFileSync('hdiutil', args, { stdio: 'inherit' })
+      return
+    } catch (error) {
+      if (attempt === 3) throw error
+      console.warn(`[sign-app] hdiutil create 第 ${attempt} 次失败，30s 后重试…`)
+      rmSync(args[args.length - 1], { force: true })
+      execFileSync('sleep', ['30'])
+    }
+  }
+}
+
 /** 用已签名的 .app 重打 DMG（保留 /Applications 拖放入口），覆盖前先挂载复核签名。 */
 function repackDmg(dmgPath, appPath) {
   const appName = basename(appPath)
@@ -280,9 +295,7 @@ function repackDmg(dmgPath, appPath) {
   // ditto 比 cp -R 更忠于 Apple 元数据（资源叉/扩展属性/签名文件），别换成 fs.cpSync
   execFileSync('ditto', [appPath, join(root, appName)], { stdio: 'inherit' })
   execFileSync('ln', ['-s', '/Applications', join(root, 'Applications')], { stdio: 'inherit' })
-  execFileSync('hdiutil', ['create', '-volname', volumeName, '-srcfolder', root, '-ov', '-format', 'UDZO', '-fs', 'HFS+', outDmg], {
-    stdio: 'inherit',
-  })
+  createDmgWithRetry(['create', '-volname', volumeName, '-srcfolder', root, '-ov', '-format', 'UDZO', '-fs', 'HFS+', outDmg])
   try {
     execFileSync('hdiutil', ['attach', '-nobrowse', '-readonly', '-mountpoint', mountPoint, outDmg], { stdio: 'inherit' })
     try {
