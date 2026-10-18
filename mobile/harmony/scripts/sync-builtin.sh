@@ -39,7 +39,7 @@ if [ -f "$PLUGIN" ]; then
   cp "$PLUGIN" "$OUT/plugins/dsh-web-mobile/client.js"
   echo "布局插件已随包：$(du -h "$OUT/plugins/dsh-web-mobile/client.js" | cut -f1)"
 else
-  echo "WARN: 没有布局插件产物（$PLUGIN），手机端将不注入移动布局（Host 自己装了也能用）" >&2
+  echo "WARN: 没有布局插件产物（${PLUGIN}），手机端将不注入移动布局（Host 自己装了也能用）" >&2
 fi
 
-echo "内置前端产物：入口 $ENTRY，共 $(du -sh "$OUT/dsh-frontend" | cut -f1)"
+echo "内置前端产物：入口 ${ENTRY}，共 $(du -sh "$OUT/dsh-frontend" | cut -f1)"

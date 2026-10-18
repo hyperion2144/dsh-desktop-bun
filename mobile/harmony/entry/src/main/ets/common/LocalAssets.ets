@@ -15,6 +15,7 @@
  */
 import http from '@ohos.net.http';
 import fs from '@ohos.file.fs';
+import zlib from '@ohos.zlib';
 import preferences from '@ohos.data.preferences';
 import util from '@ohos.util';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -44,6 +45,8 @@ interface RemoteRequestHeaders {
 
 /** 壳自有状态的 preferences 库名（会话 cookie 与产物版本都存这里）。 */
 const PREF_STORE = 'dsh_mobile_shell';
+/** 最近一次换到的会话（跨 authority 兜底）：局域网/隧道是同一桌面的两扇门，lane 认值不认门。 */
+const LAST_SESSION_KEY = 'session:last';
 
 /** 会话 cookie 的键（按 authority 分开：一台手机可能配多个桌面）。 */
 export function cookieKey(base: string): string {
@@ -72,7 +75,11 @@ export function entryPathOf(url: string): string {
 /** 读壳持有的会话 cookie（没有返回空串）。 */
 export async function loadCookie(context: Context, base: string): Promise<string> {
   const store = await preferences.getPreferences(context, PREF_STORE);
-  return (await store.get(cookieKey(base), '')) as string;
+  const own = (await store.get(cookieKey(base), '')) as string;
+  if (own !== '') return own;
+  // 这个地址没配过对时退回最近一次会话：第三方隧道/换端口等「同一桌面的另一扇门」直接能用；
+  // 真不是同一个桌面时远端 401，用户重扫一次即可（各 base 自己的键不受影响）。
+  return (await store.get(LAST_SESSION_KEY, '')) as string;
 }
 
 async function saveString(context: Context, key: string, value: string): Promise<void> {
@@ -129,6 +136,7 @@ export async function exchangeSession(
       return { ok: false, cookie: '', reason: `set-cookie 形状不认识：${setCookie}` };
     }
     await saveString(context, cookieKey(base), cookie);
+    await saveString(context, LAST_SESSION_KEY, cookie);
     return { ok: true, cookie: cookie, reason: '' };
   } catch (err) {
     const e = err as BusinessError;
@@ -230,10 +238,11 @@ export async function ensureLocalAssets(
     return bundle0;
   }
 
-  const store = await preferences.getPreferences(context, PREF_STORE);
-  const cachedEntry = (await store.get(entryKey(base), '')) as string;
+  // 产物按「入口产物名」内容寻址（dsh-frontend/<entry>），与从哪个地址下载无关——
+  // 局域网里下过的构建，走第三方隧道连同一个桌面时直接复用，不再重复下载
+  //（entryKey(base) 只作记录：隧道 base 没记录 ≠ 没下载过这份构建）。
   const dir = distDirFor(context, entry);
-  if (cachedEntry === entry && fs.accessSync(`${dir}/index.html`)) {
+  if (fs.accessSync(`${dir}/index.html`)) {
     return { dir: dir, entry: entry, files: listFiles(dir) };
   }
 
@@ -307,6 +316,28 @@ export async function cachedAssets(context: Context, base: string): Promise<Loca
     if (fs.accessSync(`${dir}/index.html`)) {
       return { dir: dir, entry: cachedEntry, files: listFiles(dir) };
     }
+  }
+  // entryKey(base) 没记录时（比如这份产物是从局域网那条连接下载的）：按缓存目录扫描兜底——
+  // 缓存按入口名分目录，目录里有 index.html 的就是下载过的构建（通常只有一份），取最新的用。
+  const rootDir = `${context.filesDir}/dsh-frontend`;
+  try {
+    const names = fs.listFileSync(rootDir);
+    let bestDir = '';
+    let bestMtime = -1;
+    for (const name of names) {
+      const d = `${rootDir}/${name}`;
+      if (!fs.accessSync(`${d}/index.html`)) continue;
+      const mtime = fs.statSync(d).mtime;
+      if (mtime > bestMtime) {
+        bestMtime = mtime;
+        bestDir = d;
+      }
+    }
+    if (bestDir !== '') {
+      return { dir: bestDir, entry: bestDir.substring(bestDir.lastIndexOf('/') + 1), files: listFiles(bestDir) };
+    }
+  } catch (err) {
+    // 连目录都没有 = 真没有沙箱缓存，继续走随包内置。
   }
   // 沙箱里没有（首次安装必然如此）：退回**随包内置**那份——这正是「用当前本地运行时」应有的默认，
   // 而不是告诉用户“没有已缓存的产物”（用户实测反馈的原话）。
@@ -492,10 +523,18 @@ export async function downloadFrontend(
   if (entry === '') throw new Error(`包 ${version} 的 index.html 认不出入口产物`);
 
   const dir = distDirFor(context, entry);
-  writeFile(dir, 'index.html', new util.TextEncoder().encodeInto(html).buffer as ArrayBuffer);
 
-  // ③ 完整文件清单走 jsdelivr 数据 API 的 flat 列表（#35：只按 index.html 引用拓文件会漏掉
-  //    全部懒加载 chunk——旧仓 #194 的「只下载几个文件」）；列表拿不到再退 html 引用拓法。
+  // ③ 优先走「单包」：npm 上同一个包只拉 1 个 tgz（~1.3 MB），本地 gzip 解压 + 解 tar 落盘。
+  //    逐文件拉 jsdelivr 要 90 次串行来回，弱网/隧道下慢一个量级，也没有原子性（旧仓 #194 时期的老做法）。
+  const extracted = await downloadViaTarball(context, version, dir, onProgress);
+  if (extracted) {
+    await saveString(context, entryKey(base), entry);
+    await saveString(context, `${entryKey(base)}:version`, version);
+    return { dir: dir, entry: entry, files: listFiles(dir) };
+  }
+
+  // ④ 回退：jsdelivr 逐文件（单包拿不到/解不开时才走这里）。
+  writeFile(dir, 'index.html', new util.TextEncoder().encodeInto(html).buffer as ArrayBuffer);
   let files = flatDistFiles(await httpText(`${NPM_DATA}/${FRONTEND_PKG}@${version}?structure=flat`, ''));
   if (files.length === 0) files = assetPathsOf(html);
   const total = files.length + 1; // index.html 已计入进度
@@ -510,8 +549,137 @@ export async function downloadFrontend(
     done++;
     onProgress?.(done, total, rel);
   }
+
   // 记下这次用的版本与入口：版本给冷启动读缓存用，入口给「与远端重比」用。
   await saveString(context, entryKey(base), entry);
   await saveString(context, `${entryKey(base)}:version`, version);
   return { dir: dir, entry: entry, files: listFiles(dir) };
+}
+
+/** 单包下载（#35 后续）：npm tarball 地址；包名去掉 scope 作文件名前缀。 */
+function tarballUrlFor(version: string): string {
+  const slash = FRONTEND_PKG.indexOf('/');
+  const name = slash >= 0 ? FRONTEND_PKG.substring(slash + 1) : FRONTEND_PKG;
+  return `${NPM_REGISTRY}/${FRONTEND_PKG}/-/${name}-${version}.tgz`;
+}
+
+/** 绝对路径写文件（缓存目录里的临时 .tgz 用）。 */
+function writeFileAbs(path: string, bytes: ArrayBuffer): void {
+  const slash = path.lastIndexOf('/');
+  if (slash > 0) {
+    const parent = path.substring(0, slash);
+    if (!fs.accessSync(parent)) fs.mkdirSync(parent, true);
+  }
+  const file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+  fs.writeSync(file.fd, bytes);
+  fs.closeSync(file);
+}
+
+/** gzip 解压整个文件到内存（1.3 MB 的包，进内存即可；不依赖 zip/tar 系统能力）。 */
+async function gunzipFile(path: string): Promise<Uint8Array> {
+  const gz = zlib.createGZipSync();
+  await gz.gzopen(path, 'rb');
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  const CHUNK = 256 * 1024;
+  while (true) {
+    const buf = new ArrayBuffer(CHUNK);
+    const n = await gz.gzread(buf); // SDK 签名：gzread(buf) 读满或到 EOF，返回字节数
+    if (n <= 0) break;
+    const piece = new Uint8Array(buf.slice(0, n));
+    parts.push(piece);
+    total += n;
+  }
+  await gz.gzclose();
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (let i = 0; i < parts.length; i++) {
+    out.set(parts[i], off);
+    off += parts[i].length;
+  }
+  return out;
+}
+
+/** 读 tar 头里的字符串字段（NUL 结尾）。 */
+function readTarString(bytes: Uint8Array, start: number, len: number): string {
+  let end = start;
+  const limit = start + len;
+  while (end < limit && bytes[end] !== 0) end++;
+  let s = '';
+  for (let i = start; i < end; i++) s += String.fromCharCode(bytes[i]);
+  return s;
+}
+
+/** 读 tar 头里的八进制数字字段。 */
+function readTarOctal(bytes: Uint8Array, start: number, len: number): number {
+  let n = 0;
+  let seen = false;
+  for (let i = start; i < start + len; i++) {
+    const c = bytes[i];
+    if (c === 0) break;
+    if (c === 32) continue;
+    if (c < 48 || c > 55) break;
+    n = n * 8 + (c - 48);
+    seen = true;
+  }
+  return seen ? n : 0;
+}
+
+/** 解 ustar：只取 `package/dist/` 下的普通文件，其余（目录/pax 头/其他包内路径）跳过。 */
+function extractTar(tar: Uint8Array, dir: string): number {
+  const PREFIX = 'package/dist/';
+  let off = 0;
+  let count = 0;
+  while (off + 512 <= tar.length) {
+    const name = readTarString(tar, off, 100);
+    if (name === '') break;
+    const prefix = readTarString(tar, off + 345, 155);
+    const size = readTarOctal(tar, off + 124, 12);
+    const type = tar[off + 156];
+    const full = prefix !== '' ? `${prefix}/${name}` : name;
+    const dataStart = off + 512;
+    if ((type === 0 || type === 48) && full.startsWith(PREFIX)) {
+      const rel = full.substring(PREFIX.length);
+      if (rel !== '' && rel.indexOf('..') < 0) {
+        const copy = new Uint8Array(size);
+        copy.set(tar.subarray(dataStart, dataStart + size));
+        writeFile(dir, rel, copy.buffer as ArrayBuffer);
+        count++;
+      }
+    }
+    off = dataStart + Math.ceil(size / 512) * 512;
+  }
+  return count;
+}
+
+/**
+ * 单包下载 + 本地解包（优先路径）。
+ * 逐文件拉 jsdelivr 要 90 次串行 HTTP（弱网/隧道下慢一个量级，也没有原子性）；
+ * 这里改成「1 个 tgz + gzip 解压 + 解 tar」，失败（网络/解不开/空包）返回 false 交给逐文件回退。
+ */
+async function downloadViaTarball(
+  context: Context,
+  version: string,
+  dir: string,
+  onProgress?: (done: number, total: number, label: string) => void,
+): Promise<boolean> {
+  const tgzPath = `${context.cacheDir}/dsh-frontend-${version}.tgz`;
+  try {
+    onProgress?.(1, 3, `下载运行时包 ${version}`);
+    writeFileAbs(tgzPath, await httpBytes(tarballUrlFor(version)));
+    onProgress?.(2, 3, '解压');
+    const tar = await gunzipFile(tgzPath);
+    const n = extractTar(tar, dir);
+    if (n <= 0) return false;
+    onProgress?.(3, 3, `已解包 ${n} 个文件`);
+    try {
+      fs.unlinkSync(tgzPath);
+    } catch (e) { }
+    return true;
+  } catch (err) {
+    try {
+      fs.unlinkSync(tgzPath);
+    } catch (e) { }
+    return false;
+  }
 }

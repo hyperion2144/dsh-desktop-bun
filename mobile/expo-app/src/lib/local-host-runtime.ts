@@ -53,7 +53,8 @@ const concat = (a: Uint8Array, b: Uint8Array): Uint8Array => {
  * 而它实际收的也是 `Uint8Array`（`Socket.write` 签名接受 string | Buffer | Uint8Array）。
  */
 interface RawSocket {
-  write(data: Uint8Array): unknown;
+  /** 第三个参数是写完成回调（react-native-tcp-socket 支持）；Android 上不传会偶发丢字节。 */
+  write(data: Uint8Array, encoding?: string, cb?: () => void): unknown;
   on(event: string, cb: (data: unknown) => void): unknown;
   end(): unknown;
 }
@@ -82,18 +83,28 @@ export async function startLocalHost(opts: LocalHostRuntimeOptions): Promise<Loc
     let buf: ReturnType<typeof concat> = new Uint8Array(0);
     let started = false;
 
+    // 先写完再关：Android 上 `write()` 是排队的，紧跟 `end()` 会把尚未 flush 的字节丢掉
+    // （实测 WebView 侧表现为 net::ERR_EMPTY_RESPONSE，iOS 不复现）。回调里再 end，
+    // 另加 300ms 兜底（回调可能因实现差异不触发，但数据已经写出）。
     const reply = (res: LocalHostResponse) => {
-      try {
-        socket.write(serializeResponse(res));
-      } catch (e) {
-        log(`[local-host] 写响应失败：${String(e)}`);
-      } finally {
+      let closed = false;
+      const closeOnce = () => {
+        if (closed) return;
+        closed = true;
         try {
           socket.end();
         } catch {
           /* 对端已走 */
         }
+      };
+      try {
+        socket.write(serializeResponse(res), undefined, closeOnce);
+      } catch (e) {
+        log(`[local-host] 写响应失败：${String(e)}`);
+        closeOnce();
+        return;
       }
+      setTimeout(closeOnce, 300);
     };
 
     socket.on('data', (chunk: unknown) => {

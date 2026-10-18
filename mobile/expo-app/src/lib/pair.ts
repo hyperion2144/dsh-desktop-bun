@@ -20,6 +20,8 @@ export interface PairEntry {
   dshAuth?: boolean;
   /** 本机在**对端设备表**里的名字（对方看到你是谁）。 */
   deviceName?: string;
+  /** #175：会话守卫退避基数（毫秒；0/缺省 = 壳缺省 10s）。 */
+  guardBackoffBaseMs?: number;
   /** 最后一次探测成功的时间（毫秒）。 */
   lastSeen?: number;
 }
@@ -80,6 +82,14 @@ export function parsePairInput(input: string, extraToken = ''): PairInput | null
  */
 export function buildEntryUrl(pair: PairInput, scheme = 'http'): string {
   return pair.entryUrl ?? buildEnterUrl(pair.base, scheme);
+}
+
+/**
+ * 组装**配对入口**地址：手输/扫码得到的 token 必须走 `/pair?token=` 才能换到会话 cookie
+ * （只进 base 首页时壳没有一次性入口，首个请求必然 401 unpaired——模拟器实测）。
+ */
+export function buildPairEntryUrl(pair: PairInput, scheme = 'http'): string {
+  return pair.entryUrl ?? `${scheme}://${pair.base}/pair?token=${encodeURIComponent(pair.token)}`;
 }
 
 /**

@@ -6,7 +6,8 @@ import {
   Pressable,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { shellStyles, palette } from '../theme';
+import { shellStyles, palette, spacing } from '../theme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { parsePairInput, type PairEntry } from '../lib/pair';
 
 /** 扫码面板：expo-camera 实时扫码（对齐原型 vScan）。 */
@@ -70,6 +71,7 @@ export function AddPairScreen({
   onCancel: () => void;
   onDone: (p: PairEntry) => void;
 }) {
+  const insets = useSafeAreaInsets();
   const [tab, setTab] = useState<'scan' | 'input'>('scan');
   const [input, setInput] = useState('');
   const [token, setToken] = useState('');
@@ -86,7 +88,7 @@ export function AddPairScreen({
   }
 
   return (
-    <View style={shellStyles.page}>
+    <View style={[shellStyles.page, { paddingTop: spacing.xl + insets.top, paddingBottom: insets.bottom }]}>
       {/* 顶部：标题 + 返回（原型 .top） */}
       <View style={shellStyles.topRow}>
         <Text style={shellStyles.title}>添加配对</Text>

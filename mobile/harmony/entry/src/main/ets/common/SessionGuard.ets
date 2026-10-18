@@ -79,6 +79,8 @@ export class SessionGuard {
   private static instance: SessionGuard | undefined = undefined;
   private controller: webview.WebviewController | undefined = undefined;
   private failures: number = 0;
+  /** #175：对端下发的退避基数（毫秒）；0 = 用 GuardScript 缺省 10s。 */
+  private guardBackoffBaseMs: number = 0;
   private reconnects: number = 0;
   private lastReading: string = '';
   private lastRepair: string = '';
@@ -124,20 +126,24 @@ export class SessionGuard {
     } as GuardState;
   }
 
+  /** #175：接收对端下发的会话守卫退避基数（毫秒）；非法/0 → 用缺省 10s。Index 探测到就写入，WebPage 直接复用。 */
+  setGuardBackoff(baseMs: number): void {
+    this.guardBackoffBaseMs = Number.isFinite(baseMs) && baseMs > 0 ? baseMs : 0;
+  }
+
   /**
-   * 回前台：一律探针确认（维护者 2026-09-27 拍板——不再「挂起 ≥n 秒就整页重载」）。
+   * 回前台：**不做任何探测与修复**（2026-10-18 维护者反馈）。
    *
-   * 挂起后 mux 大概率已被服务端判死，但页面常常收不到 close；轻量重连优先，
-   * 只有探针读不到（页面已无法执行脚本）才兜底重载。
+   * dsh 客户端自身会在回前台后重连；壳再插探针/轻量重连只会在弱网下触发「部分内容重刷」。
+   * 回前台仅打点（挂起时长进日志），修复路径只剩「网络换代」与「渲染崩溃」。
    */
   async onForeground(): Promise<void> {
     if (this.controller === undefined) return;
     const suspended = this.backgroundAt > 0 ? Date.now() - this.backgroundAt : 0;
     this.backgroundAt = 0;
     if (suspended > 0) {
-      hilog.info(DOMAIN, TAG, 'foreground after %{public}dms suspend -> probe', suspended);
+      hilog.info(DOMAIN, TAG, 'foreground after %{public}dms suspend (no probe by design)', suspended);
     }
-    await this.checkAndRepair(RepairReason.FOREGROUND);
   }
 
   /** 网络换代：探针确认后决定是否重载。 */
@@ -152,7 +158,7 @@ export class SessionGuard {
   onRenderCrash(): void {
     if (this.controller === undefined) return;
     this.failures += 1;
-    const delay = backoffDelayMs(this.failures);
+    const delay = backoffDelayMs(this.failures, this.guardBackoffBaseMs);
     const since = this.lastRepairAt > 0 ? Date.now() - this.lastRepairAt : Number.MAX_SAFE_INTEGER;
     if (delay > 0 && since < delay) {
       hilog.warn(DOMAIN, TAG, 'render crash throttled: %{public}dms < backoff %{public}dms', since, delay);
@@ -180,7 +186,7 @@ export class SessionGuard {
       const raw = await controller.runJavaScript(buildGuardProbeScript());
       reading = parseGuardProbeResult(raw);
     } catch (e) {
-      // 注入失败（页面已销毁 / 控制器未附着）：当作「读不到」，走兜底重载判定。
+      // 注入失败（页面已销毁 / 控制器未附着）：按「读不到」处理——不再兜底重载（重载只留给渲染崩溃）。
       reading = null;
       hilog.warn(DOMAIN, TAG, 'probe failed: %{public}s', this.errText(e));
     } finally {
@@ -211,7 +217,7 @@ export class SessionGuard {
       return;
     }
 
-    const delay = backoffDelayMs(this.failures);
+    const delay = backoffDelayMs(this.failures, this.guardBackoffBaseMs);
     const since = this.lastRepairAt > 0 ? Date.now() - this.lastRepairAt : Number.MAX_SAFE_INTEGER;
     if (delay > 0 && since < delay) {
       hilog.info(DOMAIN, TAG, 'throttled: %{public}dms < backoff %{public}dms', since, delay);

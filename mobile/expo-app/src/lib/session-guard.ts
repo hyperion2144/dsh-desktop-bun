@@ -2,16 +2,16 @@
 //
 // 背景（#144）：dsh 0.1.7 网关对 `/api/remote.mux` 每 2s Ping、连丢 2 次即 terminate；壳被挂起
 // （切后台/锁屏）数秒即被判死，而页面常常收不到 close/error → 「能发消息、收不到新消息」。
-// 维护者 2026-09-27 拍板：回前台/网络换代**不整页重载**，先做页面内轻量重连；只有页面已经无法
-// 执行脚本（探针投不进去/读数残缺）才允许兜底重载。本文件是该决定在 expo 壳的落地，判定/退避/
-// 脚本与共享逻辑源逐字同语义（shell-web 有单测锁死那份语义，这里用同一组断言复验）。
+// 维护者 2026-09-27 拍板：回前台/网络换代**不整页重载**，先做页面内轻量重连；2026-10-18 修订：
+// **回前台不探测不修复**（dsh 客户端自身会重连），探测超时/读不到也**不动作**（弱网常态，
+// 强行动手会让页面部分内容重刷）；整页重载只留给渲染崩溃。本文件判定/退避/脚本与共享逻辑源逐字同语义。
 
-/** 探针在页面内的等待上限（毫秒）。 */
-export const GUARD_PROBE_TIMEOUT_MS = 1200;
+/** 探针在页面内的等待上限（毫秒）。弱网隧道下 1.2s 太紧，取 3s（2026-10-18）。 */
+export const GUARD_PROBE_TIMEOUT_MS = 3000;
 /** 连续失败第几次开始退避。 */
 export const BACKOFF_AFTER_FAILURES = 2;
-/** 退避基数（毫秒）。 */
-export const BACKOFF_BASE_MS = 2000;
+/** 退避基数（毫秒）；#175 缺省从 2s 抬到 10s，可由桌面设置 mobile_guard_backoff_ms 经 pair/info 下发覆盖。 */
+export const BACKOFF_BASE_MS = 10000;
 /** 退避上限（毫秒）。 */
 export const BACKOFF_CAP_MS = 30000;
 /** 一次修复动作后的静默期（毫秒）。 */
@@ -23,11 +23,12 @@ export const GUARD_MESSAGE_PREFIX = 'DSH_GUARD:';
 
 export type GuardAction = 'none' | 'wait-network' | 'reconnect' | 'reload';
 
-/** 第 `failures` 次连续失败后的退避时长（毫秒）。 */
-export function backoffDelayMs(failures: number): number {
+/** 第 `failures` 次连续失败后的退避时长（毫秒）；`baseMs` 由壳下发（桌面设置 mobile_guard_backoff_ms）。 */
+export function backoffDelayMs(failures: number, baseMs: number = BACKOFF_BASE_MS): number {
   if (!Number.isFinite(failures) || failures < BACKOFF_AFTER_FAILURES) return 0;
   const step = failures - BACKOFF_AFTER_FAILURES;
-  const raw = BACKOFF_BASE_MS * Math.pow(2, step);
+  const base = Number.isFinite(baseMs) && baseMs > 0 ? baseMs : BACKOFF_BASE_MS;
+  const raw = base * Math.pow(2, step);
   return raw > BACKOFF_CAP_MS ? BACKOFF_CAP_MS : raw;
 }
 
@@ -42,18 +43,18 @@ export function parseGuardProbeResult(raw: unknown): string | null {
 }
 
 /**
- * 读数 → 动作（先过解析，残缺输入按「页面可能已无法执行脚本」处理）。
- * 语义源同 `mobile/shell-web/session-guard.mjs`：`null` = 页面回了消息但它的探测请求超时，
- * 属于「页面活着、链路不健康」→ 轻量重连；只有**完全没回消息**才算页面可能已死 → 兜底重载。
+ * 读数 → 动作（先过解析）。语义源同 `mobile/shell-web/session-guard.mjs`。
+ * `null` = 页面回了消息但它的探测请求超时（弱网常态）→ 不动作；完全没回消息/残缺 → 不动作。
+ * 整页重载只留给渲染崩溃路径（见 use-session-guard 的 onRenderProcessGone）。
  */
 export function actionForReading(reading: unknown): GuardAction {
   const parsed = parseGuardProbeResult(reading);
-  if (parsed === null) return 'reload';
+  if (parsed === null) return 'none';
   const signal = parsed.split('|')[0];
   if (signal === 'ds') return 'none';
   if (signal === 'off') return 'wait-network';
-  if (signal === 'ds0' || signal === 'err' || signal === 'null') return 'reconnect';
-  return 'reload';
+  if (signal === 'ds0' || signal === 'err') return 'reconnect';
+  return 'none';
 }
 
 /** 轻量重连是否应升级为兜底重载。 */

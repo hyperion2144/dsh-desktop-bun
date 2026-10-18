@@ -133,12 +133,18 @@ struct WebPage {
   /**
    * 读壳里存的会话，并**同步种进 ArkWeb 的持久 cookie jar**——配对一次、长期复用，不必每次重扫。
    *（对应桌面 network/web_token.rs 的「会话 cookie 已原生种入 webview」。）
+   *
+   * 必须用四参重载把 includeHttpOnly 传 true：lane 下发的会话 cookie 带 HttpOnly，
+   * 默认的三参 configCookieSync **不会覆盖 HttpOnly cookie**（直接静默丢弃），于是 ArkWeb
+   * 仍以匿名身份请求 → 401 unpair。iOS 侧不存在这一步（配对 302 由 WebKit 原生存下 HttpOnly）。
+   *
+   * 种完用 fetchCookieSync 回读校验（失败只记日志，不阻断导航）。
    */
   private async plantCookie(context: common.UIAbilityContext): Promise<string> {
     const cookie = await loadCookie(context, this.base);
     if (cookie !== '') {
       try {
-        webview.WebCookieManager.configCookieSync(`http://${this.base}/`, cookie);
+        this.syncSessionCookie(`http://${this.base}/`, cookie);
         hilog.info(DOMAIN, TAG, '会话已种入 ArkWeb 持久 jar（重启后无需重扫）');
       } catch (err) {
         const e = err as BusinessError;
@@ -146,6 +152,26 @@ struct WebPage {
       }
     }
     return cookie;
+  }
+
+  /**
+   * 把会话 cookie 同步进 ArkWeb 的持久 jar（四参重载，includeHttpOnly=true 才能覆盖 lane 下发的 HttpOnly cookie）。
+   * 回读校验只用于 hilog 取证：匹配不阻止导航（真失败时页面自己也把 401 展示出来）。
+   */
+  private syncSessionCookie(url: string, cookie: string): void {
+    webview.WebCookieManager.configCookieSync(url, `${cookie}; Path=/; HttpOnly`, false, true);
+    try {
+      const jar = webview.WebCookieManager.fetchCookieSync(url);
+      const hit = jar.includes(cookie);
+      if (hit) {
+        hilog.info(DOMAIN, TAG, 'ArkWeb cookie jar 回读成功（含 HttpOnly）');
+      } else {
+        hilog.warn(DOMAIN, TAG, 'ArkWeb cookie jar 回读未命中（可接受，但不建议）');
+      }
+    } catch (err) {
+      const e = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, '回读 cookie 失败：%{public}s', e.message);
+    }
   }
   /** 起壳内 loopback 服务并把页面切过去（三选一里的「下载」与「用本地」都汇到这里）。 */
   private async startHost(distDir: string, entry: string): Promise<void> {
@@ -262,8 +288,8 @@ struct WebPage {
     // ② 与桌面同一步：**原生把 cookie 种进 webview 的 cookie jar**（桌面是 web_token）。
     if (cookie !== '') {
       try {
-        webview.WebCookieManager.configCookieSync(root, cookie);
-        hilog.info(DOMAIN, TAG, '会话 cookie 已原生种入 ArkWeb（与桌面 web_token 同一步）');
+        this.syncSessionCookie(root, cookie);
+        hilog.info(DOMAIN, TAG, '会话 cookie 已原生种入 ArkWeb（含 HttpOnly，与桌面 web_token 同一步）');
       } catch (err) {
         const e = err as BusinessError;
         hilog.warn(DOMAIN, TAG, '种 cookie 失败：%{public}s', e.message);

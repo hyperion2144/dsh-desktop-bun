@@ -23,6 +23,8 @@ export interface HostInfo {
   tunnelUrl: string;
   /** 对端是否要求会话鉴权。 */
   dshAuth: boolean;
+  /** #175：会话守卫退避基数（毫秒；0 = 对端未下发，壳用缺省 10s）。 */
+  guardBackoffBaseMs: number;
   /** 本机在**对端设备表**里的名字（对方看到你是谁）。 */
   deviceName: string;
 }
@@ -86,5 +88,6 @@ export async function probeHostInfo(base: string, cookie: string): Promise<HostI
     tunnelUrl: custom !== '' ? custom : builtin,
     dshAuth: info.indexOf('"dshAuth":true') >= 0,
     deviceName: devices === '' ? '' : lastDeviceName(devices),
+    guardBackoffBaseMs: numberField(info, 'backoffBaseMs'),
   };
 }

@@ -36,7 +36,7 @@ for f in "${TARGETS[@]}"; do
 
   fail=1
   echo "" >&2
-  echo "拒绝提交：$f 的暂存内容里含签名材料（命中「$hit」）。" >&2
+  echo "拒绝提交：${f} 的暂存内容里含签名材料（命中「${hit}」）。" >&2
   echo "" >&2
   echo "该文件被 git 跟踪，DevEco 自动签名会把本机证书路径与口令写进它。" >&2
   echo "请把签名段挪出暂存区，只提交可移植部分（targetSdkVersion / compatibleSdkVersion 等）：" >&2

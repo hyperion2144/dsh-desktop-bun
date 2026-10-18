@@ -18,11 +18,16 @@ import {
 test('退避：前两次不等待，之后指数增长并封顶', () => {
   expect(backoffDelayMs(0)).toBe(0);
   expect(backoffDelayMs(1)).toBe(0);
-  expect(backoffDelayMs(2)).toBe(2000);
-  expect(backoffDelayMs(3)).toBe(4000);
-  expect(backoffDelayMs(4)).toBe(8000);
+  // #175：缺省基数 2s → 10s；第 4 次即封顶 30s。
+  expect(backoffDelayMs(2)).toBe(10000);
+  expect(backoffDelayMs(3)).toBe(20000);
+  expect(backoffDelayMs(4)).toBe(BACKOFF_CAP_MS);
   expect(backoffDelayMs(9)).toBe(BACKOFF_CAP_MS);
   expect(backoffDelayMs(Number.NaN)).toBe(0);
+  // 壳下发基数（桌面设置 mobile_guard_backoff_ms）：按传入值算，非法值退回缺省。
+  expect(backoffDelayMs(2, 3000)).toBe(3000);
+  expect(backoffDelayMs(3, 3000)).toBe(6000);
+  expect(backoffDelayMs(2, 0)).toBe(10000);
 });
 
 test('探针读数解析：合法形态保留，其余一律 null', () => {
@@ -35,15 +40,15 @@ test('探针读数解析：合法形态保留，其余一律 null', () => {
   expect(parseGuardProbeResult(null)).toBeNull();
 });
 
-test('判定表：健康不动手、掉线轻量重连、无网等网络、只有完全没回消息才兜底重载', () => {
+test('判定表：健康不动手、掉线轻量重连、无网等网络、读不到一律不动（重载只留给渲染崩溃）', () => {
   expect(actionForReading('ds|1|12')).toBe('none');
   expect(actionForReading('ds0|1|12')).toBe('reconnect');
   expect(actionForReading('err|1|-')).toBe('reconnect');
   expect(actionForReading('off|0|-')).toBe('wait-network');
-  // 关键回归：页面回了 null（它自己的探测请求超时）证明页面活着 → 轻量重连，不整页重载
-  expect(actionForReading('null|1|-')).toBe('reconnect');
-  expect(actionForReading(null)).toBe('reload');
-  expect(actionForReading('ds')).toBe('reload');
+  // 2026-10-18 修订：页面回了 null（探测请求超时，弱网常态）不再轻量重连 → 避免部分内容重刷
+  expect(actionForReading('null|1|-')).toBe('none');
+  expect(actionForReading(null)).toBe('none');
+  expect(actionForReading('ds')).toBe('none');
 });
 
 test('升级为兜底重载：只有连续多次轻量重连仍失败才升级', () => {

@@ -4,24 +4,27 @@
 // 被系统挂起的 WebView（iOS 切后台、鸿蒙挂起）数秒内就会被判死，而页面常常收不到 close/error，
 // 于是「能发消息（HTTP POST 每次新建连接）、收不到新消息（mux 下行已死）」。
 //
-// 修复顺序（维护者 2026-09-27 拍板「都走 B」）：
+// 修复顺序（维护者 2026-09-27 拍板「都走 B」，2026-10-18 修订）：
 //   1. 页面内**轻量重连**：先让 dsh 客户端重连（offline→online 事件对，官方恢复路径），不整页重载；
-//   2. 连续多次轻量重连无效 → 才整页重载（**仅**当页面已无法执行脚本/白屏时立即重载）。
-//   整页重载从「回前台/网络换代」的常规路径里彻底移除：那会丢掉页面状态、每次切 App 都整页重来。
+//   2. 连续多次轻量重连无效 → 才整页重载（**仅**页面已无法执行脚本/渲染崩溃时）；
+//   3. **回前台不探测、不修复**：dsh 客户端自身会重连，壳再插一手会在弱网下制造「部分内容重刷」；
+//      探测超时/读不到同样不动作（弱网常态），整页重载只留给渲染崩溃。
 //
 // 本文件是**唯一逻辑源**：鸿蒙壳（ArkTS）与 expo 壳（TS）按其语义移植。改这里必须同步两端。
 // 契约（与两端的探针/注入保持一致）：
 //   - 探针读数 = `信号|在线|套接字`，信号 ∈ {ds, ds0, off, null, err}；解析失败一律 null（按需修复）。
 //   - 动作 ∈ {none, wait-network, reconnect, reload}；轻量重连与兜底重载都走同一套退避与静默期。
 
-/** 探针在页面内的等待上限（毫秒）；壳侧等待应显著大于它。 */
-export const GUARD_PROBE_TIMEOUT_MS = 1200;
+/** 探针在页面内的等待上限（毫秒）；壳侧等待应显著大于它。弱网隧道下 1.2s 太紧，取 3s（2026-10-18）。 */
+export const GUARD_PROBE_TIMEOUT_MS = 3000;
 
 /** 连续失败第几次开始退避（前几次直接修，避免把偶发超时拖成慢性病）。 */
 export const BACKOFF_AFTER_FAILURES = 2;
 
-/** 退避步长基数（毫秒）：第 n 次失败等待 `BASE * 2^(n-2)`。 */
-export const BACKOFF_BASE_MS = 2000;
+/** 退避步长基数（毫秒）：第 n 次失败等待 `BASE * 2^(n-2)`。
+ *  #175：缺省从 2s 抬到 10s——弱网/隧道下 2s 仍会让「断—重连」高频抖动；可由桌面设置
+ *  `mobile_guard_backoff_ms` 覆盖（经 lane 的 pair/info 下发），两端按传入基数算。 */
+export const BACKOFF_BASE_MS = 10000;
 
 /** 退避上限（毫秒）。 */
 export const BACKOFF_CAP_MS = 30000;
@@ -43,12 +46,14 @@ export const GUARD_ACTION = Object.freeze({
   RELOAD: 'reload',
 });
 
-/** 第 `failures` 次连续失败后的退避时长（毫秒）；未达阈值返回 0。 */
-export function backoffDelayMs(failures) {
+/** 第 `failures` 次连续失败后的退避时长（毫秒）；未达阈值返回 0。
+ *  `baseMs` 由壳下发（桌面设置 mobile_guard_backoff_ms），缺省用本文件的 BACKOFF_BASE_MS。 */
+export function backoffDelayMs(failures, baseMs = BACKOFF_BASE_MS) {
   const n = Number(failures);
   if (!Number.isFinite(n) || n < BACKOFF_AFTER_FAILURES) return 0;
   const step = n - BACKOFF_AFTER_FAILURES;
-  const raw = BACKOFF_BASE_MS * Math.pow(2, step);
+  const base = Number.isFinite(Number(baseMs)) && Number(baseMs) > 0 ? Number(baseMs) : BACKOFF_BASE_MS;
+  const raw = base * Math.pow(2, step);
   return raw > BACKOFF_CAP_MS ? BACKOFF_CAP_MS : raw;
 }
 
@@ -72,23 +77,23 @@ export function parseGuardProbeResult(raw) {
  *
  * - `ds`  页面已启动且探针可达 → 不动手
  * - `off` 页面自己说没网 → 等网络恢复事件（重连/重载都没意义）
- * - `ds0` 页面在、客户端没起来 → 轻量重连（不再整页重载）
+ * - `ds0` 页面在、客户端没起来 → 轻量重连
  * - `err` 页面在、探针请求失败 → 轻量重连
- * - `null` **页面回了消息**、只是它自己的探测请求超时 → 轻量重连（能回消息就证明页面活着）
- * - 其它（含**完全没回消息**、读数残缺）→ 兜底重载（页面可能已无法执行脚本）
+ * - `null` **页面回了消息**、只是它自己的探测请求超时 → 不动手（弱网常态；dsh 客户端自愈）
+ * - 其它（含**完全没回消息**、读数残缺）→ 不动手（读不到 ≠ 页面已死；整页重载只留给渲染崩溃，
+ *   2026-10-18 维护者反馈：弱网误判会导致页面部分内容重刷，宁可不动）
  *
- * 需要「页面完全无法执行脚本且连探针都投不进去」的判定由壳侧承担：注入失败同样传 `null`。
+ * 需要「页面完全无法执行脚本」的判定由壳侧的渲染崩溃回调承担，本表不返回 reload。
  */
 export function actionForReading(reading) {
-  // 先过解析：判定只接受完整读数，残缺/异常的输入一律按「页面可能已无法执行脚本」处理，
-  // 免得一个残缺字符串（例如只有 "ds"）被当成健康。
+  // 先过解析：判定只接受完整读数；残缺/异常的输入不再当「页面已死」处理。
   const parsed = parseGuardProbeResult(reading);
-  if (parsed === null) return GUARD_ACTION.RELOAD;
+  if (parsed === null) return GUARD_ACTION.NONE;
   const signal = parsed.split('|')[0];
   if (signal === 'ds') return GUARD_ACTION.NONE;
   if (signal === 'off') return GUARD_ACTION.WAIT_NETWORK;
-  if (signal === 'ds0' || signal === 'err' || signal === 'null') return GUARD_ACTION.RECONNECT;
-  return GUARD_ACTION.RELOAD;
+  if (signal === 'ds0' || signal === 'err') return GUARD_ACTION.RECONNECT;
+  return GUARD_ACTION.NONE;
 }
 
 /**

@@ -18,6 +18,7 @@ function ports(overrides: Partial<RemoteSessionPorts> = {}): RemoteSessionPorts 
     cookie: null,
     exchange: async () => ({ ok: true, cookie: 'dsh_mobile_session=tok9' }),
     fetchRemoteHtml: async () => ({ ok: true, html: MATCH_HTML }),
+    fetchUpstream: async () => ({ status: 200, headers: {}, body: 'upstream-body' }),
     localDists: [{ id: '0.2.0-rc.2', entry: 'index-5SrrfWpU.js', files: ['assets/index-5SrrfWpU.js'] } as never],
     download: async () => ({ ok: true, dist: dist('0.2.0-rc.2', 'index-5SrrfWpU.js') }),
     readDistFile: async () => new Uint8Array([1]),

@@ -31,7 +31,7 @@ extract() {
 }
 
 status() {
-  echo "跟踪文件 $BP："
+  echo "跟踪文件 ${BP}："
   if grep -q '"signingConfigs": \[\]' "$BP"; then
     echo "  signingConfigs: []（干净，可安全提交）"
   elif grep -q '"signingConfigs"' "$BP"; then
@@ -39,7 +39,7 @@ status() {
   else
     echo "  ⚠ 找不到 signingConfigs"
   fi
-  echo "本机副本 $LOCAL："
+  echo "本机副本 ${LOCAL}："
   if [ -f "$LOCAL" ]; then
     echo "  存在（$(grep -c . "$LOCAL") 行，权限 $(stat -f '%Lp' "$LOCAL" 2>/dev/null || echo '?'))"
   else
@@ -61,7 +61,7 @@ case "${1:-}" in
     echo "（本脚本不自动改跟踪文件，避免误清；清空后 git diff 应只剩可移植配置）"
     ;;
   --apply)
-    [ -f "$LOCAL" ] || die "找不到 $LOCAL。先用 DevEco 自动签名，再 --save。"
+    [ -f "$LOCAL" ] || die "找不到 ${LOCAL}。先用 DevEco 自动签名，再 --save。"
     grep -q '"signingConfigs": \[\]' "$BP" \
       || die "$BP 的 signingConfigs 不是空数组，先手工确认，避免覆盖有效配置。"
     # 用本机签名段替换空的 signingConfigs

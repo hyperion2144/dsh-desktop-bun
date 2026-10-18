@@ -11,17 +11,17 @@
  *  - `ds|1|u`  页面在线（`__DSH_BOOT__` 存在）
  *  - `ds|0|u`  页面上下文在，但 dsh 客户端没起来（导航中 / 白屏）
  *  - `off|0|u` `navigator.onLine` 为 false（无网络，重载没意义）
- *  - `null|0|u` fetch 超时 / 无网络栈（需要重载）
- *  - `err|0|u` fetch 抛异常（DNS / 拒绝连接，需要重载）
+ *  - `null|0|u` fetch 超时 / 无网络栈（弱网常态，不动作）
+ *  - `err|0|u` fetch 抛异常（DNS / 拒绝连接 → 轻量重连）
  *
  * 第三段是页面侧 WebSocket 状态（诊断用，不参与判定）：dsh 主包不在全局保留
  * 连接句柄（`RemoteStreamCarrier` 是闭包内部的类，`__ModuleLoader__` 也取不到实例），
- * 壳侧诚实报 `-`，不去猜。「服务端已判死而页面以为还活着」这条线索改由
- * `parseGuardProbeResult` 的兜底重载覆盖，不依赖状态直读。
+ * 壳侧诚实报 `-`，不去猜。「服务端已判死而页面以为还活着」这条线索改由轻量重连覆盖
+ * （读不到不重载），不依赖状态直读。
  */
 
-/** 探针等待页面应答的超时（毫秒）。 */
-export const PROBE_TIMEOUT_MS = 1200;
+/** 探针等待页面应答的超时（毫秒）。弱网隧道下 1.2s 太紧，取 3s（2026-10-18）。 */
+export const PROBE_TIMEOUT_MS = 3000;
 
 /**
  * 生成探针脚本。
@@ -83,32 +83,33 @@ export enum GuardAction {
 export const RELOAD_AFTER_RECONNECT_FAILURES = 3;
 /** 连续失败第几次开始退避。 */
 export const BACKOFF_AFTER_FAILURES = 2;
-/** 退避基数（毫秒）。 */
-export const BACKOFF_BASE_MS = 2000;
+/** 退避基数（毫秒）；#175 缺省从 2s 抬到 10s，可由桌面设置 mobile_guard_backoff_ms 经 pair/info 下发覆盖。 */
+export const BACKOFF_BASE_MS = 10000;
 /** 退避上限（毫秒）。 */
 export const BACKOFF_CAP_MS = 30000;
 
-/** 第 failures 次连续失败后的退避时长（毫秒）。 */
-export function backoffDelayMs(failures: number): number {
+/** 第 failures 次连续失败后的退避时长（毫秒）；baseMs 由桌面设置经 pair/info 下发（0 = 缺省）。 */
+export function backoffDelayMs(failures: number, baseMs: number = BACKOFF_BASE_MS): number {
   if (!Number.isFinite(failures) || failures < BACKOFF_AFTER_FAILURES) return 0;
   const step = failures - BACKOFF_AFTER_FAILURES;
-  const raw = BACKOFF_BASE_MS * Math.pow(2, step);
+  const base = Number.isFinite(baseMs) && baseMs > 0 ? baseMs : BACKOFF_BASE_MS;
+  const raw = base * Math.pow(2, step);
   return raw > BACKOFF_CAP_MS ? BACKOFF_CAP_MS : raw;
 }
 
 /**
  * 判定读数对应的动作（语义源同上 `actionForReading`）。
  * `ds` 健康；`off` 设备没网等网络事件；`ds0`/`err` 轻量重连；
- * `null` **页面回了消息**但它的探测请求超时 → 轻量重连（能回消息就证明页面活着；
- * 把它当“读不到”会让 iPad 每 20s 假重载一次，已实机回归）；其余（完全没回消息/残缺）→ 兜底重载。
+ * `null`（页面回了消息但探测请求超时，弱网常态）与**读不到/残缺**一律不动手——
+ * 整页重载只留给渲染崩溃路径（2026-10-18 维护者反馈：弱网误判会导致部分内容重刷）。
  */
 export function actionForReading(reading: string | null): GuardAction {
-  if (reading === null || reading === undefined) return GuardAction.RELOAD;
+  if (reading === null || reading === undefined) return GuardAction.NONE;
   const signal = reading.split('|')[0];
   if (signal === 'ds') return GuardAction.NONE;
   if (signal === 'off') return GuardAction.WAIT_NETWORK;
-  if (signal === 'ds0' || signal === 'err' || signal === 'null') return GuardAction.RECONNECT;
-  return GuardAction.RELOAD;
+  if (signal === 'ds0' || signal === 'err') return GuardAction.RECONNECT;
+  return GuardAction.NONE;
 }
 
 /** 轻量重连是否应升级为兜底重载。 */

@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { BackHandler, Platform } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { HomeScreen, type EnterTarget } from './src/screens/HomeScreen';
 import { AddPairScreen } from './src/screens/AddPairScreen';
 import { WebScreen, type AndroidBackRefs } from './src/screens/WebScreen';
 import { addPair, setActive } from './src/store';
-import { buildEntryUrl, type PairEntry } from './src/lib/pair';
+import { buildPairEntryUrl, type PairEntry } from './src/lib/pair';
 
 export default function App() {
   const [target, setTarget] = useState<EnterTarget | null>(null);
@@ -34,40 +35,28 @@ export default function App() {
     return () => sub.remove();
   }, [target]);
 
-  if (target) {
-    return (
-      <>
-        <StatusBar style="dark" />
+  return (
+    <SafeAreaProvider>
+      <StatusBar style="dark" />
+      {target ? (
         <WebScreen
           target={target}
           onBack={() => setTarget(null)}
           androidBackRefs={androidBackRefs.current}
         />
-      </>
-    );
-  }
-
-  if (adding) {
-    return (
-      <>
-        <StatusBar style="dark" />
+      ) : adding ? (
         <AddPairScreen
           onCancel={() => setAdding(false)}
           onDone={(p: PairEntry) => {
             addPair(p);
             setActive(p.base);
             setAdding(false);
-            setTarget({ url: buildEntryUrl(p), base: p.base, name: p.name ?? p.base });
+            setTarget({ url: buildPairEntryUrl(p), base: p.base, name: p.name ?? p.base });
           }}
         />
-      </>
-    );
-  }
-
-  return (
-    <>
-      <StatusBar style="dark" />
-      <HomeScreen onEnter={setTarget} onAdd={() => setAdding(true)} />
-    </>
+      ) : (
+        <HomeScreen onEnter={setTarget} onAdd={() => setAdding(true)} />
+      )}
+    </SafeAreaProvider>
   );
 }

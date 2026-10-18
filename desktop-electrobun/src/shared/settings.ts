@@ -19,6 +19,11 @@ export const DEFAULT_MUX_HEARTBEAT_MS = 30_000
 export const MUX_HEARTBEAT_MIN = 1_000
 export const MUX_HEARTBEAT_MAX = 600_000
 
+/** #175：移动端会话守卫的退避基数（毫秒）——弱网下断-重连抖动的容忍度。缺省 10s（原实现硬编码 2s）。 */
+export const DEFAULT_MOBILE_GUARD_BACKOFF_MS = 10_000
+export const MOBILE_GUARD_BACKOFF_MIN = 1_000
+export const MOBILE_GUARD_BACKOFF_MAX = 600_000
+
 export const PROXY_MODES = ['off', 'system', 'manual'] as const
 export type ProxyMode = (typeof PROXY_MODES)[number]
 
@@ -93,6 +98,8 @@ export interface DesktopSettings {
   proxyPass?: string
   downloadConcurrency?: number
   muxHeartbeatMs?: number
+  /** #175：移动端会话守卫退避基数（毫秒）；不下发 0 表示用壳缺省 10s。 */
+  mobileGuardBackoffMs?: number
   desktopLayoutOnPhones?: boolean
   /** 已废弃：视觉窗口化在换壳时整块删掉了（#200 收尾）。保留只为旧配置原样往返。 */
   desktopRenderBudget?: boolean
@@ -141,6 +148,7 @@ export function serializeSettings(settings: DesktopSettings): Record<string, unk
   put('proxy_pass', settings.proxyPass)
   put('download_concurrency', settings.downloadConcurrency)
   put('mux_heartbeat_ms', settings.muxHeartbeatMs)
+  put('mobile_guard_backoff_ms', settings.mobileGuardBackoffMs)
   put('desktop_layout_on_phones', settings.desktopLayoutOnPhones)
   put('desktop_render_budget', settings.desktopRenderBudget)
   put('prevent_sleep', settings.preventSleep)
@@ -226,6 +234,7 @@ export function defaultSettings(): DesktopSettings {
     remoteList: [],
     downloadConcurrency: DEFAULT_DOWNLOAD_CONCURRENCY,
     muxHeartbeatMs: DEFAULT_MUX_HEARTBEAT_MS,
+    mobileGuardBackoffMs: DEFAULT_MOBILE_GUARD_BACKOFF_MS,
     desktopLayoutOnPhones: false,
     preventSleep: true,
     devTools: false,
@@ -339,6 +348,9 @@ export function normalizeSettings(raw: unknown): DesktopSettings {
     remoteList: stringList(pick('remoteList', 'remote_list')),
     downloadConcurrency: int(pick('downloadConcurrency', 'download_concurrency'), DOWNLOAD_CONCURRENCY_MIN, DOWNLOAD_CONCURRENCY_MAX) ?? base.downloadConcurrency,
     muxHeartbeatMs: int(pick('muxHeartbeatMs', 'mux_heartbeat_ms'), MUX_HEARTBEAT_MIN, MUX_HEARTBEAT_MAX) ?? base.muxHeartbeatMs,
+    mobileGuardBackoffMs:
+      int(pick('mobileGuardBackoffMs', 'mobile_guard_backoff_ms'), MOBILE_GUARD_BACKOFF_MIN, MOBILE_GUARD_BACKOFF_MAX) ??
+      base.mobileGuardBackoffMs,
     desktopLayoutOnPhones: bool(pick('desktopLayoutOnPhones', 'desktop_layout_on_phones')) ?? base.desktopLayoutOnPhones,
     preventSleep: bool(pick('preventSleep', 'prevent_sleep')) ?? base.preventSleep,
     devTools: bool(pick('devTools', 'dev_tools')) ?? base.devTools,
@@ -538,6 +550,7 @@ function port(value: unknown): number | undefined {
   push('proxyUrl', settings.proxyUrl, undefined)
   push('downloadConcurrency', settings.downloadConcurrency, base.downloadConcurrency)
   push('muxHeartbeatMs', settings.muxHeartbeatMs, base.muxHeartbeatMs)
+  push('mobileGuardBackoffMs', settings.mobileGuardBackoffMs, base.mobileGuardBackoffMs)
   push('preventSleep', settings.preventSleep, base.preventSleep)
   push('devTools', settings.devTools, base.devTools)
   push('loopbackAggregation', settings.loopbackAggregation, base.loopbackAggregation)

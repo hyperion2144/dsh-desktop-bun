@@ -1,13 +1,12 @@
 // 会话守卫的壳侧编排（#144）：把 src/lib/session-guard.ts 的纯判定接到 WebView 上。
 //
-// 三条触发路径（维护者拍板：都走「页面内轻量重连优先」）：
-//   1. 回前台（AppState → active）：探针一次；
-//   2. 前台可达性看门狗：定时 fetch 目标 base，失败→成功跳变视作网络换代（无 NetInfo 依赖）；
-//   3. 渲染进程崩溃（onContentProcessDidTerminate / onRenderProcessGone）：页面已无法执行脚本 → 兜底重载。
-// 探针读数只能经 postMessage 回读；壳侧另设超时——超时未回 = 页面读不到 = 兜底重载。
+// 触发路径（2026-10-18 修订后只剩两条）：
+//   1. 前台可达性看门狗：定时 fetch 目标 base，失败→成功跳变视作网络换代（无 NetInfo 依赖）；
+//   2. 渲染进程崩溃（onContentProcessDidTerminate / onRenderProcessGone）：页面已无法执行脚本 → 兜底重载。
+// 回前台**不探测**（dsh 客户端自身会重连；壳再插一手在弱网下会制造部分内容重刷）。
+// 探针读数只能经 postMessage 回读；壳侧另设超时——超时未回按「读不到」处理，而「读不到」不动作。
 
 import { useCallback, useEffect, useRef } from 'react';
-import { AppState, type AppStateStatus } from 'react-native';
 import type { WebView } from 'react-native-webview';
 import type { WebViewMessageEvent } from 'react-native-webview';
 import {
@@ -56,6 +55,8 @@ export function useSessionGuard(
   webRef: React.RefObject<WebView | null>,
   base: string,
   label = 'session-guard',
+  /** #175：退避基数（毫秒），0 = 用本机缺省（10s）。由桌面设置经 pair/info 下发。 */
+  guardBackoffBaseMs = 0,
 ): SessionGuardHooks {
   const c = useRef<GuardCounters>({
     failures: 0,
@@ -128,7 +129,7 @@ export function useSessionGuard(
       }
       if (action === 'wait-network') return; // 设备没网：等可达性看门狗的下一次成功跳变
       c.current.failures += 1;
-      const delay = backoffDelayMs(c.current.failures);
+      const delay = backoffDelayMs(c.current.failures, guardBackoffBaseMs);
       const since = c.current.lastRepairAt > 0 ? Date.now() - c.current.lastRepairAt : Number.MAX_SAFE_INTEGER;
       if (delay > 0 && since < delay) {
         console.warn(`[${label}] throttled: ${since}ms < backoff ${delay}ms`);
@@ -160,19 +161,14 @@ export function useSessionGuard(
   /** 渲染进程崩溃：页面已无法执行脚本 → 直接兜底重载（仍受退避约束）。 */
   const onRenderProcessGone = useCallback(() => {
     c.current.failures += 1;
-    const delay = backoffDelayMs(c.current.failures);
+    const delay = backoffDelayMs(c.current.failures, guardBackoffBaseMs);
     const since = c.current.lastRepairAt > 0 ? Date.now() - c.current.lastRepairAt : Number.MAX_SAFE_INTEGER;
     if (delay > 0 && since < delay) return;
     reloadPage('render-crash');
   }, [reloadPage]);
 
-  // 回前台 → 探针一次（不再整页重载）
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (s: AppStateStatus) => {
-      if (s === 'active') probe('foreground');
-    });
-    return () => sub.remove();
-  }, [probe]);
+  // 回前台**不探测**：dsh 客户端自身会在回前台后重连，壳再插一手反而在弱网下制造「部分内容重刷」
+  // （2026-10-18 维护者反馈）。探测只在「可达性失败→成功跳变」时发生；重载只在渲染崩溃时发生。
 
   // 前台可达性看门狗：失败→成功跳变 = 网络换代；顺带在长期停留前台时兜一次探针
   useEffect(() => {

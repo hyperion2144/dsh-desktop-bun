@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parsePairInput, buildEnterUrl, buildEntryUrl, createPairStore, parseDeepLink } from './pair';
+import { parsePairInput, buildEnterUrl, buildEntryUrl, buildPairEntryUrl, createPairStore, parseDeepLink } from './pair';
 
 describe('parsePairInput 三种形态', () => {
   it('dsh-mobile:// 深链', () => {
@@ -35,6 +35,18 @@ describe('buildEnterUrl / buildEntryUrl', () => {
   it('entryUrl 优先（http 配对链接先走 /pair 自动配对）', () => {
     expect(buildEntryUrl({ token: 't', base: 'a.cn:3091', entryUrl: 'https://a.cn:3091/pair?token=t' })).toBe('https://a.cn:3091/pair?token=t');
     expect(buildEntryUrl({ token: 't', base: 'a.cn:3091' })).toBe('http://a.cn:3091/');
+  });
+});
+
+describe('buildPairEntryUrl 配对入口地址', () => {
+  it('手输/深链的 token 必须走 /pair?token=', () => {
+    expect(buildPairEntryUrl({ token: 't9', base: 'a.cn:3091' })).toBe('http://a.cn:3091/pair?token=t9');
+  });
+  it('已有 entryUrl 原样用（http 配对链接）', () => {
+    expect(buildPairEntryUrl({ token: 't', base: 'a.cn:3091', entryUrl: 'https://a.cn:3091/pair?token=t' })).toBe('https://a.cn:3091/pair?token=t');
+  });
+  it('token 做 URL 编码', () => {
+    expect(buildPairEntryUrl({ token: 'a b&c', base: 'a.cn:3091' })).toBe('http://a.cn:3091/pair?token=a%20b%26c');
   });
 });
 

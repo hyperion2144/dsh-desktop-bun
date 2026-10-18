@@ -20,12 +20,17 @@ import {
 test('退避：前两次不等待，之后指数增长并封顶', () => {
   assert.equal(backoffDelayMs(0), 0);
   assert.equal(backoffDelayMs(1), 0);
-  assert.equal(backoffDelayMs(2), 2000);
-  assert.equal(backoffDelayMs(3), 4000);
-  assert.equal(backoffDelayMs(4), 8000);
-  assert.equal(backoffDelayMs(5), 16000);
+  // #175：缺省基数从 2s 抬到 10s（弱网下 2s 抖动太密）。
+  assert.equal(backoffDelayMs(2), 10000);
+  assert.equal(backoffDelayMs(3), 20000);
+  assert.equal(backoffDelayMs(4), BACKOFF_CAP_MS, '第 4 次已封顶 30s');
   assert.equal(backoffDelayMs(9), BACKOFF_CAP_MS, '指数增长封顶 30s');
   assert.equal(backoffDelayMs(Number.NaN), 0);
+  // 壳下发基数（桌面设置 mobile_guard_backoff_ms）：按传入值算，非法值退回缺省。
+  assert.equal(backoffDelayMs(2, 3000), 3000);
+  assert.equal(backoffDelayMs(3, 3000), 6000);
+  assert.equal(backoffDelayMs(2, 0), 10000);
+  assert.equal(backoffDelayMs(2, Number.NaN), 10000);
 });
 
 test('探针读数解析：合法形态保留，其余一律 null（绝不误判健康）', () => {
@@ -42,16 +47,15 @@ test('探针读数解析：合法形态保留，其余一律 null（绝不误判
   assert.equal(parseGuardProbeResult(null), null);
 });
 
-test('判定表：健康不动手、掉线轻量重连、无网等网络、只有完全没回消息才兜底重载', () => {
+test('判定表：健康不动手、掉线轻量重连、无网等网络、读不到一律不动（重载只留给渲染崩溃）', () => {
   assert.equal(actionForReading('ds|1|12'), GUARD_ACTION.NONE);
   assert.equal(actionForReading('ds0|1|12'), GUARD_ACTION.RECONNECT, '页面在但客户端没起来 → 轻量重连');
   assert.equal(actionForReading('err|1|-'), GUARD_ACTION.RECONNECT, '探针请求失败 → 轻量重连');
   assert.equal(actionForReading('off|0|-'), GUARD_ACTION.WAIT_NETWORK);
-  // 关键回归（#144 实机：iPad 隔一会刷新一次）：`null` 是**页面回了消息**但它的探测请求超时，
-  // 页面明明活着 → 只能轻量重连；把它当“读不到”会变成周期性假重载。
-  assert.equal(actionForReading('null|1|-'), GUARD_ACTION.RECONNECT, '页面回了 null（探测超时）→ 轻量重连');
-  assert.equal(actionForReading(null), GUARD_ACTION.RELOAD, '完全没回消息/注入失败 → 兜底重载');
-  assert.equal(actionForReading('ds'), GUARD_ACTION.RELOAD, '残缺读数 → 兜底重载');
+  // 2026-10-18 修订：`null` 是页面回了消息但探测请求超时（弱网常态）→ 不再轻量重连，避免部分内容重刷。
+  assert.equal(actionForReading('null|1|-'), GUARD_ACTION.NONE, '页面回了 null（探测超时）→ 不动作');
+  assert.equal(actionForReading(null), GUARD_ACTION.NONE, '完全没回消息/注入失败 → 不动作（重载只留给渲染崩溃）');
+  assert.equal(actionForReading('ds'), GUARD_ACTION.NONE, '残缺读数 → 不动作');
 });
 
 test('升级为兜底重载：只有连续多次轻量重连仍失败才升级', () => {

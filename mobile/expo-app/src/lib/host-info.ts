@@ -20,6 +20,8 @@ export interface HostInfo {
   /** 可用隧道地址（自定义优先，否则内置隧道）；空串 = 只能直连。 */
   tunnelUrl: string;
   dshAuth: boolean;
+  /** #175：会话守卫退避基数（毫秒；0 = 对端未下发，壳用缺省 10s）。 */
+  guardBackoffBaseMs: number;
   /** 本机在**对端设备表**里的名字（对方看到你是谁）。 */
   deviceName: string;
 }
@@ -60,6 +62,7 @@ export function parseHostInfo(infoJson: string, devicesJson: string): HostInfo {
     tunnelUrl: custom !== '' ? custom : builtin,
     dshAuth: infoJson.indexOf('"dshAuth":true') >= 0,
     deviceName: devicesJson === '' ? '' : lastDeviceName(devicesJson),
+    guardBackoffBaseMs: numberField(infoJson, 'backoffBaseMs'),
   };
 }
 

@@ -5,6 +5,7 @@ import { http } from '@kit.NetworkKit';
 import { Theme } from '../common/Theme';
  import { createPairStore, PairLogic, PairEntry, PairInput, PairStorage } from '../common/PairLogic';
  import { probeHostInfo, HostInfo } from '../common/HostInfo';
+import { SessionGuard } from '../common/SessionGuard';
  import { loadCookie } from '../common/LocalAssets';
 
 // 简化存储适配器：内存态 + preferences 落盘。
@@ -249,6 +250,8 @@ struct Index {
       .then((cookie: string) => probeHostInfo(base, cookie))
       .then((info: HostInfo | null) => {
         if (info === null) return;
+        // #175：把对端下发的退避基数交给会话守卫单例（WebPage 进入后直接复用）。
+        SessionGuard.get().setGuardBackoff(info.guardBackoffBaseMs);
         const st = createPairStore(this.store);
         const list = st.list();
         for (const e of list) {

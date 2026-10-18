@@ -12,15 +12,16 @@ function dist(version: string, entry: string): FrontendDist {
 
 function ports(overrides: Partial<RemoteSessionPorts> = {}): {
   ports: RemoteSessionPorts;
-  hosts: Array<{ distFiles: string[]; bundled: string[] }>;
+  hosts: Array<{ distFiles: string[]; bundled: string[]; hasUpstream?: boolean }>;
 } {
-  const hosts: Array<{ distFiles: string[]; bundled: string[] }> = [];
+  const hosts: Array<{ distFiles: string[]; bundled: string[]; hasUpstream?: boolean }> = [];
   const base: RemoteSessionPorts = {
     base: '192.168.3.90:3092',
     entryPath: '/pair?token=T',
     cookie: null,
     exchange: async () => ({ ok: true, cookie: 'dsh_mobile_session=tok9' }),
     fetchRemoteHtml: async () => ({ ok: true, html: REMOTE_HTML_MATCH }),
+    fetchUpstream: async () => ({ status: 200, headers: {}, body: 'upstream-body' }),
     localDists: [{ id: '0.2.0-rc.2', entry: 'index-5SrrfWpU.js', files: ['assets/index-5SrrfWpU.js', 'index.html'] } as never],
     download: async () => ({ ok: true, dist: dist('0.2.0-rc.2', 'index-5SrrfWpU.js') }),
     readDistFile: async () => new Uint8Array([1]),
@@ -30,6 +31,7 @@ function ports(overrides: Partial<RemoteSessionPorts> = {}): {
       hosts.push({
         distFiles: [...(opts.distFiles as string[])],
         bundled: Object.keys(opts.bundledPlugins ?? {}),
+        hasUpstream: typeof opts.fetchUpstream === 'function',
       });
       return { port: 4321, url: 'http://127.0.0.1:4321/', stop: async () => {} };
     },
@@ -52,6 +54,8 @@ describe('openRemoteSession', () => {
     expect(hosts).toHaveLength(1);
     expect(hosts[0].distFiles).toContain('assets/index-5SrrfWpU.js');
     expect(hosts[0].bundled).toEqual(['dsh-web-mobile']);
+    // 壳内服务拿到的必须是**真**上游：曾写成固定 502 桩时，本地页面组装取远端首页恒失败 → 白屏。
+    expect(hosts[0].hasUpstream).toBe(true);
   });
 
   it('换取会话失败不中止：照常比版本并 settled（cookie 为 null）', async () => {

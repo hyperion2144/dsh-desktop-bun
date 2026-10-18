@@ -103,15 +103,24 @@ export async function createRemotePorts(opts: RemotePortsOptions): Promise<Remot
   };
   syncLocalDists();
 
-  const upstream = createUpstreamPort({ base: opts.base, cookie: cachedCookie, fetchImpl });
+  // 会话 cookie 是**活**的：首次配对/换会话发生在 ports 建好之后（openRemoteSession 的①），
+  // 若在这里快照成 cachedCookie（首启为 null），换到的 cookie 只落存储、不进上游端口——
+  // 「下载对应运行时」第一跳 fetchRemoteHtml 仍以匿名身份拿 401，三选一原地打转（模拟器实测）。
+  let sessionCookie = cachedCookie;
+  let upstream = createUpstreamPort({ base: opts.base, cookie: sessionCookie, fetchImpl });
 
   return {
     base: opts.base,
     entryPath: opts.entryPath ?? null,
-    cookie: cachedCookie,
+    get cookie() { return sessionCookie; },
     exchange: async (base: string, entryPath: string) => {
       const res = await exchangeForSession({ base, entryPath, fetchImpl });
-      if (res.ok) await opts.store.setItem(cookieKey(base), res.cookie);
+      if (res.ok) {
+        sessionCookie = res.cookie;
+        // 重建上游端口，后续取官页/转发/下载重比全部带新会话。
+        upstream = createUpstreamPort({ base: opts.base, cookie: sessionCookie, fetchImpl });
+        await opts.store.setItem(cookieKey(base), res.cookie);
+      }
       return res;
     },
     fetchRemoteHtml: async () => {
@@ -123,6 +132,8 @@ export async function createRemotePorts(opts: RemotePortsOptions): Promise<Remot
       // 能取到页面但认不出入口产物（老版 dsh）：由编排那边判 unavailable，这里只回 HTML。
       return { ok: true as const, html: html || '' };
     },
+    // 壳内服务（本地页面拼装 + API/资产转发）的真上游：会话 cookie 跟着活值走。
+    fetchUpstream: (req) => upstream(req),
     localDists,
     download: async (remoteEntry?: string | null) => {
       const out = await downloadFrontendDist({ fetchBytes: fetchImpl, remoteEntry: remoteEntry ?? null });

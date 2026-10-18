@@ -29,6 +29,8 @@ export interface DesktopData {
   profiles: Array<{ name: string; active: boolean; selectable: boolean }>
   /** #144 网关心跳覆盖（null/缺省 = 壳默认 30s；0 = 不覆盖） */
   mux_heartbeat_ms?: number | null
+  /** #175 移动端会话守卫退避基数（毫秒；null/缺省 = 壳默认 10000，范围 1s..600s） */
+  mobile_guard_backoff_ms?: number | null
   /** #147 路线 A：手机端是否改用桌面布局 */
   desktop_layout_on_phones?: boolean | null
   /** #186 防休眠：有会话在跑时阻止系统休眠（缺省 true；屏幕仍会照常熄灭） */

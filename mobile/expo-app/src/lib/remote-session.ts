@@ -11,6 +11,7 @@ import { buildGate, entryName, type GateResult, type LocalDist } from '../../../
 import type { FrontendDist } from './frontend-assets';
 import type { DownloadFrontendResult } from './frontend-assets';
 import type { LocalHostRuntime, LocalHostRuntimeOptions } from './local-host-runtime';
+import type { UpstreamRequest, UpstreamResponse } from './local-host';
 import type { SessionExchangeResult } from './session';
 
 export interface RemoteSessionPorts {
@@ -24,6 +25,12 @@ export interface RemoteSessionPorts {
   exchange?: (base: string, entryPath: string) => Promise<SessionExchangeResult>;
   /** 端口：取远端首页 HTML（已带会话）。 */
   fetchRemoteHtml: () => Promise<{ ok: true; html: string } | { ok: false; reason: string }>;
+  /**
+   * 端口：请求远端（已带会话）——壳内服务组装本地页面、转发 API/资产时走它。
+   * 必须是**真**上游：本地页面拼装的首页与后续数据都从这里出（#175 白屏 bug：这里曾写死成 502 桩，
+   * 下载成功后本地服务拿不到远端首页，WebView 只能停在「取远端首页失败（HTTP 502）」白页）。
+   */
+  fetchUpstream: (req: UpstreamRequest) => Promise<UpstreamResponse>;
   /** 已缓存可用的本地 dist 清单（可能多于一份：历史下载的版本）。 */
   localDists: LocalDist[];
   /** 端口：下载前端 dist（真实实现走 npm；测试注入假货）。 */
@@ -85,7 +92,9 @@ export async function openRemoteSession(ports: RemoteSessionPorts): Promise<Remo
 
   // ② 取远端首页：拿不到就没法比版本 —— 这是 `unavailable`，不是"缺产物"。
   const html = await ports.fetchRemoteHtml();
+  log(html.ok ? `[session] 远端首页已取到（${html.html.length} 字节）` : `[session] 远端首页失败：${html.reason}`);
   const remoteEntry = html.ok ? entryName(html.html) : null;
+  log(`[session] 远端入口产物：${remoteEntry ?? '未识别'}`);
 
   // ③ 版本闸门。
   const gate = buildGate({ remoteEntry, localDists: asLocalDists(null, ports.localDists) });
@@ -167,12 +176,15 @@ async function settle(
     readDistFile: ports.readDistFile,
     bundledPlugins: ports.bundledPluginSource ? { 'dsh-web-mobile': ports.bundledPluginSource } : {},
     pluginRev: ports.pluginRev,
-    fetchUpstream: async () => ({ status: 502, headers: {}, body: 'fetchUpstream 端口未注入' }),
+    fetchUpstream: (req) => ports.fetchUpstream(req),
     // 会话一并交给壳内服务：HTTP 面由 fetchUpstream 注入，**WS 面靠这条**（升级请求自身要带会话）。
     cookie: ports.cookie ?? null,
     onLog: log,
   });
-  log(`[host] 壳内服务已起：${host.url}（产物 ${dist.id} / ${dist.entry}）`);
+  // Android 实测：WebView 偶发拿到 net::ERR_EMPTY_RESPONSE（回环服务刚 bind 完、首个请求偶发落空）。
+  // 握一次手再交给 WebView；失败只记日志（WebView 侧还有重试），不升级成闸门。
+  const ready = await probeLocalHost(host.url);
+  log(`[host] 壳内服务已起：${host.url}（产物 ${dist.id} / ${dist.entry}）${ready ? '' : ' · 首请求探测失败'}`);
   return { kind: 'settled', url: host.url, cookie, version: dist.id, entry: dist.entry };
 }
 
@@ -185,4 +197,18 @@ async function settle(
 function distEntryFiles(ports: RemoteSessionPorts, dist: LocalDist): string[] {
   const hit = ports.localDists.find((d) => d.id === dist.id) as (LocalDist & { files?: string[] }) | undefined;
   return hit?.files ?? [];
+}
+
+/** 回环服务握手：连不通就退避重试几次，只用于「起服务后自检」。 */
+async function probeLocalHost(url: string, attempts = 4): Promise<boolean> {
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      const res = await fetch(url, { method: 'GET' });
+      if (res.status > 0) return true;
+    } catch {
+      /* 继续重试 */
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 80 * (i + 1)));
+  }
+  return false;
 }

@@ -95,6 +95,34 @@ describe('createRemotePorts', () => {
     expect(store.dump()[cookieKey('h:1')]).toBe('dsh_mobile_session=new');
   });
 
+  it('exchange 后新 cookie 立刻用于取首页（首启缓存为 null 也不能匿名打 401）', async () => {
+    const seen: string[] = [];
+    const fetchImpl = (async (url: string, init?: { headers?: Record<string, string> }) => {
+      const cookie = String(init?.headers?.cookie ?? '');
+      seen.push(`${url}|${cookie}`);
+      if (url === 'http://h:1/pair?token=T') {
+        return {
+          status: 302,
+          headers: { get: (n: string) => (n.toLowerCase() === 'set-cookie' ? 'dsh_mobile_session=new; Path=/' : null) },
+          arrayBuffer: async () => new ArrayBuffer(0),
+          text: async () => '',
+        };
+      }
+      const ok = cookie.includes('dsh_mobile_session=new');
+      return {
+        status: ok ? 200 : 401,
+        headers: { get: () => null },
+        arrayBuffer: async () => enc(ok ? INDEX_HTML : '{"error":"unpaired"}').buffer,
+        text: async () => (ok ? INDEX_HTML : '{"error":"unpaired"}'),
+      };
+    }) as unknown as FetchLike & FetchBytes;
+    const ports = await createRemotePorts({ base: 'h:1', store: memStore(), fetchImpl });
+    await ports.exchange?.('h:1', '/pair?token=T');
+    expect(ports.cookie).toBe('dsh_mobile_session=new');
+    expect(await ports.fetchRemoteHtml()).toEqual({ ok: true, html: INDEX_HTML });
+    expect(seen.some((s) => s.startsWith('http://h:1/|') && s.includes('dsh_mobile_session=new'))).toBe(true);
+  });
+
   it('fetchRemoteHtml：200 回 HTML；非 2xx 回明确 reason（不把错误页当页面）', async () => {
     const ok = await createRemotePorts({
       base: 'h:1',

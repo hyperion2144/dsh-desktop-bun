@@ -7,8 +7,9 @@ import {
   Alert,
   Linking,
 } from 'react-native';
-import { shellStyles, palette } from '../theme';
-import { parsePairInput, buildEnterUrl, type PairEntry } from '../lib/pair';
+import { shellStyles, palette, spacing } from '../theme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { parsePairInput, buildEnterUrl, buildPairEntryUrl, type PairEntry } from '../lib/pair';
 import { addPair } from '../store';
 import { probeHostInfo, type HostInfo } from '../lib/host-info';
 import { appStore } from '../lib/use-remote-ports';
@@ -21,7 +22,7 @@ import {
   getActiveBase,
 } from '../store';
 
-export type EnterTarget = { url: string; base: string; name: string };
+export type EnterTarget = { url: string; base: string; name: string; guardBackoffBaseMs?: number };
 
 /** 探测一个 base 是否在线（fetch HEAD 到 base，成功=在线）。 */
 function useOnline(base: string): boolean {
@@ -116,6 +117,7 @@ export function HomeScreen({ onEnter, onAdd }: {
   onAdd: () => void;
 }) {
   const [list, setList] = useState<PairEntry[]>([]);
+  const insets = useSafeAreaInsets();
 
   const refresh = useCallback(() => setList([...pairs()]), []);
 
@@ -132,7 +134,9 @@ export function HomeScreen({ onEnter, onAdd }: {
   function handleDeepLink(url: string) {
     const p = parsePairInput(url);
     if (!p) return;
-    enterPair({ ...p, name: '扫码配对' });
+    // 深链/扫码是「配对入口」：必须带 token 的 /pair 地址进页面，壳才会去换会话 cookie；
+    // 走列表的 enterPair（base 首页）会丢掉 token，首屏就 401，只能看到三选一「读不到远程版本」。
+    onEnter({ url: buildPairEntryUrl(p), base: p.base, name: '扫码配对' });
   }
 
   function enterPair(p: PairEntry) {
@@ -140,7 +144,8 @@ export function HomeScreen({ onEnter, onAdd }: {
     // 列表进入：永远走 base 首页（cookie 已种，自动放行）。
     // 绝不用 entryUrl——那是配对链接（/pair?token=..），令牌一次性已用掉，
     // 重复访问必失败（"配对失败，令牌过期"）。配对成功的 cookie 在 WebView 里。
-    onEnter({ url: buildEnterUrl(p.base), base: p.base, name: p.name ?? p.base });
+    // #175：对端下发的退避基数随配对记录携带（探测得到则用，未知则壳用缺省 10s）。
+    onEnter({ url: buildEnterUrl(p.base), base: p.base, name: p.name ?? p.base, guardBackoffBaseMs: p.guardBackoffBaseMs });
   }
 
   function onRemove(base: string) {
@@ -151,7 +156,7 @@ export function HomeScreen({ onEnter, onAdd }: {
   }
 
   return (
-    <View style={shellStyles.page}>
+    <View style={[shellStyles.page, { paddingTop: spacing.xl + insets.top, paddingBottom: insets.bottom }]}>
       {/* 顶部：标题 + 添加配对按钮（原型 .top） */}
       <View style={shellStyles.topRow}>
         <Text style={shellStyles.title}>DSH Mobile</Text>

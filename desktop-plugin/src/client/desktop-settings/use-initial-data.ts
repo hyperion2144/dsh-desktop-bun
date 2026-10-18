@@ -5,7 +5,7 @@
 // 后果是每个 setter 都成了跨卡的隐式契约：谁都能写、谁都在等，卡片没法单独拿走自己的那份。
 // 现在一次 fetch 折成一个值，**派生规则逐字照旧**（ns 优先、回退口径、迁移 select 的填充行为都没动），
 // 卡片只从 `data` 上取自己那几个字段。顺带把「一次挂载刷二十次 setState」变成一次。
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke, nsGet } from './rpc.ts'
 import { loopbackAggregationMode, type LoopbackAggregationMode } from './loopback-aggregation.ts'
 import type { DesktopData, ProxySettings } from './types.ts'
@@ -47,6 +47,12 @@ export function useInitialData(onLoadError: (text: string) => void): {
 } {
   const [data, setData] = useState<InitialData>(INITIAL)
   const [loaded, setLoaded] = useState<InitialData | null>(null)
+  // #175：父层传进来的 onLoadError 往往是内联箭头函数（每次渲染都换身份）。
+  // 如果把它放进挂载 effect 的依赖里，就会变成「渲染 → 重拉 → setData(新对象) → 重渲染」
+  // 的无限循环——桌面设置面板实测会把正在输入的字段（mux 心跳）反复冲回盘上值。
+  // 用 ref 固定最新回调，挂载 effect 只跑一次。
+  const onLoadErrorRef = useRef(onLoadError)
+  onLoadErrorRef.current = onLoadError
 
   useEffect(() => {
     let cancelled = false
@@ -95,14 +101,14 @@ export function useInitialData(onLoadError: (text: string) => void): {
 
       } catch (err) {
         if (cancelled) return
-        onLoadError(`读取设置失败：${String(err)}`)
+        onLoadErrorRef.current(`读取设置失败：${String(err)}`)
       }
     })()
     return () => {
       cancelled = true
     }
-    // 只在挂载时拉一次（onLoadError 是 setState，稳定引用）
-  }, [onLoadError])
+    // 只在挂载时拉一次：回调走 onLoadErrorRef，避免内联箭头导致的无限重拉（#175）。
+  }, [])
 
   const refreshData = useCallback(async (): Promise<void> => {
     try {
