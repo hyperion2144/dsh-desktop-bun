@@ -17,6 +17,8 @@ import {
   updateNoticeModel,
   type UpdateNoticePayload,
 } from './update-notice-dialog.ts'
+import { dialogTitlebarFrameHeight } from './dialog-titlebar.ts'
+import type { CarrierPlatform } from './carrier.ts'
 
 /** BrowserWindow 的最小结构（测试用假窗即可，不必真开窗）。 */
 export interface NoticeWindowLike {
@@ -55,7 +57,13 @@ export interface UpdateNoticeWindowHandle {
 
 export function createUpdateNoticeWindow(
   ctor: NoticeWindowCtor,
-  options: { renderer?: 'native' | 'cef'; title?: string; rpc?: unknown } = {},
+  options: {
+    renderer?: 'native' | 'cef'
+    title?: string
+    rpc?: unknown
+    /** #164：建窗平台。win32/linux 才画标题带，窗高相应 +一段。 */
+    platform?: CarrierPlatform
+  } = {},
 ): UpdateNoticeWindowHandle {
   let win: NoticeWindowLike | null = null
 
@@ -76,11 +84,15 @@ export function createUpdateNoticeWindow(
       }
       win = new ctor({
         title: options.title ?? UPDATE_NOTICE_TITLE,
-        html: updateNoticeHtml(payload),
+        html: updateNoticeHtml({ ...payload, platform: options.platform }),
         ...(options.renderer === undefined ? {} : { renderer: options.renderer }),
         ...(options.rpc === undefined ? {} : { rpc: options.rpc }),
         titleBarStyle: 'hiddenInset',
-        frame: { width: UPDATE_NOTICE_WIDTH, height: UPDATE_NOTICE_HEIGHT },
+        // #164：带占掉的那一段要还给窗高，否则内容被压缩；页面量高重设时那条已含带。
+        frame: {
+          width: UPDATE_NOTICE_WIDTH,
+          height: dialogTitlebarFrameHeight(UPDATE_NOTICE_HEIGHT, options.platform ?? 'darwin'),
+        },
       })
       win.on('closed', forget)
       return win

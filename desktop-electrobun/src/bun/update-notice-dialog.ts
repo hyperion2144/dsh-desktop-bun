@@ -29,6 +29,13 @@ import {
 } from '../shared/runtime-update.ts'
 import type { UpdateNoticeTarget } from '../shared/update-notice-policy.ts'
 import {
+  DIALOG_CLOSE_ATTR,
+  DIALOG_TITLEBAR_CLASS,
+  dialogTitlebar,
+  dialogTitlebarStyle,
+} from './dialog-titlebar.ts'
+import type { CarrierPlatform } from './carrier.ts'
+import {
   DEFAULT_SHELL_THEME,
   shellThemeAttr,
   shellThemeStyle,
@@ -53,6 +60,9 @@ export const UPDATE_NOTICE_CLOSE_METHOD = 'update_notice_close'
 /** 选型定的窗尺寸（B 变体：更宽更矮）。 */
 export const UPDATE_NOTICE_WIDTH = 560
 export const UPDATE_NOTICE_HEIGHT = 300
+
+/** #164：标题带上的窗名（hiddenInset 下窗标题看不见，只能在带上说）。 */
+export const UPDATE_NOTICE_BAND_TITLE = '可用更新'
 
 /**
  * 页面量出内容高后叫壳改窗高（#130 实机反馈）。
@@ -81,6 +91,8 @@ export function updateNoticeResizeHeight(value: unknown): number | null {
 export interface UpdateNoticePayload {
   /** 产品主题偏好（缺省跟随系统）。服务端按 profile 的 ui-theme 配置填。 */
   theme?: ShellThemePreference
+  /** #164：建窗平台。win32/linux 才画标题带（hiddenInset 没有原生控件）；缺省按 darwin 算。 */
+  platform?: CarrierPlatform
   /** 窗属于哪个 profile（多 profile 合并成一张卡时，取命中的第一个）。 */
   profile: string
   /** 同一张卡覆盖到的全部 profile（1 个时不提这回事）。 */
@@ -232,6 +244,19 @@ function button(label: string, op: unknown, primary: boolean, disabled = false):
 /** B 变体的内嵌 HTML。数据经 `updateNoticeModel` 归一，文案只讲「在跑什么、能更到什么」。 */
 export function updateNoticeHtml(payload: UpdateNoticePayload): string {
   const model = updateNoticeModel(payload)
+  // #164：win32/linux 上 hiddenInset 没有原生控件，自绘一条标题带（关窗键 + 拖拽面）。
+  const band = dialogTitlebar({
+    platform: payload.platform ?? 'darwin',
+    title: UPDATE_NOTICE_BAND_TITLE,
+  })
+  const bandCss =
+    band.html === ''
+      ? ''
+      : [
+          dialogTitlebarStyle(),
+          '  body { position: relative; }',
+          `  .${DIALOG_TITLEBAR_CLASS} { padding-top: 46px; }`,
+        ].join('\n')
   if (model === null) {
     // 不该走到这里：调用方先看 updateNoticeModel()，为 null 就不开窗。留一页体面话兜底。
     return `<!doctype html>
@@ -318,10 +343,13 @@ ${shellThemeStyle()}
    .empty { text-align: center; padding: 24px 0; color: var(--dsw-alias-label-secondary, #9a9aa2); }
    #msg { margin-top: 8px; min-height: 16px; font-size: 11px; color: var(--dsw-alias-label-secondary, #9a9aa2); }
    #msg.err { color: var(--dsw-alias-state-danger, #ff8787); }
+${bandCss}
 </style>
 </head>
-<body>
+<body${band.bodyClass === '' ? '' : ` class="${band.bodyClass.trim()}"`}>
+${band.html}
 <div class="head">
+  <!-- #164：带已占住顶部，body 留位；标题那行照旧（它讲的是「有几种更新」，与带上的窗名不是一回事）。 -->
   <div class="title">${escapeHtml(model.title)}</div>
   <div class="subtitle">${escapeHtml(model.subtitle)}</div>
 </div>
@@ -450,6 +478,12 @@ ${shellCol}${runtimeCol}
   function closeSelf() {
     return invokeShell(${jsString(UPDATE_NOTICE_CLOSE_METHOD)}).catch(function () {})
   }
+  // #164：标题带的关闭键与 ESC 都接同一个 closeSelf——win32/linux 上 hiddenInset 没有原生控件。
+  var closeBtn = document.querySelector('[${DIALOG_CLOSE_ATTR}]')
+  if (closeBtn) closeBtn.addEventListener('click', closeSelf)
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') closeSelf()
+  })
   document.querySelectorAll('[data-op]').forEach(function (el) {
     el.addEventListener('click', function () {
       if (el.hasAttribute('disabled')) return

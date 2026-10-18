@@ -7,6 +7,7 @@ import {
   profileDialogHtml,
   profileOpRequest,
 } from '../src/bun/profile-dialog.ts'
+import { DIALOG_CLOSE_ATTR, DIALOG_TITLEBAR_CLASS } from '../src/bun/dialog-titlebar.ts'
 
 describe('isValidProfileName', () => {
   test('合法名', () => {
@@ -77,6 +78,13 @@ function scriptOf(html: string): string {
   return html.slice(start + '<script>'.length, end)
 }
 
+/** 标记部分（<script> 之前）：标题带只在标记里，脚本里那条 querySelector 是平台无关的。 */
+function markupOf(html: string): string {
+  const start = html.lastIndexOf('<script>')
+  if (start < 0) throw new Error('没找到 <script>')
+  return html.slice(0, start)
+}
+
 /** 页面脚本通过原生桥发出去的一条请求。 */
 interface SentRequest {
   type: string
@@ -94,6 +102,10 @@ interface Harness {
   respond(id: number, packet: Record<string, unknown>): void
   /** 跑掉页面登记的定时器（成功后请壳关窗那一步就在 setTimeout 里） */
   runTimers(): void
+  /** #164：标题带上的关闭键；darwin 页面没画带（无此键） */
+  closeButton(): { click(): unknown } | undefined
+  /** 敲一个键（目前只有 Esc 绑了行为） */
+  pressKey(key: string): void
   dispose(): void
 }
 
@@ -107,7 +119,15 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
  */
 function runScript(
   source: string,
-  inputs: { target?: string; source?: string; overwrite?: boolean; bridge?: boolean; ids?: string[] } = {},
+  inputs: {
+    target?: string
+    source?: string
+    overwrite?: boolean
+    bridge?: boolean
+    ids?: string[]
+    /** #164：页面画了标题带（win32/linux）；默认 false = darwin（只有系统红绿灯） */
+    titlebar?: boolean
+  } = {},
 ): Harness {
   const sent: SentRequest[] = []
   const elements = new Map<string, any>()
@@ -147,9 +167,32 @@ function runScript(
   // 定时器收起来而不是丢掉：页面里 `setTimeout(closeSelf, 1200)` 是成功后关窗的那一步（#162），
   // 丢掉了等于这条路径一次都没跑过。
   const timers: (() => unknown)[] = []
+  // #164：标题带的关闭键与页面级键盘监听（ESC）。harness 只认这一种选择器，别的一律抛。
+  const closeEl = {
+    listeners: new Map<string, (event: unknown) => unknown>(),
+    addEventListener(event: string, fn: (event: unknown) => unknown) {
+      this.listeners.set(event, fn)
+    },
+    click(): unknown {
+      const fn = this.listeners.get('click')
+      if (fn === undefined) throw new Error('关闭键没绑 click')
+      return fn({})
+    },
+  }
+  const keydown: ((event: { key: string }) => unknown)[] = []
+  const documentStub = {
+    getElementById: elementOf,
+    querySelector(selector: string): typeof closeEl | null {
+      if (selector !== `[${DIALOG_CLOSE_ATTR}]`) throw new Error(`harness 不认的选择器：${selector}`)
+      return inputs.titlebar === true ? closeEl : null
+    },
+    addEventListener(event: string, fn: (event: unknown) => unknown) {
+      if (event === 'keydown') keydown.push(fn as (event: { key: string }) => unknown)
+    },
+  }
   const run = new Function('document', 'window', 'setTimeout', source)
   run(
-    { getElementById: elementOf },
+    documentStub,
     // window.close 在这种 html: 文档里是空操作（#160/#162），桩成抛错：谁把它写回去谁当场炸。
     {
       close() {
@@ -176,6 +219,12 @@ function runScript(
     },
     runTimers(): void {
       for (const fn of timers.splice(0)) fn()
+    },
+    closeButton(): { click(): unknown } | undefined {
+      return inputs.titlebar === true ? closeEl : undefined
+    },
+    pressKey(key: string): void {
+      for (const fn of keydown) fn({ key })
     },
     dispose(): void {
       globals.__electrobunHostBridge = savedBridge
@@ -400,5 +449,70 @@ describe('profileOpRequest（原生桥入参的形状门）', () => {
     expect(profileOpRequest('create')).toBeNull()
     expect(profileOpRequest({ op: 'delete', target: 'x' })).toBeNull()
     expect(profileOpRequest({})).toBeNull()
+  })
+})
+
+// #164：win32/linux 上 hiddenInset 没有原生控件，弹窗自绘一条标题带（关窗键 + 拖拽面）；
+// darwin 有系统红绿灯，一行都不该多。mac 上没画带就意味着 #162 的成功关窗是唯一出路。
+describe('profileDialogHtml 的标题带（#164）', () => {
+  test('darwin 不画带：没有带、没有留位 class、标题照旧居中', () => {
+    // 只查标记部分：脚本里那条 querySelector 是平台无关的（darwin 上查到 null，什么也不做）
+    const markup = markupOf(profileDialogHtml('create', ['desktop'], 'dark', 'darwin'))
+    expect(markup).not.toContain('dlg-titlebar')
+    expect(markup).not.toContain(DIALOG_TITLEBAR_CLASS)
+    expect(markup).not.toContain(DIALOG_CLOSE_ATTR)
+    expect(markup).toContain('<body>')
+  })
+
+  test('win32 / linux 画带：body 留位 class + 关窗键 + 拖拽面', () => {
+    for (const platform of ['win32', 'linux'] as const) {
+      const html = profileDialogHtml('migrate', ['desktop'], 'dark', platform)
+      expect(html).toContain('<body class="dlg-with-titlebar">')
+      expect(html).toContain('dlg-titlebar')
+      expect(html).toContain(DIALOG_CLOSE_ATTR)
+      expect(html).toContain('electrobun-webkit-app-region-drag')
+      // 带上有标题，正文里那个 16px 大标题就不重复画（CSS 隐藏）
+      expect(html).toContain('迁移 Profile')
+      expect(html).toContain(`.${DIALOG_TITLEBAR_CLASS} .title { display: none; }`)
+      expect(html).toContain(`${DIALOG_TITLEBAR_CLASS} { padding-top: 46px; }`)
+    }
+  })
+
+  test('点关窗键 → 走 profile_close（页面自己关不掉自己）', () => {
+    const html = profileDialogHtml('create', ['desktop'], 'dark', 'win32')
+    const harness = runScript(scriptOf(html), { titlebar: true, ids: ['target'] })
+    try {
+      const button = harness.closeButton()
+      if (button === undefined) throw new Error('标题带上没有关闭键')
+      button.click()
+      expect(harness.sent.map((row) => row.method)).toEqual([PROFILE_CLOSE_METHOD])
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  test('ESC 也关窗（win/linux 弹窗的惯例路径）', () => {
+    const html = profileDialogHtml('create', ['desktop'], 'dark', 'win32')
+    const harness = runScript(scriptOf(html), { titlebar: true, ids: ['target'] })
+    try {
+      harness.pressKey('Escape')
+      expect(harness.sent.map((row) => row.method)).toEqual([PROFILE_CLOSE_METHOD])
+      // 别的键不关窗：否则输入框里打字会直接把窗关了
+      harness.sent.length = 0
+      harness.pressKey('a')
+      expect(harness.sent).toEqual([])
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  test('darwin 页面没有关闭键（关窗只由系统红绿灯与成功路径负责）', () => {
+    const html = profileDialogHtml('create', ['desktop'], 'dark', 'darwin')
+    const harness = runScript(scriptOf(html), { titlebar: false, ids: ['target'] })
+    try {
+      expect(harness.closeButton()).toBeUndefined()
+    } finally {
+      harness.dispose()
+    }
   })
 })
