@@ -15,6 +15,8 @@ import {
   planDevToolsBoot,
   resolveDevToolsPort,
   sendDevToolsKeystroke,
+  buildDevToolsInspectorUrl,
+  pickDevToolsPageTarget,
 } from '../src/bun/devtools.ts'
 import {
   CEF_RENDER_BACKEND,
@@ -260,5 +262,36 @@ describe('sendDevToolsKeystroke（win：合成 F12，与物理按键同路径开
     const calls: Array<[number, number, number]> = []
     expect(sendDevToolsKeystroke({ keybdEvent: null })).toBe(false)
     expect(calls).toEqual([])
+  })
+})
+
+describe('DevTools 前端（壳托管窗口的地址）', () => {
+  test('挑页面目标：优先 type=page，排除 inspector 与空目标', () => {
+    const targets = [
+      { id: 'inspector', type: 'page', url: 'http://127.0.0.1:9333/devtools/inspector.html?ws=x' },
+      { id: 'empty', url: '' },
+      { id: 'page', type: 'page', url: 'http://127.0.0.1:6390/tok-x/', webSocketDebuggerUrl: 'ws://127.0.0.1:9333/devtools/page/PAGE' },
+    ]
+    expect(pickDevToolsPageTarget(targets)?.id).toBe('page')
+  })
+
+  test('没有 page 时退到第一条非 inspector；空列表返回 null', () => {
+    const targets = [
+      { id: 'other', type: 'webview', url: 'http://127.0.0.1:6390/tok-x/', webSocketDebuggerUrl: 'ws://127.0.0.1:9333/devtools/page/OTHER' },
+    ]
+    expect(pickDevToolsPageTarget(targets)?.id).toBe('other')
+    expect(pickDevToolsPageTarget([])).toBeNull()
+  })
+
+  test('组装前端 URL：去掉 ws:// 前缀，dockSide=undocked', () => {
+    const url = buildDevToolsInspectorUrl(9333, {
+      id: 'page',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:9333/devtools/page/PAGE',
+    })
+    expect(url).toBe('http://127.0.0.1:9333/devtools/inspector.html?ws=127.0.0.1:9333/devtools/page/PAGE&dockSide=undocked')
+  })
+
+  test('缺 webSocketDebuggerUrl 时返回 null', () => {
+    expect(buildDevToolsInspectorUrl(9333, { id: 'page' })).toBeNull()
   })
 })

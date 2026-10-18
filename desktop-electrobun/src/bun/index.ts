@@ -66,7 +66,7 @@ import {
   type WindowFrame,
 } from './window-state.ts'
 import { loadSettings } from './settings-store.ts'
-import { applyCdpDebugPort, DEVTOOLS_PORT_OVERRIDE_ENV, devToolsMenuEnabled, isPortBindable, planDevToolsBoot, sendDevToolsKeystroke } from './devtools.ts'
+import { applyCdpDebugPort, closeDevToolsTarget, DEVTOOLS_DEFAULT_PORT, DEVTOOLS_PORT_OVERRIDE_ENV, devToolsMenuEnabled, isPortBindable, planDevToolsBoot, resolveDevToolsInspectorUrl } from './devtools.ts'
 import { resolveRenderBackend } from './render-backend.ts'
 import { activeProfile, type DesktopSettings } from '../shared/settings.ts'
 import { closeAction, offsetFrame, planWindowOpen, windowKey } from '../shared/window-targets.ts'
@@ -75,7 +75,7 @@ import { createNotifier, type Notifier } from './notifications.ts'
 import { showWindowsBalloon } from './notify-win.ts'
 import { SCENARIO } from '../shared/notify-policy.ts'
 import { dirname, join } from 'node:path'
-import { existsSync } from 'node:fs'
+import { appendFileSync, existsSync } from 'node:fs'
 import { createRegisterCli } from './register-cli.ts'
 import { registerTrayLabel } from '../shared/register-cli.ts'
 
@@ -1612,6 +1612,14 @@ const pushStage = (): void => {
   } catch {}
 }
 
+/** 壳调试日志：GUI 启动时 stdout 不可见，托盘/DevTools 关键路径直接落盘，排障用。 */
+function shellDebug(line: string): void {
+  try {
+    appendFileSync(join(dshHome(), 'shell-debug.log'), `${new Date().toISOString()} ${line}\n`)
+  } catch {}
+  console.log(line)
+}
+
 /**
  * 冷启动第 ④ 步：托盘。#117 —— 托盘排在 DSH **之前**，这是这票的全部要害。
  *
@@ -1625,8 +1633,9 @@ const startupTray = (): void => {
   // 无窗口模式（CI/黑盒）不建托盘——那里没有窗口可隐藏，托盘只会碍事
   if (noWindow) return
   const image = trayImagePath()
+  shellDebug(`[shell] 托盘图标：${image ?? '（未找到）'}`)
   if (image === null) {
-    console.warn('[shell] 找不到托盘图标（resources/tray.png / runtime/tray.png），本次不建托盘')
+    shellDebug('[shell] 找不到托盘图标（resources/tray.png / runtime/tray.png），本次不建托盘')
   } else {
     tray = createTray({
       image,
@@ -1643,7 +1652,7 @@ const startupTray = (): void => {
           void openProfileWindow(instanceProfile)
         }
       },
-      log: (line) => console.log(line),
+      log: (line) => shellDebug(line),
     })
     // 菜单保鲜（#62）：状态每 5s 走一次 fs 级快探测（不 spawn）。Electrobun 的 Tray 只有
     // tray-clicked 一个事件、拿不到「菜单即将打开」的钩子，所以保鲜靠轮询而不是打开时现查；
@@ -1757,9 +1766,9 @@ try {
   // 这种就如实抛出去（dev 直接崩、CI 判红），不再「在屏幕上留 30 秒然后自己退掉」。
   throw error
 }
-// ---- #117 冷启动编排：服务面 → 托盘 → 启动界面 → DSH → 桌面窗口 ----
-startupTray()
+// ---- #117 冷启动编排：服务面 → 启动界面 → 托盘 → DSH → 桌面窗口 ----
 splash = startupSplash()
+startupTray()
 
 // DSH。就这一步失败也**不退出**：托盘已经在了，状态行摆着原因，
 // 用户能换一个运行时版本再试，也能从托盘退出（旧行为是报错→30 秒→自己退掉，等于把自救入口没收走）。
@@ -1808,6 +1817,40 @@ if (!noWindow) {
   if (!startupBlocked) await createProfileWindow(instanceProfile, service)
   // 右键菜单里我们自己那几项（原生 role 由系统处理，不会回到这里）；
   // 多窗口下作用在「最近聚焦」那个窗口上。
+let devToolsWindow: BrowserWindow | null = null
+
+/**
+ * 壳托管 DevTools：用 CDP 前端 URL 建一扇普通窗口，窗口归壳所有——关闭即销毁前端页面。
+ * 三平台同一条路径；不再起窗口枚举/关窗回收定时器。
+ */
+async function openDevToolsWindow(port: number): Promise<void> {
+  if (devToolsWindow !== null) {
+    devToolsWindow.show()
+    devToolsWindow.focus()
+    return
+  }
+  // 旧原生入口留下的 inspector target 先回收（新窗口的前端此时尚未创建）
+  if (await closeDevToolsTarget(port)) {
+    shellDebug('[shell] 开发者工具：已回收旧的 inspector target')
+  }
+  const url = await resolveDevToolsInspectorUrl(port)
+  if (url === null) {
+    shellDebug(`[shell] 开发者工具：CDP 口 ${port} 没有可用的页面目标`)
+    return
+  }
+  const win = new BrowserWindow({
+    title: `${APP_NAME} · DevTools`,
+    url,
+    renderer,
+    frame: { x: 80, y: 80, width: 1000, height: 720 },
+  })
+  devToolsWindow = win
+  win.on('close', () => {
+    if (devToolsWindow !== win) return
+    devToolsWindow = null
+    shellDebug('[shell] 开发者工具：DevTools 窗口已关闭，前端已销毁')
+  })
+}
   ContextMenu.on('context-menu-clicked', (event) => {
     const detail = (event as { data?: { action?: string; data?: { url?: string; path?: string } } }).data
     const action = detail?.action ?? ''
@@ -1822,15 +1865,7 @@ if (!noWindow) {
     // 菜单：打开当前聚焦窗口的 DevTools——落地方式来自后端描述符（#110）：
     // CEF 走 openDevTools（应用内 inspector）；WebView2 走合成 F12（#106 返工：上游 WebView2 壳无 openDevTools 实现）。
     if (action === SHELL_MENU_ACTIONS.openDevTools) {
-      if (backend.devToolsOpen === 'keystroke') {
-        if (sendDevToolsKeystroke()) {
-          console.log('[shell] 开发者工具：已发送 F12 键击（WebView2 原生响应，与物理按键同路径）')
-        } else {
-          console.error('[shell] 开发者工具：user32 键击不可用，请直接按 F12 / Ctrl+Shift+I')
-        }
-      } else {
-        focusedWindow()?.webview?.openDevTools()
-      }
+      void openDevToolsWindow(devToolsPlan.port ?? DEVTOOLS_DEFAULT_PORT)
       return
     }
     const url = detail?.data?.url
