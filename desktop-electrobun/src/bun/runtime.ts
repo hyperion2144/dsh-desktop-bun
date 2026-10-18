@@ -319,6 +319,8 @@ export function resolveLauncherExecutablePath(
   readlink: (path: string) => string | null = defaultLauncherReadlink,
   platform: NodeJS.Platform = process.platform,
 ): string | null {
+  const explicit = env.DSH_SHELL_LAUNCHER?.trim()
+  if (explicit !== undefined && explicit !== '') return explicit
   const raw = env.ELECTROBUN_LAUNCHER_PID
   const pid = raw !== undefined && /^\d+$/.test(raw) ? raw : ppid > 1 ? String(ppid) : null
   if (pid === null) return null
@@ -469,6 +471,15 @@ export function resolveLauncherForRelaunch(input: {
     `开始解析 launcher（${env.ELECTROBUN_LAUNCHER_PID ?? `ppid:${String(ppid)}`}，platform=${platform}）`
   ]
 
+  const explicitLauncher = env.DSH_SHELL_LAUNCHER?.trim() ?? ''
+  if (explicitLauncher !== '') {
+    if (exists(explicitLauncher)) {
+      rememberLauncherExecutablePath(explicitLauncher)
+      attempts.push(`显式 DSH_SHELL_LAUNCHER 命中：${explicitLauncher}`)
+      return { launcherExe: explicitLauncher, source: 'env', attempts }
+    }
+    attempts.push(`显式 DSH_SHELL_LAUNCHER 不存在：${explicitLauncher}`)
+  }
   const probe: LauncherRun = (argv, timeoutMs) => {
     const result = run(argv, timeoutMs)
     attempts.push(

@@ -28,6 +28,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, renameSy
 import { basename, dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { hasBootstrapPayload, installMacosLauncherShim, isMachOFile } from './macos-launcher-shim.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(here, '..')
@@ -68,7 +69,7 @@ function assertMacosAttribution(appPath, expectedBundleId) {
   if (!existsSync(macosDir)) return
   for (const entry of readdirSync(macosDir)) {
     const full = join(macosDir, entry)
-    if (!statSync(full).isFile()) continue
+    if (!statSync(full).isFile() || !isMachOFile(full)) continue
     const probe = spawnSync('codesign', ['-dv', full], { encoding: 'utf8' })
     const found = /Identifier=(\S+)/.exec(`${probe.stdout ?? ''}${probe.stderr ?? ''}`)?.[1] ?? null
     if (found !== expectedBundleId) {
@@ -118,6 +119,7 @@ function signInsideBootstrapPayload(appPath, bundleId) {
       console.error(`[sign-app] payload 里没有 ${basename(appPath)}（打包契约变化？），拒绝处理（#132）`)
       process.exit(1)
     }
+    installMacosLauncherShim(innerApp)
     signAppLayers(innerApp)
     ensureUsageDescriptions(innerApp)
     execFileSync('codesign', [...outerSignArgs, innerApp], { stdio: 'inherit' })
@@ -206,7 +208,7 @@ function signAppLayers(appPath) {
   if (existsSync(macosDir)) {
     for (const entry of readdirSync(macosDir)) {
       const full = join(macosDir, entry)
-      if (!statSync(full).isFile()) continue
+      if (!statSync(full).isFile() || !isMachOFile(full)) continue
       const preserved = preservedEntitlements(full)
       const args = ['--force', '--sign', '-', '--identifier', bundleId, '-r', designatedRequirement]
       if (preserved !== null) args.push('--entitlements', preserved)
@@ -225,6 +227,8 @@ function signAppLayers(appPath) {
 
 // ②⑤ payload 在外层签名【前】处理：payload 是外层 seal 覆盖的资源，改完必须重签外层（#132）。
 ensureUsageDescriptions(target)
+const hasPayload = hasBootstrapPayload(target)
+if (!hasPayload) installMacosLauncherShim(target)
 signAppLayers(target)
 signInsideBootstrapPayload(target, bundleId)
 // ③ 外层最后签：这一步才把 Info.plist 绑进 CFBundleExecutable 的签名。
