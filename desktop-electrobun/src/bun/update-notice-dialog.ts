@@ -40,6 +40,14 @@ export const UPDATE_NOTICE_OP_METHOD = 'update_notice_op'
 
 /** 只读的下载状态查询方法名（与壳命令表同名；页面靠它画进度）。 */
 export const UPDATE_NOTICE_STATUS_METHOD = 'runtime_download_status'
+/**
+ * 请壳关掉本窗的方法名（#160 实机：点「稍后」毫无反应）。
+ *
+ * 页面不能自己 `window.close()`：这扇窗是 `html:` 文档，Electrobun 用自有 scheme（views://internal）
+ * + 自定义 client 加载，不是脚本打开的窗口，Chromium 对这类文档忽略 `window.close()`（静默无效）。
+ * 与主窗 RPC 漏斗的 `window_close` 同一个口径——关窗是壳的动作，不是页面的。
+ */
+export const UPDATE_NOTICE_CLOSE_METHOD = 'update_notice_close'
 
 
 /** 选型定的窗尺寸（B 变体：更宽更矮）。 */
@@ -388,7 +396,7 @@ ${shellCol}${runtimeCol}
         renderStatus(null)
         return
       }
-      setTimeout(function () { window.close() }, 350)
+      setTimeout(closeSelf, 350)
     }).catch(function (error) {
       msg.className = 'err'
       msg.textContent = String(error)
@@ -438,11 +446,15 @@ ${shellCol}${runtimeCol}
       }
     })
   }
+  // 关窗一律请壳代劳：页面自己关不掉自己（#160）——html: 文档里的 window.close 是空操作。
+  function closeSelf() {
+    return invokeShell(${jsString(UPDATE_NOTICE_CLOSE_METHOD)}).catch(function () {})
+  }
   document.querySelectorAll('[data-op]').forEach(function (el) {
     el.addEventListener('click', function () {
       if (el.hasAttribute('disabled')) return
       var op = JSON.parse(el.getAttribute('data-op'))
-      if (op.op === 'later') { window.__dshUpdateNoticeOp = op; window.close(); return }
+      if (op.op === 'later') { window.__dshUpdateNoticeOp = op; closeSelf(); return }
       send(op)
     })
   })
