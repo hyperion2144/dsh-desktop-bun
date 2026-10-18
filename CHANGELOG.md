@@ -66,6 +66,7 @@
 - dev_tools 的 CEF / WebView2 分叉收进渲染后端描述符（#110）：调试口 env 名与值编码、C environ 写入器、DevTools 打开方式统一由新文件 `render-backend.ts` 提供，`applyCdpDebugPort` 改收必传的 `backend`；删除无人消费的 `plan.menuEnabled` 与未用 import。纯重构，运行行为不变。
 
 ### Fixed
+- macOS 壳改用 exec shim 启动（主进程 handoff）：LaunchServices 启动的 launcher 直接 exec 成 bun，窗口进程就是 App 主进程；修复 Tangrid 等平铺/切换应用看不到壳窗口的问题。
 - 登录两步都断（#169）：① 壳没有官方桌面同款的主进程账号 watcher，登录进入「等待浏览器」时没人开系统浏览器（只能手动复制链接）；② 回调 `http://127.0.0.1:<pagePort>/oauth/callback` 被壳的跨站闸门 403。修复：壳主进程订阅宿主 `account/watch` 流，`waiting-browser` 时把授权页交给系统浏览器（带浅/深色主题，同一 attempt 只开一次，断线按 1s 重连）；准入只放「跨站 + GET + 顶层文档导航 + 精确 `/oauth/callback`」这一种请求，其余跨站照旧拒绝（见 ADR-0005）。
 - Windows 托盘「重启应用」第二次提示无法重启（#167）：launcher 路径解析失败时回退到冷启动缓存和同目录 `launcher.exe`，并把 PID/命令/查询结果写进 shell.log。
 - 桌面壳 loopback SSE 空闲约 10s 被 Bun 默认 idleTimeout 切断，`/plugins/events` 与 `/api/auto-continue-bridge` 反复报 `ERR_INCOMPLETE_CHUNKED_ENCODING`（#159）：`Bun.serve` 显式关闭 `idleTimeout`，并补 SSE 空闲回归测试。

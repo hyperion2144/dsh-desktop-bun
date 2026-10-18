@@ -153,4 +153,20 @@ describe('resolveLauncherForRelaunch：重启入口的 launcher 路径兜底', (
     expect(result.launcherExe).toBe(launcher)
     expect(result.source).toBe('cache')
   })
+
+  test('layout() 优先采用 DSH_SHELL_LAUNCHER（macOS exec shim）', () => {
+    const dir = tempDir()
+    const launcher = touch(join(dir, 'App', 'bin', 'launcher'))
+    const result = layout({
+      env: {
+        ...process.env,
+        DSH_HOME: join(dir, 'home'),
+        DSH_SHELL_PROJECT: join(dir, 'project'),
+        DSH_SHELL_LAUNCHER: launcher,
+      },
+      execPath: join(dir, 'App', 'bin', 'bun'),
+    })
+
+    expect(result.launcherPath).toBe(launcher)
+  })
 })
