@@ -27,6 +27,13 @@ export interface ProfileOpResult {
 
 /** 页面 ↔ 壳的动作方法名（官方原生桥上的方法；壳侧 handlers 用同一个常量） */
 export const PROFILE_OP_METHOD = 'profile_op'
+/**
+ * 请壳关掉本窗的方法名（#162，与 #160 同款）。
+ *
+ * 页面不能自己 `window.close()`：这扇窗是 `html:` 文档，不是脚本打开的窗口，Chromium 忽略
+ * `window.close()`（静默无效），Electrobun 的注入胶水也没覆写它。成功后的「关窗」必须是壳的动作。
+ */
+export const PROFILE_CLOSE_METHOD = 'profile_close'
 
 /** profile 名规则：小写字母/数字开头，允许连字符，1-64 字符（旧壳 migrate 用 1-32 的宽松版） */
 export const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
@@ -188,6 +195,10 @@ ${fields}
         }
       })
     }
+    // 关窗一律请壳代劳（#162）：页面自己关不掉自己。
+    function closeSelf() {
+      return invokeShell(${jsString(PROFILE_CLOSE_METHOD)}).catch(function () {})
+    }
     // 提交期间不再接第二次：迁移要复制整棵依赖树再跑 pnpm install，双击会同时跑两遍。
     var busy = false
     f.addEventListener('submit', async (event) => {
@@ -209,7 +220,7 @@ ${fields}
         msg.className = data && data.ok ? 'ok' : 'err'
         msg.textContent = (data && data.message) || (data && data.ok ? '完成' : '失败')
         window.__dshProfileOpResult = data
-        if (data && data.ok) setTimeout(() => window.close(), 1200)
+        if (data && data.ok) setTimeout(closeSelf, 1200)
       } catch (error) {
         msg.className = 'err'
         msg.textContent = String(error)
