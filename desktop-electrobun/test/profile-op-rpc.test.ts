@@ -1,12 +1,21 @@
 import { describe, expect, test } from 'bun:test'
-import { PROFILE_OP_METHOD, type ProfileOpRequest, type ProfileOpResult } from '../src/bun/profile-dialog.ts'
-import { PROFILE_OP_RPC_MAX_REQUEST_TIME, profileOpRpcRequests } from '../src/bun/profile-op-rpc.ts'
+import {
+  PROFILE_CLOSE_METHOD,
+  PROFILE_OP_METHOD,
+  type ProfileOpRequest,
+  type ProfileOpResult,
+} from '../src/bun/profile-dialog.ts'
+import {
+  PROFILE_CLOSE_DELAY_MS,
+  PROFILE_OP_RPC_MAX_REQUEST_TIME,
+  profileOpRpcRequests,
+} from '../src/bun/profile-op-rpc.ts'
 
 type Handler = (params: unknown) => Promise<unknown>
 
 /** 从 handlers 表里取出通道方法；取不到就是挂点没对上，直接炸。 */
 function channelOf(run: (request: ProfileOpRequest) => Promise<ProfileOpResult>): Handler {
-  const handler = profileOpRpcRequests({ run }).requests[PROFILE_OP_METHOD]
+  const handler = profileOpRpcRequests({ run, close: () => {} }).requests[PROFILE_OP_METHOD]
   if (handler === undefined) throw new Error(`通道上没挂 ${PROFILE_OP_METHOD}`)
   return handler
 }
@@ -59,5 +68,47 @@ describe('profile_op 通道（#129）', () => {
       ok: false,
       message: '名称仅允许小写字母、数字与连字符（1-64 字符）',
     })
+  })
+})
+
+// #162：页面自己关不掉自己（html: 文档里的 window.close 是空操作），成功后请壳代劳。
+// 与更新提醒窗 #160 同一颗雷、同一修法：通道上多挂一个 profile_close，回包先发、窗稍后才关。
+describe('profile_close 通道（#162）', () => {
+  test('通道上挂着 profile_close，且与方法名常量一致', () => {
+    const { requests } = profileOpRpcRequests({
+      run: async () => ({ ok: true, message: '已创建' }),
+      close: () => {},
+    })
+    expect(Object.keys(requests)).toEqual([PROFILE_OP_METHOD, PROFILE_CLOSE_METHOD])
+    expect(PROFILE_CLOSE_METHOD).toBe('profile_close')
+  })
+
+  test('页面叫一声壳就去关；handler 自己先返回，窗稍后才关', async () => {
+    const closed: number[] = []
+    const { requests } = profileOpRpcRequests({
+      run: async () => ({ ok: true, message: '已创建' }),
+      close: () => void closed.push(closed.length + 1),
+    })
+    const handler = requests[PROFILE_CLOSE_METHOD]
+    if (handler === undefined) throw new Error('通道上没挂 profile_close')
+    expect(closed).toEqual([])
+    await handler(null)
+    // 回包先发：handler 返回时窗还没关，否则这次请求的响应会随窗一起消失（页面只见报错）。
+    expect(closed).toEqual([])
+    await new Promise((resolve) => setTimeout(resolve, PROFILE_CLOSE_DELAY_MS + 60))
+    expect(closed).toEqual([1])
+  })
+
+  test('关窗不收参数：谁来叫都一样，关的都是本窗', async () => {
+    const closed: number[] = []
+    const { requests } = profileOpRpcRequests({
+      run: async () => ({ ok: true, message: '已迁移' }),
+      close: () => void closed.push(1),
+    })
+    const handler = requests[PROFILE_CLOSE_METHOD]
+    if (handler === undefined) throw new Error('通道上没挂 profile_close')
+    await expect(handler({ whatever: true })).resolves.toEqual({})
+    await new Promise((resolve) => setTimeout(resolve, PROFILE_CLOSE_DELAY_MS + 60))
+    expect(closed).toEqual([1])
   })
 })

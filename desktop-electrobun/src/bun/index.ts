@@ -1366,9 +1366,16 @@ async function stopProfileFromTray(profile: string): Promise<void> {
 
 /** F9：托盘「新建 / 迁移 Profile…」——弹一张小表单窗，动作经官方原生桥交给服务面（#129） */
 function openProfileOpDialog(kind: ProfileOpDialogKind): void {
+  // 关窗（#162）：页面关不掉自己（html: 文档里的 window.close 是空操作），成功后请壳代劳。
+  // rpc 挂在开窗之前，所以窗要后填；真被叫关窗时还没建好就安静跳过（那时页面也还没加载）。
+  let dialog: BrowserWindow | null = null
+  const closeDialog = (): void => {
+    const win = dialog
+    if (win !== null) win.close()
+  }
   // 每扇窗一份 rpc：壳里其余窗（createProfileWindow）也是这么挂的。共用一份会让多开的
   // 两张窗按请求 id 串回包。
-  attachProfileOpRpc({ run: (request) => uiService().profileOp(request) })
+  attachProfileOpRpc({ run: (request) => uiService().profileOp(request), close: closeDialog })
     .catch((error: unknown) => {
       // 通道挂不上时**仍然开窗**：页面会把「壳桥不可用」显示成红字，比「点了没反应」强——
       // 那正是本票要根治的失败形态。
@@ -1376,7 +1383,7 @@ function openProfileOpDialog(kind: ProfileOpDialogKind): void {
       return null
     })
     .then((rpc) => {
-      const dialog = new BrowserWindow({
+      dialog = new BrowserWindow({
         title: kind === 'create' ? '新建 Profile' : '迁移 Profile',
         html: profileDialogHtml(kind, listProfiles(dshHome(), instanceProfile), readShellTheme(dshHome(), instanceProfile)),
         renderer,

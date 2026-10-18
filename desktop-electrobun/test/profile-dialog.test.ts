@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   PROFILE_OP_METHOD,
+  PROFILE_CLOSE_METHOD,
   isSelfMigrate,
   isValidProfileName,
   profileDialogHtml,
@@ -91,6 +92,8 @@ interface Harness {
   submit(): Promise<void>
   /** 模拟壳回包给页面 */
   respond(id: number, packet: Record<string, unknown>): void
+  /** 跑掉页面登记的定时器（成功后请壳关窗那一步就在 setTimeout 里） */
+  runTimers(): void
   dispose(): void
 }
 
@@ -141,8 +144,23 @@ function runScript(
           },
         }
   globals.__electrobun = channel
+  // 定时器收起来而不是丢掉：页面里 `setTimeout(closeSelf, 1200)` 是成功后关窗的那一步（#162），
+  // 丢掉了等于这条路径一次都没跑过。
+  const timers: (() => unknown)[] = []
   const run = new Function('document', 'window', 'setTimeout', source)
-  run({ getElementById: elementOf }, { close() {} }, () => 0)
+  run(
+    { getElementById: elementOf },
+    // window.close 在这种 html: 文档里是空操作（#160/#162），桩成抛错：谁把它写回去谁当场炸。
+    {
+      close() {
+        throw new Error('页面不该自己关窗：请壳代劳（#162）')
+      },
+    },
+    (fn: () => unknown) => {
+      timers.push(fn)
+      return timers.length
+    },
+  )
   const form = elementOf('f')
   return {
     sent,
@@ -155,6 +173,9 @@ function runScript(
     respond(id: number, packet: Record<string, unknown>): void {
       if (channel.receiveMessageFromHost === null) throw new Error('页面还没挂上接收口')
       channel.receiveMessageFromHost(packet as any)
+    },
+    runTimers(): void {
+      for (const fn of timers.splice(0)) fn()
     },
     dispose(): void {
       globals.__electrobunHostBridge = savedBridge
@@ -195,6 +216,59 @@ describe('profileDialogHtml 的页面脚本（#129 回归）', () => {
       await pending
       expect(harness.msg.className).toBe('ok')
       expect(harness.msg.textContent).toBe('profile demo-profile 已创建')
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  // #162：成功后那一句 `setTimeout(() => window.close(), 1200)` 从来不生效（html: 文档里
+  // window.close 是空操作）——动作跑完、窗却留在屏幕上像卡住。现在改请壳关窗。
+  test('成功后请壳关窗，而不是页面自己 window.close()（#162）', async () => {
+    const harness = runScript(scriptOf(profileDialogHtml('create', ['desktop'])), {
+      target: 'demo-profile',
+      ids: ['target'],
+    })
+    try {
+      const pending = harness.submit()
+      await flush()
+      const request = harness.sent[0]
+      if (request === undefined) throw new Error('页面没发出请求')
+      harness.respond(request.id, {
+        type: 'response',
+        id: request.id,
+        success: true,
+        payload: { ok: true, message: 'profile demo-profile 已创建', profile: 'demo-profile' },
+      })
+      await pending
+      // 关窗在定时器里：harness 把 window.close 桩成抛错，所以页面一旦自己关就当场炸。
+      harness.runTimers()
+      await flush()
+      expect(harness.sent.map((row) => row.method)).toEqual([PROFILE_OP_METHOD, PROFILE_CLOSE_METHOD])
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  test('失败路径不关窗：用户还要留在窗里改名字重试（#162）', async () => {
+    const harness = runScript(scriptOf(profileDialogHtml('create', ['desktop'])), {
+      target: 'demo-profile',
+      ids: ['target'],
+    })
+    try {
+      const pending = harness.submit()
+      await flush()
+      const request = harness.sent[0]
+      if (request === undefined) throw new Error('页面没发出请求')
+      harness.respond(request.id, {
+        type: 'response',
+        id: request.id,
+        success: true,
+        payload: { ok: false, message: '名称已存在' },
+      })
+      await pending
+      harness.runTimers()
+      await flush()
+      expect(harness.sent.map((row) => row.method)).toEqual([PROFILE_OP_METHOD])
     } finally {
       harness.dispose()
     }
