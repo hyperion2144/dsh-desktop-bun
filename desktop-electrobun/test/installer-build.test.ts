@@ -16,6 +16,9 @@ import { spawnSync } from 'node:child_process'
 
 const projectRoot = join(import.meta.dir, '..')
 
+// Windows runner 上品牌图生成 + 子进程启动会偶发超过 Bun 默认 5s；端到端链路给它更宽预算。
+const INSTALLER_E2E_TIMEOUT_MS = 30_000
+
 /** 假 makensis：按脚本里的 OutFile 写出一份给定大小的产物，模拟编译成功。 */
 const fakeMakensisSource = `#!/usr/bin/env bun
 const args = process.argv.slice(2)
@@ -157,7 +160,7 @@ describe('#90 安装器构建链端到端集成', () => {
     } finally {
       rmSync(h.root, { recursive: true, force: true })
     }
-  })
+  }, INSTALLER_E2E_TIMEOUT_MS)
 
   test('产物小到不可能是安装器时，生成器按退出码 1 拦住', () => {
     const h = makeHarness()
@@ -168,7 +171,7 @@ describe('#90 安装器构建链端到端集成', () => {
     } finally {
       rmSync(h.root, { recursive: true, force: true })
     }
-  })
+  }, INSTALLER_E2E_TIMEOUT_MS)
 
   test('缺品牌图时给出可执行的下一步（#92 守卫在集成链上仍然生效）', () => {
     const h = makeHarness()
@@ -183,5 +186,5 @@ describe('#90 安装器构建链端到端集成', () => {
     } finally {
       rmSync(h.root, { recursive: true, force: true })
     }
-  })
+  }, INSTALLER_E2E_TIMEOUT_MS)
 })
