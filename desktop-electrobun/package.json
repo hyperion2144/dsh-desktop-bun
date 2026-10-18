@@ -6,10 +6,10 @@
   "description": "DSH 桌面壳（Electrobun + CEF + Bun 运行时）——迁移自 desktop/src-tauri（Rust + Tauri 2）",
   "scripts": {
     "test": "bun test",
-    "pretest": "bun run scripts/verify-builtin-runtime.mjs",
+    "pretest": "bun run scripts/verify-toolchain.mjs && bun run scripts/verify-builtin-runtime.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "bun run build:native && hutch electrobun dev",
-    "predev": "bun run scripts/verify-builtin-runtime.mjs",
+    "predev": "bun run scripts/verify-toolchain.mjs && bun run scripts/verify-builtin-runtime.mjs",
     "prepare:bundle": "bun run scripts/prepare-bundle.mjs",
     "prepare:installer-assets": "bun run scripts/prepare-installer-assets.mjs",
     "build:native": "bun run scripts/build-native.mjs",
@@ -17,6 +17,9 @@
     "sign:app": "bun run scripts/sign-app.mjs",
     "build:installer": "bun run scripts/build-windows-installer.mjs",
     "assert:artifact": "bun run scripts/assert-artifact.mjs"
+  },
+  "engines": {
+    "bun": ">=1.4.0"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0",

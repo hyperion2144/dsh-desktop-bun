@@ -61,7 +61,7 @@
 
 ## 故障排查
 
-1. **启动卡住 / 失败**：启动界面会显示红字原因；日志在 `~/Library/Logs/com.hyperion.dsh-desktop-bun/`（macOS）或 `%LOCALAPPDATA%\DeepSeekHarnessDesktopBUN\`（Windows）。
+1. **启动卡住 / 失败**：启动界面会显示红字原因；壳日志在 `$DSH_HOME/shell.log`（主进程 console / 服务 / 页面控制台，已轮转；托盘/DevTools 排障先看这里），Electrobun 进程日志在 `~/Library/Logs/com.hyperion.dsh-desktop-bun/`（macOS）或 `%LOCALAPPDATA%\DeepSeekHarnessDesktopBUN\`（Windows）。
 2. **页面空白**：托盘 →「重启 dsh 服务」；仍不行就「退出」后重新打开（单实例锁不会阻碍重开）。
 3. **换端口**：设置 → Profile 端口，改完会重启对应 profile。
 4. **终端里没有 `dsh` 命令**：托盘 →「注册 dsh 为系统命令」。

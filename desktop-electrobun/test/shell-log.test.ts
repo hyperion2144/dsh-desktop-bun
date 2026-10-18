@@ -12,7 +12,7 @@ import { join } from 'node:path'
 const logDir = mkdtempSync(join(tmpdir(), 'dsh-shell-log-'))
 process.env.DSH_SHELL_LOG = join(logDir, 'shell.log')
 
-import { resolveShellLogFile, shellLogLine, shellLogSink } from '../src/bun/shell-log.ts'
+import { installShellConsoleTee, resolveShellLogFile, shellLogLine, shellLogSink } from '../src/bun/shell-log.ts'
 
 describe('shell-log：路径解析', () => {
   test('DSH_SHELL_LOG 优先', () => {
@@ -46,6 +46,13 @@ describe('shell-log：落盘与单例', () => {
       console.log = original
     }
     expect(seen.some((row) => row.includes('[shell] mirror-probe'))).toBe(true)
+  })
+
+  test('console tee：installShellConsoleTee 后 console.log 同步进 shell.log', () => {
+    installShellConsoleTee()
+    console.log('[shell] tee-probe')
+    const content = readFileSync(process.env.DSH_SHELL_LOG!, 'utf8')
+    expect(content).toContain('[shell log] [shell] tee-probe')
   })
 
   test('单例身份：重复取同一实例（路径不会被二次初始化改写）', () => {

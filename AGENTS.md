@@ -3,8 +3,13 @@
 - 壳改动一律在 `desktop-electrobun/` 内；桌面插件在 `desktop-plugin/`（构建 `lib/client.js` 用
   `bun run build:client`，测试 `bun run test:client`）。
 - 门禁：壳 `bun run typecheck` + `bun test`、插件 `bun run typecheck` + `bun run test:client` 全绿才可提交（插件命令需 Bun 1.4.x，与 CI setup-bun 及仓内 hutch 工具链对齐）；CI 分流：push/PR 跑检查（check.yml：壳检查 + 插件门禁 + Windows 兜底 job，#18），完整构建留给 workflow_dispatch、tag push 与每日定时兜底（build.yml，#7/#8）。
-- 提交纪律：一票一提交；`git add` 点名文件（禁 `-A`）；改动后同步 `CHANGELOG.md` 的
+- 提交纪律：一张需求地图（map，可含多张子票）= 一个 worktree = 一个提交；`git add` 点名文件（禁 `-A`）；改动后同步 `CHANGELOG.md` 的
   `## Unreleased`；PR 优先，未经维护者允许不合并。
+- worktree：read/edit/write 一律传 worktree 绝对路径（相对路径按会话根解析），bash 用 workdir；新 worktree 先 `bun install`，再从主仓复制 `.hutch`（符号链接会让 hutch 报 `InvalidProjectStatePath`），最后 `bun run prepare:bundle`。
+- 工具链：壳/插件的 typecheck/test 用 hutch Bun 1.4.0（`~/.hutch/toolchains/bun/1.4.0/macos-arm64/bun`）；系统 PATH 的 1.3.x 会造 FFI/PTC 假失败。
+- 壳日志：`$DSH_HOME/shell.log`（主进程 console 已 tee，`[shell log/warn/error]` 行都在）；页面日志同目录 `dsh-desktop-webview.log`。
+- Electrobun 原生源码：GitHub `blackboardsh/electrobun` 对应 tag；本机 `~/.hutch/releases/electrobun/<ver>/`；符号用 `strings .../libNativeWrapper.dylib` 查。
+- 构建后跑 `bun run assert:artifact`：断言 CEF/native 载荷、内置 dsh、`launcher` 必须是原生 Mach-O（不是 exec shim）、`app/bun/index.js` 关键符号、`app/runtime/tray.png`。
 - 契约红线：设置文件键名、`/api` 与 `/plugins` 的 no-store、页面 token 路径前缀准入、
   渲染器平台条件化（#84）：win=系统 WebView2（config `bundleCEF:false` + `defaultRenderer:'native'` + 建窗 renderer 随 availableRenderers），mac/linux=bundleCEF——三处开关与平台化启动断言，
   缺一即回归。
