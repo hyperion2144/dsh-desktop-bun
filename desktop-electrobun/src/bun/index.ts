@@ -9,7 +9,7 @@ import { systemLocale } from './locale.ts'
 import { installApplicationMenu } from './menu.ts'
 import { deriveMaximized, ensureNativeMaximizeStyles, HEAL_MAX_REPLACES, healVerdict, isMaximizedPlacementDamaged, toggleWindowMaximize, windowMaxState, type WindowMaxState } from './window-max.ts'
 import { pickWorkArea } from './screen-work-area.ts'
-import { shellLogLine } from './shell-log.ts'
+import { installShellConsoleTee, shellLogLine } from './shell-log.ts'
 import { bootPreloadScript } from './preload.ts'
 import { attachShellRpc } from './rpc-bridge.ts'
 import { startService, type ServiceOptions, type ShellService } from './service.ts'
@@ -75,9 +75,12 @@ import { createNotifier, type Notifier } from './notifications.ts'
 import { showWindowsBalloon } from './notify-win.ts'
 import { SCENARIO } from '../shared/notify-policy.ts'
 import { dirname, join } from 'node:path'
-import { appendFileSync, existsSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { createRegisterCli } from './register-cli.ts'
 import { registerTrayLabel } from '../shared/register-cli.ts'
+
+// 打包态主进程 stdout 无人接：把 console.* 同时 tee 进 shell.log（#80 取证缺口）。
+installShellConsoleTee()
 
 /** 客户端版本标识：dsh 0.2.1-alpha.2 的 telemetry/product-analytics 插件把它当必填项。 */
 const CLIENT_VERSION = '0.1.0'
@@ -1612,13 +1615,6 @@ const pushStage = (): void => {
   } catch {}
 }
 
-/** 壳调试日志：GUI 启动时 stdout 不可见，托盘/DevTools 关键路径直接落盘，排障用。 */
-function shellDebug(line: string): void {
-  try {
-    appendFileSync(join(dshHome(), 'shell-debug.log'), `${new Date().toISOString()} ${line}\n`)
-  } catch {}
-  console.log(line)
-}
 
 /**
  * 冷启动第 ④ 步：托盘。#117 —— 托盘排在 DSH **之前**，这是这票的全部要害。
@@ -1633,9 +1629,9 @@ const startupTray = (): void => {
   // 无窗口模式（CI/黑盒）不建托盘——那里没有窗口可隐藏，托盘只会碍事
   if (noWindow) return
   const image = trayImagePath()
-  shellDebug(`[shell] 托盘图标：${image ?? '（未找到）'}`)
+  shellLogLine(`[shell] 托盘图标：${image ?? '（未找到）'}`)
   if (image === null) {
-    shellDebug('[shell] 找不到托盘图标（resources/tray.png / runtime/tray.png），本次不建托盘')
+    shellLogLine('[shell] 找不到托盘图标（resources/tray.png / runtime/tray.png），本次不建托盘')
   } else {
     tray = createTray({
       image,
@@ -1652,7 +1648,7 @@ const startupTray = (): void => {
           void openProfileWindow(instanceProfile)
         }
       },
-      log: (line) => shellDebug(line),
+      log: (line) => shellLogLine(line),
     })
     // 菜单保鲜（#62）：状态每 5s 走一次 fs 级快探测（不 spawn）。Electrobun 的 Tray 只有
     // tray-clicked 一个事件、拿不到「菜单即将打开」的钩子，所以保鲜靠轮询而不是打开时现查；
@@ -1831,11 +1827,11 @@ async function openDevToolsWindow(port: number): Promise<void> {
   }
   // 旧原生入口留下的 inspector target 先回收（新窗口的前端此时尚未创建）
   if (await closeDevToolsTarget(port)) {
-    shellDebug('[shell] 开发者工具：已回收旧的 inspector target')
+    shellLogLine('[shell] 开发者工具：已回收旧的 inspector target')
   }
   const url = await resolveDevToolsInspectorUrl(port)
   if (url === null) {
-    shellDebug(`[shell] 开发者工具：CDP 口 ${port} 没有可用的页面目标`)
+    shellLogLine(`[shell] 开发者工具：CDP 口 ${port} 没有可用的页面目标`)
     return
   }
   const win = new BrowserWindow({
@@ -1848,7 +1844,7 @@ async function openDevToolsWindow(port: number): Promise<void> {
   win.on('close', () => {
     if (devToolsWindow !== win) return
     devToolsWindow = null
-    shellDebug('[shell] 开发者工具：DevTools 窗口已关闭，前端已销毁')
+    shellLogLine('[shell] 开发者工具：DevTools 窗口已关闭，前端已销毁')
   })
 }
   ContextMenu.on('context-menu-clicked', (event) => {

@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+### Changed
+
+- 壳主进程 console 默认 tee 进 `shell.log`，托盘/DevTools 排障不再依赖不可见的 stdout（#178）。
+- 构建产物断言覆盖 macOS `launcher` 原生 Mach-O、exec shim 残留、`app/bun/index.js` 关键符号与 `tray.png`；`pretest`/`predev` 预检 Bun 1.4.x（#178）。
+
 ### Added
 
 - 桌面壳本体：Electrobun（Bun 主进程）+ CEF 渲染，随包内置 dsh 运行时，三平台安装包（macOS DMG / Windows NSIS 安装器 / Linux 安装包）。

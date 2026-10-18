@@ -151,6 +151,21 @@ if (payloads.length === 0) {
   problems.push('产物里没有 payload 归档（*.tar.zst）——Electrobun 的包结构变了？')
 }
 
+// macOS：launcher 必须是原生 Mach-O（#176 exec shim 已撤，shim 是 990B 脚本）；
+// launcher.native 是 shim 时期的备份，残留即说明撤得不干净。
+if (platform === 'darwin') {
+  const launcher = join(target, 'Contents/MacOS/launcher')
+  const nativeBackup = join(target, 'Contents/MacOS/launcher.native')
+  try {
+    const head = readFileSync(launcher).subarray(0, 4).toString('hex')
+    const macho = ['cffaedfe', 'feedfacf', 'cefaedfe', 'feedface']
+    if (!macho.includes(head)) problems.push(`launcher 不是原生 Mach-O（magic=${head}）——exec shim 又回来了？`)
+  } catch (error) {
+    problems.push(`读不出 launcher：${String(error)}`)
+  }
+  if (existsSync(nativeBackup)) problems.push('launcher.native 仍存在：exec shim 未彻底撤销')
+}
+
 /** app 目录布局里也可能有一份 version.json（Windows 的 launcher：exe 旁边就是 Resources\）。 */
 function findLauncherDirs(root) {
   const out = []
@@ -229,6 +244,9 @@ const REQUIRED_PAYLOAD_FILES = [
   // 内置 dsh 运行时树（goal 第 1 条）：缺了它，干净机器首启直接「找不到可用的 dsh 运行时」。
   // 本地构建曾静默漏带（worktree 没装内置树 + 回退链查不到）⇒ 在门槛里拦住，不再靠肉眼。
   'dsh/node_modules/@deepseek-ai/dsh/package.json',
+  // 壳主进程入口与托盘图标：缺了等于「托盘/DevTools 静默失效」，构建期拦住。
+  'app/bun/index.js',
+  'app/runtime/tray.png',
 ]
 
 /** 二进制安全地把归档里的某个成员解到磁盘（内层归档可能很大，由调用方负责删）。 */
@@ -288,6 +306,9 @@ function inspect(archive, label, depth = 0) {
       problems.push(`${label} 里缺 ${required}（必需文件没被打进包）`)
     }
   }
+
+/** 壳主进程 index.js 必须带的关键符号（#178：托盘/DevTools 回归教训）。 */
+const REQUIRED_INDEX_MARKERS = ['openDevToolsWindow', 'startupTray', 'createTray']
   if (declaredBuiltin !== null) {
     const pkgLine = norm.find((line) => line.endsWith(`/${BUILTIN_DSH_PKG}`))
     if (pkgLine !== undefined) {
@@ -295,6 +316,18 @@ function inspect(archive, label, depth = 0) {
       if (raw === null) problems.push(`${label} 的内置 dsh package.json 读不出来`)
       else checkBuiltinVersion(raw, label)
     }
+
+  // 壳主进程符号：缺了等于托盘/DevTools 静默失效（#178）。
+  const indexLine = norm.find((line) => line.endsWith('/app/bun/index.js'))
+  if (indexLine !== undefined) {
+    const raw = tarExtract(archive, indexLine)
+    if (raw === null) problems.push(`${label} 的 app/bun/index.js 读不出来`)
+    else {
+      for (const marker of REQUIRED_INDEX_MARKERS) {
+        if (!raw.includes(marker)) problems.push(`${label} 的 app/bun/index.js 缺关键符号：${marker}`)
+      }
+    }
+  }
   }
   if (versionLine === undefined) {
     const sample = norm
