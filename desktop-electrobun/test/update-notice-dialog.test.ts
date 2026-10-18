@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   UPDATE_NOTICE_HEIGHT,
+  UPDATE_NOTICE_BAND_TITLE,
   UPDATE_NOTICE_OP_METHOD,
   UPDATE_NOTICE_CLOSE_METHOD,
   UPDATE_NOTICE_STATUS_METHOD,
@@ -14,6 +15,7 @@ import {
   updateNoticeResizeHeight,
   type UpdateNoticePayload,
 } from '../src/bun/update-notice-dialog.ts'
+import { DIALOG_CLOSE_ATTR, DIALOG_TITLEBAR_CLASS } from '../src/bun/dialog-titlebar.ts'
 import { evaluateRuntimeUpdates } from '../src/shared/runtime-update.ts'
 import type { UpdateView } from '../src/shared/update.ts'
 
@@ -376,5 +378,51 @@ describe('updateNoticeOp：服务面入参校验', () => {
     expect(updateNoticeOp({ op: 'ignore' })).toBeNull()
     expect(updateNoticeOp({ op: 'ignore', versions: [] })).toBeNull()
     expect(updateNoticeOp({ op: 'ignore', versions: [1, 2] })).toBeNull()
+  })
+})
+
+// #164：win32/linux 上 hiddenInset 没有原生控件，提醒窗自绘标题带（关窗键 + 拖拽面）；
+// darwin 有系统红绿灯，一行不多。这条带上没有关闭键的话，win 上这张卡除了点按钮没别的出路。
+describe('updateNoticeHtml 的标题带（#164）', () => {
+  function scriptOf(html: string): string {
+    const start = html.lastIndexOf('<script>')
+    const end = html.lastIndexOf('</script>')
+    return html.slice(start + '<script>'.length, end)
+  }
+
+  function markupOf(html: string): string {
+    const start = html.lastIndexOf('<script>')
+    if (start < 0) throw new Error('没找到 <script>')
+    return html.slice(0, start)
+  }
+
+  test('darwin 不画带：没有带、没有留位 class、没有关闭键', () => {
+    const markup = markupOf(updateNoticeHtml(payload({ platform: 'darwin' })))
+    expect(markup).not.toContain('dlg-titlebar')
+    expect(markup).not.toContain(DIALOG_TITLEBAR_CLASS)
+    expect(markup).not.toContain(DIALOG_CLOSE_ATTR)
+    expect(markup).toContain('<body>')
+  })
+
+  test('缺省（载荷没带 platform）按 darwin 算，不画带', () => {
+    expect(markupOf(updateNoticeHtml(payload()))).not.toContain('dlg-titlebar')
+  })
+
+  test('win32 / linux 画带：留位 class + 关闭键 + 拖拽面 + 窗名', () => {
+    for (const platform of ['win32', 'linux'] as const) {
+      const markup = markupOf(updateNoticeHtml(payload({ platform })))
+      expect(markup).toContain(`<body class="${DIALOG_TITLEBAR_CLASS}">`)
+      expect(markup).toContain('electrobun-webkit-app-region-drag')
+      expect(markup).toContain(DIALOG_CLOSE_ATTR)
+      expect(markup).toContain(UPDATE_NOTICE_BAND_TITLE)
+      expect(markup).toContain('body { position: relative; }')
+    }
+  })
+
+  test('关窗键与 ESC 都接 closeSelf（#160 的关窗通道，不新增机制）', () => {
+    const script = scriptOf(updateNoticeHtml(payload({ platform: 'win32' })))
+    expect(script).toContain(`document.querySelector('[${DIALOG_CLOSE_ATTR}]')`)
+    expect(script).toContain('if (closeBtn) closeBtn.addEventListener(\'click\', closeSelf)')
+    expect(script).toContain("if (event.key === 'Escape') closeSelf()")
   })
 })

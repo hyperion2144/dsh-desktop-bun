@@ -24,6 +24,7 @@ import {
   type InstanceRecord,
 } from '../src/bun/single-instance.ts'
 import { SPLASH_HEIGHT, SPLASH_WIDTH, splashFailScript, splashHtml, splashStageScript } from '../src/bun/splash.ts'
+import { DIALOG_CLOSE_ATTR, DIALOG_TITLEBAR_HEIGHT, dialogTitlebarFrameHeight } from '../src/bun/dialog-titlebar.ts'
 import { FAILED_LABEL, SHELL_STAGES, stageLabel, stagePercent } from '../src/bun/stages.ts'
 
 function tempDir(): string {
@@ -478,5 +479,28 @@ describe('/__shell__/window 端点（A5 自绘窗口控制）', () => {
         return { maximized: true }
       },
     )
+  })
+})
+
+// #164：splash 也是 hiddenInset 窗，win32/linux 上拖不动。给它一条**只有拖拽、没有关闭键**的
+// 标题带：它自动关，给个 ✕ 是给假承诺（点了也不该由用户决定）。
+describe('启动界面的标题带（#164）', () => {
+  test('darwin 不画带（系统红绿灯现成），带的高度也不占', () => {
+    const html = splashHtml('dark', 'darwin')
+    expect(html).not.toContain('dlg-titlebar')
+    expect(html).toContain('<body>')
+    expect(dialogTitlebarFrameHeight(SPLASH_HEIGHT, 'darwin')).toBe(SPLASH_HEIGHT)
+  })
+
+  test('win32 / linux 画拖拽带，但不给关闭键', () => {
+    for (const platform of ['win32', 'linux'] as const) {
+      const html = splashHtml('dark', platform)
+      expect(html).toContain('<body class="dlg-with-titlebar">')
+      expect(html).toContain('electrobun-webkit-app-region-drag')
+      expect(html).toContain('body { position: relative; padding-top: 32px; }')
+      // 自动关的窗不给关闭键
+      expect(html).not.toContain(DIALOG_CLOSE_ATTR)
+      expect(dialogTitlebarFrameHeight(SPLASH_HEIGHT, platform)).toBe(SPLASH_HEIGHT + DIALOG_TITLEBAR_HEIGHT)
+    }
   })
 })

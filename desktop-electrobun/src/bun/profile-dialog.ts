@@ -7,6 +7,13 @@ import {
   shellThemeStyle,
   type ShellThemePreference,
 } from '../shared/shell-theme.ts'
+import {
+  DIALOG_CLOSE_ATTR,
+  DIALOG_TITLEBAR_CLASS,
+  dialogTitlebar,
+  dialogTitlebarStyle,
+} from './dialog-titlebar.ts'
+import type { CarrierPlatform } from './carrier.ts'
 /** Profile 操作的请求体（页面提交 / 壳侧通道共用这个形状） */
 export interface ProfileOpRequest {
   op: 'create' | 'migrate'
@@ -87,8 +94,24 @@ export function profileDialogHtml(
   kind: ProfileOpDialogKind,
   profiles: readonly string[],
   theme: ShellThemePreference = DEFAULT_SHELL_THEME,
+  // #164：win32/linux 上 hiddenInset 没有原生控件，自绘一条标题带（关窗键 + 拖拽面）；
+  // darwin 有系统红绿灯，默认按 darwin 算（不画带）。
+  platform: CarrierPlatform = 'darwin',
 ): string {
   const title = kind === 'create' ? '新建 Profile' : '迁移 Profile'
+  const band = dialogTitlebar({ platform, title })
+  // #164：CSS 也只随带一起上（darwin 不带一条死样式）。留位与「标题不重复画」靠 body 的 class。
+  const bandCss =
+    band.html === ''
+      ? ''
+      : [
+          dialogTitlebarStyle(),
+          '  /* 带是 absolute 锚在窗顶，body 得是定位父级。 */',
+          '  body { position: relative; }',
+          `  .${DIALOG_TITLEBAR_CLASS} { padding-top: 46px; }`,
+          `  .${DIALOG_TITLEBAR_CLASS} .title { display: none; }`,
+          `  .${DIALOG_TITLEBAR_CLASS} .head { padding-bottom: 10px; }`,
+        ].join('\n')
   const subtitle =
     kind === 'create' ? '名称一经创建就会立刻开窗并装依赖' : '复制整棵依赖树并重装依赖，可能要几分钟'
   // 忙碌文案在服务端就定好：页面作用域里没有 kind，内嵌脚本里任何**裸引用** TS 侧变量
@@ -139,9 +162,11 @@ ${shellThemeStyle()}
          color: var(--dsw-alias-label-secondary, #9a9aa2); }
   #msg.err { color: var(--dsw-alias-state-danger, #ff8787); }
   #msg.ok { color: #40c057; }
+${bandCss}
 </style>
 </head>
-<body>
+<body${band.bodyClass === '' ? '' : ` class="${band.bodyClass.trim()}"`}>
+${band.html}
   <div class="head">
     <div class="title">${title}</div>
     <div class="subtitle">${subtitle}</div>
@@ -199,6 +224,13 @@ ${fields}
     function closeSelf() {
       return invokeShell(${jsString(PROFILE_CLOSE_METHOD)}).catch(function () {})
     }
+    // #164：标题带的关闭键与 ESC 都接同一个 closeSelf——win32/linux 上 hiddenInset 没有
+    // 原生控件，不接的话这扇窗除了「提交成功」没有任何出路。
+    var closeBtn = document.querySelector('[${DIALOG_CLOSE_ATTR}]')
+    if (closeBtn) closeBtn.addEventListener('click', closeSelf)
+    document.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') closeSelf()
+    })
     // 提交期间不再接第二次：迁移要复制整棵依赖树再跑 pnpm install，双击会同时跑两遍。
     var busy = false
     f.addEventListener('submit', async (event) => {

@@ -30,6 +30,7 @@ import { loadNativeWebviewCore } from './native-webview.ts'
 import { GUEST_DEFAULT_URL, OFFSCREEN_GUEST_RECT } from '../shared/guest-policy.ts'
 import { resolveAppVersion } from './app-version.ts'
 import { SPLASH_HEIGHT, SPLASH_WIDTH, splashFailScript, splashHtml, splashStageScript } from './splash.ts'
+import { dialogTitlebarFrameHeight } from './dialog-titlebar.ts'
 import { readShellTheme } from './theme-source.ts'
 import { stageLabel, stagePercent, type ShellStage } from './stages.ts'
 import { createTray, type TrayHandle } from './tray.ts'
@@ -1008,10 +1009,14 @@ async function restartDsh(): Promise<void> {
     if (showSplash) {
       splash = new BrowserWindow({
         title: APP_NAME,
-        html: splashHtml(readShellTheme(dshHome(), instanceProfile)),
+        html: splashHtml(readShellTheme(dshHome(), instanceProfile), platform),
         renderer,
         titleBarStyle: 'hiddenInset',
-        frame: { width: SPLASH_WIDTH, height: SPLASH_HEIGHT },
+        // #164：win32/linux 多一条标题带，窗高相应加一段（darwin 有系统红绿灯，不加）。
+        frame: {
+          width: SPLASH_WIDTH,
+          height: dialogTitlebarFrameHeight(SPLASH_HEIGHT, platform),
+        },
       })
       // 冷启动的 splash 早已收掉（主窗 dom-ready 收尾）；这里重新立一面。dom-ready 前不能推 JS
       //（原生层 FATAL，见启动段注释），先记阶段，dom-ready 后补推。
@@ -1385,11 +1390,21 @@ function openProfileOpDialog(kind: ProfileOpDialogKind): void {
     .then((rpc) => {
       dialog = new BrowserWindow({
         title: kind === 'create' ? '新建 Profile' : '迁移 Profile',
-        html: profileDialogHtml(kind, listProfiles(dshHome(), instanceProfile), readShellTheme(dshHome(), instanceProfile)),
+        // #164：platform 传进去，win32/linux 才画标题带（关窗键 + 拖拽面）。
+        html: profileDialogHtml(
+          kind,
+          listProfiles(dshHome(), instanceProfile),
+          readShellTheme(dshHome(), instanceProfile),
+          platform,
+        ),
         renderer,
         titleBarStyle: 'hiddenInset',
         // 高度按内容排：标题居中后没有大片空白，也不留下滚动。
-        frame: { width: 460, height: kind === 'create' ? 210 : 290 },
+        // #164：win32/linux 的标题带要占一段高度（darwin 有系统红绿灯，不占）。
+        frame: {
+          width: 460,
+          height: dialogTitlebarFrameHeight(kind === 'create' ? 210 : 290, platform),
+        },
         ...(rpc === null ? {} : { rpc }),
       })
       dialog.on('closed', () => void refreshTray())
@@ -1453,7 +1468,8 @@ async function openUpdateNotice(profile: string, payload: UpdateNoticePayload): 
           this.win.setFrame(x, y, width, height)
         }
       },
-      { renderer, rpc },
+      // #164：platform 决定提醒窗画不画标题带（win32/linux 画，窗高也相应加一段）。
+      { renderer, rpc, platform },
     )
   updateNoticeWindows.set(profile, handle)
   const win = handle.open(payload)
@@ -1654,10 +1670,14 @@ const startupSplash = (): BrowserWindow | null => {
   if (noWindow) return null
   const win = new BrowserWindow({
     title: APP_NAME,
-    html: splashHtml(readShellTheme(dshHome(), instanceProfile)),
+    html: splashHtml(readShellTheme(dshHome(), instanceProfile), platform),
     renderer,
     titleBarStyle: 'hiddenInset',
-    frame: { width: SPLASH_WIDTH, height: SPLASH_HEIGHT },
+    // #164：win32/linux 多一条标题带（可拖、无关闭键），窗高相应加一段。
+    frame: {
+      width: SPLASH_WIDTH,
+      height: dialogTitlebarFrameHeight(SPLASH_HEIGHT, platform),
+    },
   })
   // 页面还没加载完时推阶段会被丢掉：dom-ready 之后再补推一次（也是浏览器对象可用的信号）
   win.on('dom-ready', () => {

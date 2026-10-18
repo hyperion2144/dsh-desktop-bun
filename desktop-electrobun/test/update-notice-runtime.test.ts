@@ -93,6 +93,10 @@ function run(html: string): Harness {
   const doc = {
     getElementById: (id: string) => byId.get(id) ?? null,
     querySelectorAll: (selector: string) => (selector === '[data-op]' ? actions : []),
+    // #164 的标题带关窗键靠 querySelector 找；这里永远找不到（桩里没有带），当作无带窗。
+    querySelector: () => null,
+    // ESC 关窗同理：桩里没有监听器可挂。
+    addEventListener: () => {},
     body,
   }
 

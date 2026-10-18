@@ -8,6 +8,8 @@
 
 import { APP_NAME } from '../shared/app.ts'
 import { FAILED_LABEL, stageLabel, stagePercent, type ShellStage } from './stages.ts'
+import { dialogTitlebar, dialogTitlebarStyle } from './dialog-titlebar.ts'
+import type { CarrierPlatform } from './carrier.ts'
 import {
   DEFAULT_SHELL_THEME,
   shellThemeAttr,
@@ -33,7 +35,20 @@ export function splashFailScript(message: string): string {
 
   // 跟产品主题走：读 profile 的 ui-theme 偏好，没配就跟随系统（= DSH 的缺省口径）。
   // 配色走 CSS 变量 + prefers-color-scheme，所以系统切深浅色时这扇窗不用重开就能跟上。
-export function splashHtml(theme: ShellThemePreference = DEFAULT_SHELL_THEME): string {
+export function splashHtml(
+  theme: ShellThemePreference = DEFAULT_SHELL_THEME,
+  // #164：win32/linux 上 hiddenInset 没有原生控件，splash 也画一条拖拽带（**不给 ✕**：它自动关，
+  // 给了关闭键是给假承诺）；darwin 有系统红绿灯，默认按 darwin 算。
+  platform: CarrierPlatform = 'darwin',
+): string {
+  const band = dialogTitlebar({ platform, title: APP_NAME, close: false })
+  const bandCss =
+    band.html === ''
+      ? ''
+      : [
+          dialogTitlebarStyle(),
+          '  body { position: relative; padding-top: 32px; }',
+        ].join('\n')
   return `<!doctype html>
 <html lang="zh-CN"${shellThemeAttr(theme)}>
 <head>
@@ -56,9 +71,11 @@ ${shellThemeStyle()}
   .hint { display: none; max-width: 340px; text-align: center; color: var(--dsw-alias-label-secondary, #7c7c85); font-size: 12px; }
   body.failed .track { display: none; }
   body.failed .error, body.failed .hint { display: block; }
+${bandCss}
 </style>
 </head>
-<body>
+<body${band.bodyClass === '' ? '' : ` class="${band.bodyClass.trim()}"`}>
+${band.html}
   <div class="name">${APP_NAME}</div>
   <div class="stage" id="stage">正在启动…</div>
   <div class="track"><div class="bar" id="bar"></div></div>
