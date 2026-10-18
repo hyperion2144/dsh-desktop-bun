@@ -95,9 +95,9 @@ export async function awaitParentExit(input: {
 /**
  * 真正自拉起：spawn 一份 detached 的自身可执行文件。
  *
- * stdio 全丢（inherit 会把新实例的输出灌进即将退出的旧壳的 stdout，新实例继承的是死进程的 fd）；
- * 不 unref 依赖 Bun 的 detached 语义——这里显式给 `stdout/stderr/stdin: 'ignore'`，
- * 让子进程与旧壳的终端解耦。**不做任何退出动作**：退出是调用方（index.ts）的事，
+ * stdin/stdout 全丢；stderr 在 onLog 存在时用 pipe 捕获（launcher 的启动错误否则不可见）。
+ * 不依赖 Bun 的 detached 语义——显式给 stdio，让子进程与旧壳的终端解耦。
+ * **不做任何退出动作**：退出是调用方（index.ts）的事，
  * 顺序是「先拉起、后 shutdown」，否则没人执行 spawn。
  *
  * `launcherExe` / `spawn` 仅测试注入。
@@ -116,7 +116,7 @@ export async function relaunchDesktopApp(input: {
     return plan
   }
   const env = { ...(input.env ?? process.env), [RELAUNCH_PID_ENV]: String(input.pid) }
-  const launch = input.spawn ?? defaultSpawn
+  const launch = input.spawn ?? ((exe, env) => defaultSpawn(exe, env, input.onLog))
   try {
     launch(plan.exe, env)
   } catch (error) {
@@ -128,13 +128,26 @@ export async function relaunchDesktopApp(input: {
   return plan
 }
 
-function defaultSpawn(exe: string, env: Record<string, string>): void {
+function defaultSpawn(exe: string, env: Record<string, string>, onLog?: (line: string) => void): void {
   const proc = Bun.spawn([exe], {
     env,
     stdin: 'ignore',
     stdout: 'ignore',
-    stderr: 'ignore',
+    stderr: onLog === undefined ? 'ignore' : 'pipe',
   })
   // 新实例不挂在旧壳的进程组上；旧壳退出时不要把它一起带走。
   proc.unref()
+  const stderr = proc.stderr
+  if (onLog !== undefined && stderr instanceof ReadableStream) {
+    void (async () => {
+      try {
+        for await (const chunk of stderr) {
+          const text = new TextDecoder().decode(chunk).trimEnd()
+          if (text !== '') onLog(`[shell] 新实例 launcher stderr：${text}`)
+        }
+      } catch {
+        // 旧壳可能先退出，读不到 stderr 是正常路径。
+      }
+    })()
+  }
 }
