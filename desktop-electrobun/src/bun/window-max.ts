@@ -4,15 +4,16 @@
 // 带 WS_MAXIMIZEBOX 的窗口把系统最大化缩到工作区（work area = 屏幕减任务栏）。
 // 本模块提供三件事：①样式位补丁（ensureNativeMaximizeStyles：给本进程无边框窗补
 // maximize/minimize/sysmenu 位，之后 maximize()/unmaximize() 全走系统行为）；
-// ②工作区只读取法（getWorkAreaForFrame，bun:ffi user32）；③最大化态纯判定
-// （deriveMaximized：原生旗标优先、几何兜底）；④heal 自检的损坏判定与重摆裁决
+// ②工作区取逻辑屏幕工作区（screen-work-area.ts 选屏，index.ts 读 Screen）；③最大化态
+// 纯判定（deriveMaximized：原生旗标优先、几何兜底）；④heal 自检的损坏判定与重摆裁决
 // （isMaximizedPlacementDamaged + healVerdict，#80 三轮）。
 //
 // 维护者拍板（#80）：拒绝一切自绘窗口尺寸——本模块不做、仓内也不再有任何
 // setFrame 式摆位，摆位全部交给系统 API。
 //
-// 取显示器不走 MonitorFromPoint（POINT 按值传参，FFI 结构体对齐风险），
-// 走 MonitorFromRect（LPCRECT 指针）：把窗口帧装进 4×i32 缓冲即可。
+// 坐标口径（#73）：getFrame 是 Electrobun 逻辑 px，工作区必须取同一空间（Screen 的
+// display.workArea）。user32 GetMonitorInfoW 的物理 px 已弃用：2K@125% 下四边全差 20%，
+// 几何兜底恒假，启动旗标未落时窗口态读成非最大化（标题栏单方框图标）。
 
 import { dlopen, FFIType, JSCallback, ptr, type Pointer } from 'bun:ffi'
 
@@ -25,29 +26,38 @@ export interface WindowFrame {
 }
 
 /**
- * 帧相等容差（px）：工作区比对允许的残差，吃掉 DPI 取整与贴靠残边。
- * 设 8px：任务栏 40+px、贴靠吸附误差都在 ±1~2px，误判不了。
+ * 最大化判定容差（px，每条边）：必须罩住 THICKFRAME 补偿带——100% 缩放下 ≈9px/边、
+ * 125% 缩放下 7.2 逻辑px/边（#73 第五轮 2K 实测）；任务栏 40+px、贴靠吸附误差都在
+ * ±1~2px。12px 既漏不掉真最大化、也误判不了普通窗口。
  */
-export const FRAME_TOLERANCE_PX = 8
+export const MAXIMIZE_EDGE_TOLERANCE_PX = 12
 
 /**
- * 纯判定：当前帧是否「已最大化」。原生旗标优先（系统最大化的权威信号，
- * 实机上 getFrame 的坐标空间与工作区物理像素不一致时必须仍能判出）；几何比对
- * 只补旗标盖不到的场景（系统贴靠 Win+方向键、启动期旗标未落）。
+ * 纯判定：当前帧是否「已最大化」。原生旗标优先（系统最大化的权威信号）；几何比对
+ * 只补旗标盖不到的场景（启动期旗标未落、系统贴靠 Win+方向键）。
+ *
+ * 按边比对（#73）：Windows 无边框窗（WS_POPUP）最大化时按隐形缩放边框把窗口四周
+ * 外扩 THICKFRAME 补偿带（100% ≈9px/边、125% ≈7.2 逻辑px），x 与 width 同时偏、
+ * 同号同量。逐项比 x/y/width/height 必须把容差放到 ≥9 才不漏判；按边比只需一条
+ * 容差且语义直白。
+ *
+ * 坐标前提：frame（getFrame）与 workArea 必须同一坐标空间。生产路径注入 Screen 的
+ * 逻辑工作区（screen-work-area.ts）；user32 rcWork 是物理 px，125% 下四边全差 20%、
+ * 几何兜底恒假——那正是 #73「启动即最大化仍显示单方框」的根因，勿再回退。
  */
 export function deriveMaximized(
   frame: WindowFrame,
   workArea: WindowFrame | null,
   nativeMaximized: boolean,
-  tolerance: number = FRAME_TOLERANCE_PX,
+  tolerance: number = MAXIMIZE_EDGE_TOLERANCE_PX,
 ): boolean {
   if (workArea === null) return nativeMaximized
   if (nativeMaximized) return true
   return (
     Math.abs(frame.x - workArea.x) <= tolerance &&
     Math.abs(frame.y - workArea.y) <= tolerance &&
-    Math.abs(frame.width - workArea.width) <= tolerance &&
-    Math.abs(frame.height - workArea.height) <= tolerance
+    Math.abs(frame.x + frame.width - (workArea.x + workArea.width)) <= tolerance &&
+    Math.abs(frame.y + frame.height - (workArea.y + workArea.height)) <= tolerance
   )
 }
 
@@ -89,10 +99,10 @@ export function frameOvershoot(frame: WindowFrame, workArea: WindowFrame): numbe
  * 这里恰恰相反，专审「旗标为真时是否外扩超带」。两个相反的语义塞不进同一个函数——
  * 第三轮重开（双屏 2K 越屏依旧）的根因就是 heal 错借了它，判定恒真、自愈从未触发。
  *
- * 坐标前提（第五轮实机修正）：frame（getFrame，逻辑px）与 workArea（rcWork，
- * 物理px）并不同空间——2K@125% 实测 frame 恰为物理帧 ÷1.25（2062.4=(2560+18)/1.25）。
- * 等比差异让右/下读数偏小（方向性不误报），补偿侧 7.2px 由容差吸收；更高缩放
- * 把真损伤读数压进容差下属漏报，届时以 heal 日志数值再标定。
+ * 坐标口径（#73 修正）：heal 与状态判定现在都取 Screen 逻辑工作区，frame 与 workArea
+ * 同属逻辑坐标系（2K@125% 实测 frame=物理帧÷1.25、workArea=物理工作区÷1.25），
+ * 补偿带 7.2 逻辑px 由容差吸收。若将来工作区退回物理 px，读数会整体偏小（方向性
+ * 不误报），更高缩放会把真损伤压进容差，届时以 heal 日志数值再标定。
  */
 export function isMaximizedPlacementDamaged(
   frame: WindowFrame,
@@ -116,69 +126,6 @@ export type HealVerdict = 'clean' | 'replace' | 'exhausted'
 export function healVerdict(damaged: boolean, priorReplaces: number): HealVerdict {
   if (!damaged) return 'clean'
   return priorReplaces >= HEAL_MAX_REPLACES ? 'exhausted' : 'replace'
-}
-
-interface User32Symbols {
-  monitorFromRect: (rect: Pointer | null, flags: number) => Pointer | bigint | null
-  getMonitorInfoW: (hMonitor: Pointer | bigint | null, info: Pointer | null) => number
-}
-
-let user32: User32Symbols | null | undefined
-
-function loadUser32(): User32Symbols | null {
-  // 懒加载：dlopen 只在真调用的平台上发生（非 Windows 上 user32.dll 必失败）。
-  try {
-    const lib = dlopen('user32.dll', {
-      MonitorFromRect: { args: [FFIType.pointer, FFIType.u32], returns: FFIType.pointer },
-      GetMonitorInfoW: { args: [FFIType.pointer, FFIType.pointer], returns: FFIType.i32 },
-    })
-    return {
-      monitorFromRect: (rect, flags) => lib.symbols.MonitorFromRect(rect, flags),
-      getMonitorInfoW: (hMonitor, info) => lib.symbols.GetMonitorInfoW(hMonitor, info),
-    }
-  } catch {
-    return null
-  }
-}
-
-/** MONITOR_DEFAULTTONEAREST：含窗口帧的显示器（帧已不可见时取最近）。 */
-const MONITOR_DEFAULTTONEAREST = 2
-/** MONITORINFO 布局：cbSize(4) + rcMonitor(16) + rcWork(16) + dwFlags(4)。 */
-const MONITORINFO_SIZE = 40
-const RC_WORK_OFFSET = 20
-
-/**
- * Windows：窗口帧所在显示器的工作区（屏幕减任务栏）。ffi 不可用 / 调用失败
- * 返回 null，调用方退回原生 maximize（老行为兜底，不比现状差）。
- */
-export function getWorkAreaForFrame(near: WindowFrame): WindowFrame | null {
-  if (process.platform !== 'win32') return null
-  if (user32 === undefined) user32 = loadUser32()
-  const lib = user32
-  if (lib === null) return null
-  try {
-    // RECT{left,top,right,bottom} = 窗口帧（i32 ×4），取中心所在显示器足够。
-    const rect = new Int32Array([
-      Math.round(near.x),
-      Math.round(near.y),
-      Math.round(near.x + near.width),
-      Math.round(near.y + near.height),
-    ])
-    const hMonitor = lib.monitorFromRect(ptr(rect), MONITOR_DEFAULTTONEAREST)
-    if (!hMonitor) return null
-    const info = new ArrayBuffer(MONITORINFO_SIZE)
-    new DataView(info).setUint32(0, MONITORINFO_SIZE, true)
-    if (lib.getMonitorInfoW(hMonitor, ptr(info)) === 0) return null
-    const view = new DataView(info)
-    const left = view.getInt32(RC_WORK_OFFSET, true)
-    const top = view.getInt32(RC_WORK_OFFSET + 4, true)
-    const right = view.getInt32(RC_WORK_OFFSET + 8, true)
-    const bottom = view.getInt32(RC_WORK_OFFSET + 12, true)
-    if (right <= left || bottom <= top) return null
-    return { x: left, y: top, width: right - left, height: bottom - top }
-  } catch {
-    return null
-  }
 }
 
 // ── 系统最大化样式补丁（上游 electrobun#558 的仓内落地，双屏跨屏修复）──────
@@ -298,15 +245,21 @@ export interface NativeWindowActions {
   unmaximize(): void
 }
 
+/** 逻辑工作区取法：给定窗口帧返回所在显示器工作区；null = 取不到（判定退回原生旗标）。 */
+export type WorkAreaLookup = (near: WindowFrame) => WindowFrame | null
+
 /** 平台/工作区/样式补丁的注入点（测试用；缺省见各字段）。 */
 export interface WindowMaxOptions {
   /** 平台（缺省 process.platform）。 */
   platform?: NodeJS.Platform
-  /** 工作区取法（缺省 win32 走 user32 ffi，其余平台恒 null）。 */
-  workArea?: (near: WindowFrame) => WindowFrame | null
+  /** 逻辑工作区取法（缺省 null＝只看原生旗标；#73 生产由 index.ts 注入 Screen 工作区）。 */
+  workArea?: WorkAreaLookup
   /** 样式补丁生效动作（缺省 win32 走枚举补丁，其余平台恒 false；幂等可重入）。 */
   maximizeStylesPatched?: () => boolean
 }
+
+/** 未注入工作区取法时的缺省：返回 null → win32 判定退回原生旗标（与旧非 win32 语义一致）。 */
+export const NO_WORK_AREA: WorkAreaLookup = () => null
 
 /** 最大化态聚合结果（GET /__shell__/window 的载荷形状）。 */
 export interface WindowMaxState {
@@ -343,7 +296,7 @@ export function windowMaxState(
   opts: WindowMaxOptions = {},
 ): WindowMaxState {
   const platform = opts.platform ?? process.platform
-  const workAreaOf = opts.workArea ?? getWorkAreaForFrame
+  const workAreaOf = opts.workArea ?? NO_WORK_AREA
   const frame = win.getFrame()
   const workArea = platform === 'win32' ? workAreaOf(frame) : null
   return { maximized: deriveMaximized(frame, workArea, win.isMaximized()) }

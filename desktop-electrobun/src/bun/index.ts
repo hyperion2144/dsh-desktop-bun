@@ -7,7 +7,8 @@ import { ApplicationMenu, BrowserView, BrowserWindow, BuildConfig, ContextMenu, 
 import { acceptShimScript } from './accept-shim.ts'
 import { systemLocale } from './locale.ts'
 import { installApplicationMenu } from './menu.ts'
-import { deriveMaximized, ensureNativeMaximizeStyles, getWorkAreaForFrame, HEAL_MAX_REPLACES, healVerdict, isMaximizedPlacementDamaged, toggleWindowMaximize, windowMaxState, type WindowMaxState } from './window-max.ts'
+import { deriveMaximized, ensureNativeMaximizeStyles, HEAL_MAX_REPLACES, healVerdict, isMaximizedPlacementDamaged, toggleWindowMaximize, windowMaxState, type WindowMaxState } from './window-max.ts'
+import { pickWorkArea } from './screen-work-area.ts'
 import { shellLogLine } from './shell-log.ts'
 import { bootPreloadScript } from './preload.ts'
 import { attachShellRpc } from './rpc-bridge.ts'
@@ -54,8 +55,8 @@ import type { UpdateNoticeCheckResult } from './update-notice-check.ts'
 import { confirmModalScript } from './input-modal.ts'
 import { navRulesFor } from '../shared/nav-rules.ts'
 import {
-  DEFAULT_WINDOW_HEIGHT,
-  DEFAULT_WINDOW_WIDTH,
+  defaultWindowFrame,
+  frameForPersist,
   readWindowFrame,
   readWindowMaximized,
   sanitizeFrame,
@@ -259,13 +260,33 @@ let quitting = false
 /** 关窗后是否只是隐藏：没有托盘（原生层没建成）时隐藏就叫不回来了，那时关窗等于退出。 */
 const closeToTray = (): boolean => tray !== null
 
-function displayBounds(): DisplayBounds[] {
+/**
+ * Screen.getAllDisplays() 的容错读取：失败只记日志并当空表，调用方各退回自己的兜底
+ * （窗口默认尺寸 / 最大化态退回原生旗标）。
+ */
+function screenDisplays(purpose: string): ReturnType<typeof Screen.getAllDisplays> {
   try {
-    return Screen.getAllDisplays().map((display) => display.bounds)
+    return Screen.getAllDisplays()
   } catch (error) {
-    console.warn(`[shell] 取显示器信息失败，窗口用默认尺寸：${String(error)}`)
+    console.warn(`[shell] 取显示器信息失败（${purpose}）：${String(error)}`)
     return []
   }
+}
+
+function displayBounds(): DisplayBounds[] {
+  return screenDisplays('窗口用默认尺寸').map((display) => display.bounds)
+}
+
+/**
+ * 逻辑工作区取法（#73）：Screen.getAllDisplays() 与 BrowserWindow.getFrame() 同属 Electrobun
+ * 逻辑坐标系；非 Windows / 无显示器数据 / 读取异常一律 null，判定退回原生旗标。
+ * 不直接调 user32 GetMonitorInfoW：那是物理 px，125% 缩放下与逻辑帧四边全差 20%。
+ */
+function workAreaForFrame(frame: WindowFrame): WindowFrame | null {
+  if (process.platform !== 'win32') return null
+  const workArea = pickWorkArea(frame, screenDisplays('最大化态退回原生旗标'))
+  if (workArea === null) console.warn('[shell] Screen 没有可用的显示器工作区，最大化态退回原生旗标')
+  return workArea
 }
 
 /** 落盘几何 → 可用几何；越界/太小/坏数据一律回默认（外接屏拔掉后不能把窗口丢在屏幕外）。 */
@@ -275,8 +296,25 @@ function windowStateFileOf(profile: string): string {
 }
 
 function restoreWindowFrame(profile: string = instanceProfile): WindowFrame {
-  const saved = sanitizeFrame(readWindowFrame(windowStateFileOf(profile)), displayBounds())
-  if (saved === null) return { width: DEFAULT_WINDOW_WIDTH, height: DEFAULT_WINDOW_HEIGHT, x: 0, y: 0 }
+  const file = windowStateFileOf(profile)
+  const raw = readWindowFrame(file)
+  const saved = sanitizeFrame(raw, displayBounds())
+  if (saved === null) return defaultWindowFrame()
+  // #73 回归：旧版 saveFrameNow 把最大化帧当常规帧落盘，SW_RESTORE 会回到一个和
+  // 工作区一样大的「窗口化」帧——几何判定把窗口态误读成最大化（图标恒为还原、按钮
+  // 只会 unmaximize）。与工作区几乎重合的落盘帧不可信，退回默认几何；正常窗口不会
+  // 刚好铺满工作区，这个判定只命中中毒帧。
+  if (raw !== null) {
+    const workArea = workAreaForFrame(raw)
+    if (workArea !== null && deriveMaximized(raw, workArea, false)) {
+      console.warn(
+        `[shell] 丢弃与工作区重合的窗口位置（最大化帧被落盘成常规帧）：${String(raw.x)},${String(raw.y)} ${String(raw.width)}×${String(raw.height)}`,
+      )
+      const repaired = defaultWindowFrame()
+      writeWindowFrame(file, repaired, readWindowMaximized(file))
+      return repaired
+    }
+  }
   console.log(`[shell] 还原窗口位置：${String(saved.x)},${String(saved.y)} ${String(saved.width)}×${String(saved.height)}`)
   return saved
 }
@@ -306,11 +344,17 @@ function scheduleFrameSave(win: BrowserWindow, profile: string): void {
 function saveFrameNow(win: BrowserWindow, profile: string): void {
   const frame = win.getFrame()
   const native = win.isMaximized()
-  writeWindowFrame(
-    windowStateFileOf(profile),
-    { x: Math.round(frame.x), y: Math.round(frame.y), width: Math.round(frame.width), height: Math.round(frame.height) },
-    native || deriveMaximized(frame, getWorkAreaForFrame(frame), native),
-  )
+  const maximized = native || deriveMaximized(frame, workAreaForFrame(frame), native)
+  const rounded: WindowFrame = {
+    x: Math.round(frame.x),
+    y: Math.round(frame.y),
+    width: Math.round(frame.width),
+    height: Math.round(frame.height),
+  }
+  // #73 回归：最大化帧不是还原帧——最大化收场时沿用上一次的常规帧（frameForPersist），
+  // 否则下次 SW_RESTORE 会落到工作区大小，窗口态被几何判定误读成最大化。
+  const file = windowStateFileOf(profile)
+  writeWindowFrame(file, frameForPersist(rounded, maximized, readWindowFrame(file)), maximized)
 }
 
 /**
@@ -479,9 +523,9 @@ function healMaximizedPlacement(win: BrowserWindow, profile: string, reason: str
     return
   }
   const frame = win.getFrame()
-  const workArea = getWorkAreaForFrame(frame)
+  const workArea = workAreaForFrame(frame)
   if (workArea === null) {
-    shellLogLine(`[shell] #80 heal 检查（${reason}）：workArea 取不到（ffi 失败？），跳过`)
+    shellLogLine(`[shell] #80 heal 检查（${reason}）：workArea 取不到（Screen 无显示器数据），跳过`)
     return
   }
   const verdict = healVerdict(isMaximizedPlacementDamaged(frame, workArea), healReplaces.get(profile) ?? 0)
@@ -574,7 +618,7 @@ function focusedWindow(): BrowserWindow | null {
 function focusedWindowState(): WindowMaxState {
   const win = focusedWindow()
   if (win === null) return { maximized: false }
-  return windowMaxState(win)
+  return windowMaxState(win, { workArea: workAreaForFrame })
 }
 
 /** 起/profile 复用一份服务面：每份服务面 = 一个 dsh 宿主 + 一个 loopback origin。 */
@@ -642,7 +686,7 @@ function serviceOptionsFor(profile: string): ServiceOptions {
         win.minimize()
       } else if (action === 'toggle-maximize') {
         // 与 RPC window_toggle_maximize 同语义：判定/样式位/原生切换收口在 window-max.ts（#112）。
-        toggleWindowMaximize(win)
+        toggleWindowMaximize(win, { workArea: workAreaForFrame })
       } else {
         // #50 验证反馈：兑底端点的关窗也走统一策略（要拿到 profile 才能判主/副窗）
         const focusedEntry = [...windows.values()].find((entry) => entry.window === win)
@@ -777,7 +821,7 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
     // 漏斗状态推导要用的只读帧（本仓不做任何窗口摆位，#80）。
     getFrame: () => win.getFrame(),
   }
-  const shellRpcHandle = await attachShellRpc({ router: () => svc.rpcRouter(), grant, window: rpcWindow })
+  const shellRpcHandle = await attachShellRpc({ router: () => svc.rpcRouter(), grant, window: rpcWindow, workArea: workAreaForFrame })
   win = new BrowserWindow({
     // D1：原生层同步评估的导航守卫——白名单页面 origin，其余导航被拦（外链交给 open_external）
     navigationRules: navRulesFor({ origin: svc.state.origin }),
