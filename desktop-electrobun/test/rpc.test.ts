@@ -478,28 +478,14 @@ describe('多窗口的数据面（列表类命令要看到别的 profile / 正�
 })
 describe('/__shell__/rpc 端点', () => {
   /**
-   * 拿两个互不相同的空闲端口：一个当上游（起完就放掉，保持不可达），一个给壳。
+   * 壳的端口交给系统分配（#168），句柄里的 origin 就是真实端口；上游只占位——这里要的就是
+   * 「转发打不通」，固定一个没人听的端口即可（旧写法是先占后放挑端口，那个窗口会被别的 socket 抢走）。
    * 早先版本让壳绑在上游端口上，于是「转发」其实打回了壳自己——测出来的 200 是自环，
    * 掩盖了真契约：壳自答端点只在**根绝对路径**（见 src/shared/admission.ts 的 SHELL_PREFIX）。
    */
-  function takePorts(count: number): number[] {
-    const probes = Array.from({ length: count }, () =>
-      Bun.serve({ port: 0, fetch: () => new Response('probe') }),
-    )
-    const ports = probes.map((probe) => {
-      const port = probe.port
-      if (port === undefined) throw new Error('临时端口没拿到')
-      return port
-    })
-    for (const probe of probes) probe.stop(true)
-    return ports
-  }
 
   async function withServer(run: (origin: string, token: string) => Promise<void>): Promise<void> {
     const dist = mkdtempSync(join(tmpdir(), 'dsh-rpc-dist-'))
-    const ports = takePorts(2)
-    const upstreamPort = ports[0] ?? 0
-    const port = ports[1] ?? 0
     const router = createRpcRouter({
       get_desktop_client_environment: () => ({ platform: 'darwin', profile: 'desktop' }),
       boom: () => {
@@ -510,8 +496,8 @@ describe('/__shell__/rpc 端点', () => {
       distDir: dist,
       token: 'tok',
       cookie: 'dsh-auth-x=v1.y',
-      upstreamOrigin: `http://127.0.0.1:${String(upstreamPort)}`,
-      port,
+      upstreamOrigin: 'http://127.0.0.1:1',
+      port: 0,
       bootPayload: () => null,
       onRpc: (raw) => dispatchRpc(router, raw),
     })

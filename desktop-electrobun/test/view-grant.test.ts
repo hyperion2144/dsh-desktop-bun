@@ -34,17 +34,6 @@ function sequenceTokens(): () => string {
   }
 }
 
-/** 借几个空闲端口（绑 0 拿系统分配，再立刻释放）。 */
-async function takePorts(count: number): Promise<number[]> {
-  const probes: { stop: (close?: boolean) => void; port: number }[] = []
-  for (let i = 0; i < count; i += 1) {
-    const probe = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data: () => {}, open: () => {} } })
-    probes.push({ stop: (close?: boolean) => probe.stop(close), port: probe.port })
-  }
-  const ports = probes.map((probe) => probe.port)
-  for (const probe of probes) probe.stop(true)
-  return ports
-}
 
 describe('每视图授权：纯逻辑', () => {
   test('shell 视图全放行，guest 只放行白名单', () => {
@@ -121,17 +110,16 @@ describe('每视图授权：壳端点', () => {
 
   async function harness(): Promise<Harness> {
     const dist = tempDir('dsh-view-dist-')
-    const ports = await takePorts(2)
-    const upstreamPort = ports[0] ?? 0
-    const port = ports[1] ?? 0
+    // #168：壳的端口交给系统分配（句柄里的 origin 就是真实端口）；上游只占位——这个 harness
+    // 不反代任何东西，固定一个没人听的端口即可（旧写法是先占后放，那个窗口会被别的 socket 抢走）。
     const views = createViewRegistry(sequenceTokens())
     const calls: string[] = []
     const server = startShellServer({
       distDir: dist,
       token: 'tok',
       cookie: 'dsh-auth-x=v1.y',
-      upstreamOrigin: `http://127.0.0.1:${String(upstreamPort)}`,
-      port,
+      upstreamOrigin: 'http://127.0.0.1:1',
+      port: 0,
       bootPayload: () => ({ injections: [{ kind: 'global', name: '__DSH_BOOT__' }], streamBaseUrl: 'http://127.0.0.1:1' }),
       views,
       onRpc: (raw) => {

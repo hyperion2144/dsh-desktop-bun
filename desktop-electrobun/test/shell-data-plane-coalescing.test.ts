@@ -24,14 +24,6 @@ interface Health {
 const readHealth = async (origin: string): Promise<Health> =>
   (await (await fetch(`${origin}/__shell__/health`)).json()) as Health
 
-/** 拿一个空闲端口（Bun.serve 探针占用后立即放掉）——壳的 port 参数不吃 0（data-plane.test 同款）。 */
-function takeFreePort(): number {
-  const probe = Bun.serve({ port: 0, fetch: () => new Response('probe') })
-  const port = probe.port
-  probe.stop(true)
-  if (port === undefined) throw new Error('临时端口没拿到')
-  return port
-}
 
 interface Upstream {
   origin: string
@@ -91,7 +83,8 @@ function withServer(
     token: 'tok',
     cookie: 'dsh-auth-x=v1.y',
     upstreamOrigin,
-    port: takeFreePort(),
+    // #168：端口交给系统分配，句柄里的 origin 就是真实端口（不再「先占后放」挑端口，那个窗口会被抢）。
+    port: 0,
     bootPayload: () => null,
     onRpc: async () => ({ status: 200, body: {} }),
     aggregation: opts.aggregation,

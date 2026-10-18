@@ -70,6 +70,7 @@
 - 更新提醒窗点「稍后」没反应（#160）：关窗改由壳代劳——页面里的 window.close 在 html: 文档上是空操作（Chromium 忽略非脚本打开文档的关窗），动作成功后的自动关窗同修。
 - 新建/迁移 Profile 的窗做完动作不关（#162）：关窗同样改由壳代劳（`profile_close` 通道，与 #160 同一颗雷）；失败时不关窗，用户可留在窗里改名重试。
 - Windows/Linux 上弹窗没有关闭按钮（#164）：`hiddenInset` 在这两个平台不画原生控件，弹窗自绘一条轻标题带（标题 + 拖拽热区 + ✕），启动 splash 只给拖拽带（它自动关，不给假关闭键）；带的高度计入窗高。
+- Windows CI 间歇性红在壳单测（#168）：测试不再「先占后放」挑端口，loopback 服务的 origin 改为绑定后按真实端口算（port 传 0 时由系统分配）。
 - inspector「NodeJS 诊断」面板快捷键首载静默失效（#68）：按声明物化 rc.2（宿主侧 bootstrap 路由与 Worker 就绪的竞态上游已修）；bun-preload 新增 Patch 16 给 client.js 的 bootstrap 失败加有界退避（250ms→8s、6 次）并补 F7 的页面注册失败日志；dev/test 前置新增物化树与声明版本不一致的 fail-fast。
 - 启动即恢复最大化的窗口，标题栏最大化按钮仍显示单方框（#73）：窗口态改按 Screen 逻辑工作区与逻辑帧逐边比对，启动时原生最大化旗标尚未落也能判出；最大化收场不再把最大化帧当成还原帧落盘，旧版写坏的位置在读取时丢弃——窗口还原后不会再被读成「已最大化」（按钮卡在还原态）。
 - 内置 PTC 模式下 run_code 报 worker-exit ERR_SOCKET_CLOSED（#152）：壳的 Bun preload 给 PTC worker 的 fd 7 控制通道补 Bun 侧 Duplex 兜底，覆盖 per-call 与 persistent 两个入口。

@@ -231,16 +231,14 @@ describe('/__shell__/activate 端点', () => {
     run: (origin: string) => Promise<void>,
   ): Promise<void> {
     const dist = tempDir()
-    const probe = Bun.serve({ port: 0, fetch: () => new Response('upstream') })
-    const port = probe.port
-    if (port === undefined) throw new Error('临时端口没拿到')
-    probe.stop(true)
+    // #168：端口交给系统分配，句柄里的 origin 就是真实端口（不再「先占后放」挑端口，那个窗口会被抢）。
     const server = startShellServer({
       distDir: dist,
       token: 'tok',
       cookie: 'dsh-auth-x=v1.y',
-      upstreamOrigin: `http://127.0.0.1:${String(port)}`,
-      port,
+      // #168：上游只是占位（这个 harness 不反代任何东西），固定一个没人听的端口即可，不需要先占后放。
+      upstreamOrigin: 'http://127.0.0.1:1',
+      port: 0,
       bootPayload: () => null,
       ...(onActivate === undefined ? {} : { onActivate }),
     })
@@ -409,16 +407,14 @@ describe('/__shell__/window 端点（A5 自绘窗口控制）', () => {
     onWindowState?: () => { maximized: boolean },
   ): Promise<void> {
     const dist = tempDir()
-    const probe = Bun.serve({ port: 0, fetch: () => new Response('upstream') })
-    const port = probe.port
-    if (port === undefined) throw new Error('临时端口没拿到')
-    probe.stop(true)
+    // #168：端口交给系统分配，句柄里的 origin 就是真实端口（不再「先占后放」挑端口，那个窗口会被抢）。
     const server = startShellServer({
       distDir: dist,
       token: 'tok',
       cookie: 'dsh-auth-x=v1.y',
-      upstreamOrigin: `http://127.0.0.1:${String(port)}`,
-      port,
+      // #168：上游只是占位（这个 harness 不反代任何东西），固定一个没人听的端口即可，不需要先占后放。
+      upstreamOrigin: 'http://127.0.0.1:1',
+      port: 0,
       bootPayload: () => null,
       onWindowControl,
       onWindowState,

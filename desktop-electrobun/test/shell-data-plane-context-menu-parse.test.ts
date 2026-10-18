@@ -22,13 +22,6 @@ const EMPTY: ContextMenuRequest = {
   filesPath: null,
 }
 
-function takeFreePort(): number {
-  const probe = Bun.serve({ port: 0, fetch: () => new Response('probe') })
-  const port = probe.port
-  probe.stop(true)
-  if (port === undefined) throw new Error('临时端口没拿到')
-  return port
-}
 
 interface Harness {
   origin: string
@@ -55,8 +48,10 @@ function harness(): Harness {
     distDir: dist,
     token: 'tok',
     cookie: 'dsh-auth-x=v1.y',
-    upstreamOrigin: `http://127.0.0.1:${String(takeFreePort())}`,
-    port: takeFreePort(),
+    // #168：上游只是占位（这个 harness 不反代任何东西），固定一个没人听的端口即可，不需要先占后放。
+    upstreamOrigin: 'http://127.0.0.1:1',
+    // #168：端口交给系统分配，句柄里的 origin 就是真实端口（不再「先占后放」挑端口，那个窗口会被抢）。
+    port: 0,
     bootPayload: () => null,
     onContextMenu: (request) => seen.push(request),
     onRpc: async (raw) => dispatchRpc(createRpcRouter(createCommandTable(deps)), raw),

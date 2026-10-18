@@ -97,10 +97,22 @@ interface WsData {
   path: string
 }
 
+
+/**
+ * loopback 服务的 origin：只绑 127.0.0.1，端口由监听句柄给出（#168）。
+ *
+ * 单独成函数是因为它是本文件里「端口 ⇒ origin」的唯一转换点，origin 又被准入（selfOrigin）、
+ * CORS、health 与日志共用；传固定端口时行为与从前逐字相同。
+ */
+export function loopbackOrigin(port: number): string {
+  return `http://127.0.0.1:${String(port)}`
+}
 export function startShellServer(options: ShellServerOptions): ShellServer {
   const log = options.onLog ?? (() => {})
   const startedAt = Date.now()
-  const origin = `http://127.0.0.1:${String(options.port)}`
+  // #168：origin/端口一律以**绑定后**的句柄为准。port 传 0 时端口由系统分配，
+  // 用 options.port 算出来的 origin 会是「端口 0」而不可用；下面 Bun.serve 之后统一改写。
+  let origin = ''
   const authority = new URL(options.upstreamOrigin).host
   let served = 0
   let proxied = 0
@@ -701,11 +713,19 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
     }
   }
 
-  log(`[shell] loopback origin = ${origin} | 页面 = ${origin}/${options.token}/ | 上游 = ${options.upstreamOrigin}`)
+  // #168：真实端口只有监听句柄知道；port: 0（系统分配）也在这里被翻译成真实端口，
+  // 于是测试不必再「先占后放」挑端口（那个窗口会被别的 socket 抢走，Windows CI 间歇性红）。
+  if (server.port === undefined) {
+    // 绑定成功必有端口；真拿不到就不要谎报一个「端口 0」的 origin 给页面（那是 #168 之前的坏形状）。
+    void server.stop(true)
+    throw new Error('loopback 服务没有拿到绑定端口')
+  }
+  const boundPort = server.port
+  origin = loopbackOrigin(boundPort)
 
   return {
     origin,
-    port: options.port,
+    port: boundPort,
     health,
     stop: () => {
       void server.stop(true)
