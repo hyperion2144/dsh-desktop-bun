@@ -305,13 +305,17 @@ export function packagedResourcesFromProcess(
   return null
 }
 
+/** 一次 launcher 查询/探测的结果；stderr 只用于诊断，不影响路径判定。 */
+export type LauncherRunResult = { status: number; stdout: string; stderr?: string }
+export type LauncherRun = (argv: string[], timeoutMs: number) => LauncherRunResult
+
 /** launcher 可执行文件路径：Electrobun 拉起 app 时会带 ELECTROBUN_LAUNCHER_PID；缺了退回 ppid。
  *  拿 PID 按平台解析 exe 路径（win32 用 PowerShell CIM，darwin 用 ps，linux 读 /proc）。
  *  任何一步不确定都返回 null——调用方逐级兜底（进程锚 → import.meta 链）。 */
 export function resolveLauncherExecutablePath(
   env: Record<string, string | undefined> = process.env,
   ppid: number = process.ppid,
-  run: (argv: string[], timeoutMs: number) => { status: number; stdout: string } = defaultLauncherRun,
+  run: LauncherRun = defaultLauncherRun,
   readlink: (path: string) => string | null = defaultLauncherReadlink,
   platform: NodeJS.Platform = process.platform,
 ): string | null {
@@ -335,12 +339,16 @@ export function resolveLauncherExecutablePath(
   return null
 }
 
-function defaultLauncherRun(argv: string[], timeoutMs: number): { status: number; stdout: string } {
+function defaultLauncherRun(argv: string[], timeoutMs: number): LauncherRunResult {
   try {
     const result = Bun.spawnSync({ cmd: argv, stdout: 'pipe', stderr: 'pipe', timeout: timeoutMs })
-    return { status: result.exitCode ?? 124, stdout: result.stdout?.toString() ?? '' }
+    return {
+      status: result.exitCode ?? 124,
+      stdout: result.stdout?.toString() ?? '',
+      stderr: result.stderr?.toString() ?? '',
+    }
   } catch {
-    return { status: 124, stdout: '' }
+    return { status: 124, stdout: '', stderr: '' }
   }
 }
 
@@ -382,6 +390,15 @@ export function packagedResourcesFromLauncher(
  *  进程内缓存一次（launcher 进程期不变，省重复 spawn——win32 解析要走一次 PowerShell CIM）。 */
 let launcherExeCache: { value: string | null } | undefined
 
+/** #167：冷启动成功解析到的 launcher 路径。Windows 重启时现场 CIM 可能返回空输出，
+ *  不能让「可执行文件明明在盘上」被误判成 launcher-unknown；只缓存已确认存在的路径。
+ *  传 null 清空（测试隔离与缓存失效）。 */
+let cachedLauncherPath: { value: string } | undefined
+
+export function rememberLauncherExecutablePath(path: string | null): void {
+  cachedLauncherPath = path === null || path.trim() === '' ? undefined : { value: path }
+}
+
 export function shellProjectRoot(input: {
   env: Record<string, string | undefined>
   launcherExe?: string | null
@@ -394,6 +411,7 @@ export function shellProjectRoot(input: {
       ? input.launcherExe
       : (launcherExeCache ??= { value: resolveLauncherExecutablePath(input.env) }).value
   const execPath = input.execPath ?? process.execPath
+  if (input.launcherExe === undefined && launcherExe !== null) rememberLauncherExecutablePath(launcherExe)
   return (
     input.env.DSH_SHELL_PROJECT ??
     packagedRootFromLauncher(launcherExe, exists) ??
@@ -402,6 +420,104 @@ export function shellProjectRoot(input: {
     packagedRoot(import.meta.dir) ??
     resolve(import.meta.dir, '..', '..')
   )
+}
+
+/** #167：重启用的 launcher 路径。先按 PID 现场解析（保留原行为），失败再逐级回退：
+ *  显式 DSH_SHELL_LAUNCHER → 冷启动缓存 → shellProjectRoot 的 launcher 缓存 → Windows
+ *  bun.exe 同目录 launcher.exe。每个候选都必须存在；全失败仍返回 null（调用方保持
+ *  launcher-unknown），绝不 spawn 不存在的文件。
+ */
+export type LauncherRelaunchSource = 'pid' | 'env' | 'cache' | 'sibling' | null
+
+export interface LauncherRelaunchResolution {
+  launcherExe: string | null
+  source: LauncherRelaunchSource
+  /** 诊断用：现场探测的命令/status/output，以及每个回退候选的结果。 */
+  attempts: string[]
+}
+
+const MAX_DIAGNOSTIC_TEXT = 400
+
+function clipDiagnostic(text: string): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim()
+  return oneLine.length > MAX_DIAGNOSTIC_TEXT ? `${oneLine.slice(0, MAX_DIAGNOSTIC_TEXT)}...` : oneLine
+}
+
+function launcherSiblingPath(execPath: string, platform: NodeJS.Platform): string | null {
+  if (platform !== 'win32') return null
+  return join(dirname(resolve(execPath)), 'launcher.exe')
+}
+
+export function resolveLauncherForRelaunch(input: {
+  env?: Record<string, string | undefined>
+  ppid?: number
+  execPath?: string
+  platform?: NodeJS.Platform
+  run?: LauncherRun
+  readlink?: (path: string) => string | null
+  exists?: (path: string) => boolean
+  /** 显式覆盖缓存；undefined = 用本进程缓存，null = 跳过缓存（测试用） */
+  cached?: string | null
+} = {}): LauncherRelaunchResolution {
+  const env = input.env ?? process.env
+  const platform = input.platform ?? process.platform
+  const exists = input.exists ?? existsSync
+  const run = input.run ?? defaultLauncherRun
+  const readlink = input.readlink ?? defaultLauncherReadlink
+  const ppid = input.ppid ?? process.ppid
+  const attempts: string[] = [
+    `开始解析 launcher（${env.ELECTROBUN_LAUNCHER_PID ?? `ppid:${String(ppid)}`}，platform=${platform}）`
+  ]
+
+  const probe: LauncherRun = (argv, timeoutMs) => {
+    const result = run(argv, timeoutMs)
+    attempts.push(
+      `pid=${env.ELECTROBUN_LAUNCHER_PID ?? `ppid:${String(ppid)}`} cmd=${argv.join(' ')} status=${String(result.status)} stdout=${clipDiagnostic(result.stdout)} stderr=${clipDiagnostic(result.stderr ?? '')}`
+    )
+    return result
+  }
+  const probeReadlink = (path: string): string | null => {
+    const target = readlink(path)
+    attempts.push(`readlink ${path} -> ${target ?? 'null'}`)
+    return target
+  }
+
+  const fresh = resolveLauncherExecutablePath(env, ppid, probe, probeReadlink, platform)
+  if (fresh !== null) {
+    if (exists(fresh)) {
+      rememberLauncherExecutablePath(fresh)
+      return { launcherExe: fresh, source: 'pid', attempts }
+    }
+    attempts.push(`pid 解析到不存在的路径：${fresh}`)
+  } else {
+    attempts.push('pid 解析没有落到路径')
+  }
+
+  const cacheCandidate =
+    input.cached !== undefined
+      ? input.cached
+      : (cachedLauncherPath?.value ?? launcherExeCache?.value ?? null)
+  const candidates: Array<{ path: string | null; source: 'env' | 'cache' | 'sibling' }> = [
+    { path: env.DSH_SHELL_LAUNCHER ?? null, source: 'env' },
+    { path: cacheCandidate, source: 'cache' },
+    { path: launcherSiblingPath(input.execPath ?? process.execPath, platform), source: 'sibling' },
+  ]
+
+  for (const candidate of candidates) {
+    const path = candidate.path?.trim() ?? ''
+    if (path === '') {
+      attempts.push(`${candidate.source} 候选为空`)
+      continue
+    }
+    if (!exists(path)) {
+      attempts.push(`${candidate.source} 候选不存在：${path}`)
+      continue
+    }
+    rememberLauncherExecutablePath(path)
+    return { launcherExe: path, source: candidate.source, attempts }
+  }
+
+  return { launcherExe: null, source: null, attempts }
 }
 
 export function layout(input: LayoutInput = {}): ShellLayout {
@@ -417,6 +533,7 @@ export function layout(input: LayoutInput = {}): ShellLayout {
   // 自定义安装/解压目录说了算；core 把进程从规范根拉起也不改口径。探测逐级兜底：
   // launcher 锚 → 进程锚 → import.meta 链（dev 态最终落这里）。链收敛在 shellProjectRoot（#107 抽取共用）。
   const launcherExe = input.launcherPath !== undefined ? input.launcherPath : resolveLauncherExecutablePath(env)
+  if (launcherExe !== null && existsSync(launcherExe)) rememberLauncherExecutablePath(launcherExe)
   const execPath = input.execPath ?? process.execPath
   const projectRoot = shellProjectRoot({ env, launcherExe, execPath })
   const repoRoot = resolve(projectRoot, '..')

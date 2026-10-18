@@ -21,7 +21,7 @@ import type { RuntimeDownloadStatus } from './runtime-install.ts'
 import { SHELL_MENU_ACTIONS, contextMenuItems, isOpenablePath } from './context-menu.ts'
 import { isExternalUrl } from './external.ts'
 import { APP_NAME } from '../shared/app.ts'
-import { appSupportDir, dshHome, resolveLauncherExecutablePath, trayImagePath } from './runtime.ts'
+import { appSupportDir, dshHome, resolveLauncherForRelaunch, trayImagePath } from './runtime.ts'
 import { acquireInstance, activateUrl, defaultIsAlive, releaseInstance, updateInstance } from './single-instance.ts'
 import { awaitParentExit, relaunchDesktopApp, relaunchParentPid } from './app-restart.ts'
 import { createViewRegistry } from '../shared/view-grant.ts'
@@ -1123,16 +1123,21 @@ async function recheckDevToolsPort(): Promise<string | null> {
  */
 async function restartDesktopApp(): Promise<{ ok: boolean; reason?: string; message?: string }> {
   const warning = await recheckDevToolsPort().catch(() => null)
+  const resolution = resolveLauncherForRelaunch()
   const plan = await relaunchDesktopApp({
     isPackaged: build.isPackaged,
-    launcherExe: resolveLauncherExecutablePath(),
+    launcherExe: resolution.launcherExe,
     pid: process.pid,
     onLog: (line) => console.log(line),
   })
   if (!plan.ok) {
+    console.error(
+      `[shell] 重启桌面应用：${plan.reason}；launcher 来源=${resolution.source ?? 'none'}；解析尝试：${resolution.attempts.join(' | ')}`,
+    )
     notifier.notify(SCENARIO.STARTUP_ERROR, '重启桌面应用未完成', plan.message)
     return { ok: false, reason: plan.reason, message: plan.message }
   }
+  console.log(`[shell] 重启桌面应用：launcher=${plan.exe}（来源 ${resolution.source ?? 'unknown'}）`)
   if (warning !== null) {
     console.error(`[shell] 重启桌面应用：${warning}`)
     notifier.notify(SCENARIO.STARTUP_ERROR, '开发者工具：重启后口仍开不了', warning)

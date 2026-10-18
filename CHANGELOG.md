@@ -67,6 +67,7 @@
 
 ### Fixed
 - 登录两步都断（#169）：① 壳没有官方桌面同款的主进程账号 watcher，登录进入「等待浏览器」时没人开系统浏览器（只能手动复制链接）；② 回调 `http://127.0.0.1:<pagePort>/oauth/callback` 被壳的跨站闸门 403。修复：壳主进程订阅宿主 `account/watch` 流，`waiting-browser` 时把授权页交给系统浏览器（带浅/深色主题，同一 attempt 只开一次，断线按 1s 重连）；准入只放「跨站 + GET + 顶层文档导航 + 精确 `/oauth/callback`」这一种请求，其余跨站照旧拒绝（见 ADR-0005）。
+- Windows 托盘「重启应用」第二次提示无法重启（#167）：launcher 路径解析失败时回退到冷启动缓存和同目录 `launcher.exe`，并把 PID/命令/查询结果写进 shell.log。
 - 桌面壳 loopback SSE 空闲约 10s 被 Bun 默认 idleTimeout 切断，`/plugins/events` 与 `/api/auto-continue-bridge` 反复报 `ERR_INCOMPLETE_CHUNKED_ENCODING`（#159）：`Bun.serve` 显式关闭 `idleTimeout`，并补 SSE 空闲回归测试。
 - 更新提醒窗点「稍后」没反应（#160）：关窗改由壳代劳——页面里的 window.close 在 html: 文档上是空操作（Chromium 忽略非脚本打开文档的关窗），动作成功后的自动关窗同修。
 - 新建/迁移 Profile 的窗做完动作不关（#162）：关窗同样改由壳代劳（`profile_close` 通道，与 #160 同一颗雷）；失败时不关窗，用户可留在窗里改名重试。
