@@ -477,6 +477,9 @@ describe('多窗口的数据面（列表类命令要看到别的 profile / 正�
   })
 })
 describe('/__shell__/rpc 端点', () => {
+  // 2026-10-18 Build Windows 单测：首个 loopback 请求偶发超过默认 5s（run 39106378160）；
+  // 这里只验路由契约，给足 15s，避免主分支构建被单次慢请求判红。
+  const RPC_TEST_TIMEOUT_MS = 15_000
   /**
    * 壳的端口交给系统分配（#168），句柄里的 origin 就是真实端口；上游只占位——这里要的就是
    * 「转发打不通」，固定一个没人听的端口即可（旧写法是先占后放挑端口，那个窗口会被别的 socket 抢走）。
@@ -522,7 +525,7 @@ describe('/__shell__/rpc 端点', () => {
       expect(payload.ok).toBe(true)
       expect(payload.value.platform).toBe('darwin')
     })
-  })
+  }, RPC_TEST_TIMEOUT_MS)
 
   test('带 token 前缀的同一个路径**不是** RPC（文档类，转发给上游）', async () => {
     await withServer(async (origin, token) => {
@@ -535,7 +538,7 @@ describe('/__shell__/rpc 端点', () => {
       expect(response.status).toBe(502)
       expect(await response.text()).toBe('upstream unreachable')
     })
-  })
+  }, RPC_TEST_TIMEOUT_MS)
 
   test('命令抛错 ⇒ 200 + ok:false（面板显示原因，不是永远转圈）', async () => {
     await withServer(async (origin) => {
@@ -549,14 +552,14 @@ describe('/__shell__/rpc 端点', () => {
       expect(payload.ok).toBe(false)
       expect(payload.error).toBe('命令炸了')
     })
-  })
+  }, RPC_TEST_TIMEOUT_MS)
 
   test('GET ⇒ 405（RPC 只收 POST）', async () => {
     await withServer(async (origin) => {
       const response = await fetch(`${origin}/__shell__/rpc`)
       expect(response.status).toBe(405)
     })
-  })
+  }, RPC_TEST_TIMEOUT_MS)
 })
 
 // profile 运维与启动检查的命令边界（旧壳 commands.rs:252/541/711/737/758）。
