@@ -500,6 +500,9 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
         token: options.token,
         origin: request.headers.get('origin'),
         secFetchSite: request.headers.get('sec-fetch-site'),
+        secFetchMode: request.headers.get('sec-fetch-mode'),
+        secFetchDest: request.headers.get('sec-fetch-dest'),
+        method: request.method,
         selfOrigin: origin,
       })
 

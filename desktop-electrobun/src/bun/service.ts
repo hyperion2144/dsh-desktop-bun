@@ -16,6 +16,7 @@ import { normalizeRemoteUrl, remoteDisplay, remoteHostPort, remoteOrigin } from 
 import { createWatchdogState, tickWatchdog, WATCHDOG_INTERVAL_MS } from '../shared/watchdog.ts'
 import { portOpen, stopPortOwner } from './port-owner.ts'
 import { startHost } from './host.ts'
+import { createAccountWatcher } from './account-watcher.ts'
 import { sweepProcessRemnants } from './process-tree.ts'
 import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-shell-env.ts'
 import type { ShellStage } from './stages.ts'
@@ -819,6 +820,14 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     },
   }
   const server = startShellServer(serverOptions)
+  // #169：主进程账号 watcher——页面在桌面语义下不会自己开窗，登录「等浏览器」这一步由壳完成。
+  const accountWatcher = createAccountWatcher({
+    hostOrigin: () => serverOptions.upstreamOrigin,
+    cookie: () => serverOptions.cookie,
+    openExternal: options.onOpenExternal,
+    theme: () => readShellTheme(paths.home, paths.profile),
+    log,
+  })
   options.onStage?.('server')
   bootPayload.injections = [...hostInjections]
   // #101：从这里起 boot 载荷可写；applyInjections 在此之前的极窄窗口只更新 hostInjections（不丢）
@@ -959,6 +968,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   const applyHost = (): void => {
     bootPayload.injections = [...hostInjections]
     serverOptions.cookie = cookie
+    // 宿主就绪/重启后都调一次（幂等）：watcher 断线自己重连，每轮现取 cookie/origin。
+    accountWatcher.start()
     state.hostPid = host?.pid ?? 0
     state.injections = bootPayload.injections.length
     void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
@@ -1388,6 +1399,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     // 多窗口：不再就地换 profile（旧壳的「托盘切换 profile」在新壳里就是把那份 profile 的窗口开到前台）。
     stop: async () => {
       stopping = true
+      accountWatcher.stop()
       if (watchdogTimer !== null) clearInterval(watchdogTimer)
       dshStatusCode = 6
       ledger.reset()
