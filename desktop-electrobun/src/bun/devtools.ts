@@ -175,3 +175,99 @@ export function sendDevToolsKeystroke(opts: { keybdEvent?: KeybdEvent | null } =
   send(VK_F12, 0, KEYEVENTF_KEYUP, 0n)
   return true
 }
+
+// ---- DevTools 前端（壳托管，跨平台）----
+// 原生 openDevTools 的 undocked inspector 是 CEF 自己的窗口：用户点关闭只关窗口，DevTools 的
+// renderer/target 仍活着（实测：关窗后 /json/list 里 inspector target 还在，继续吃 GPU）。
+// 改成壳自己建一扇 BrowserWindow 加载 CDP 前端：窗口归壳所有，关闭即销毁页面；三平台同一条
+// 路径，不靠窗口枚举/尺寸/标题猜测。
+
+export interface CdpTarget {
+  id: string
+  type?: string
+  url?: string
+  webSocketDebuggerUrl?: string
+}
+
+export interface CdpVersion {
+  webSocketDebuggerUrl?: string
+}
+
+/**
+ * 选出 DevTools 前端要连的页面目标：排除 inspector 自身与空目标；优先 type=page。
+ * /json/list 里同时有页面、旧 inspector、以及无 url 的空目标，不能拿「第一条」。
+ */
+export function pickDevToolsPageTarget(targets: CdpTarget[]): CdpTarget | null {
+  const candidates = targets.filter((target) => {
+    if (typeof target.url !== 'string' || target.url === '') return false
+    return !target.url.includes('/devtools/inspector.html')
+  })
+  return candidates.find((target) => target.type === 'page') ?? candidates[0] ?? null
+}
+
+/** 用页面目标的 webSocketDebuggerUrl 组装 CDP 前端 URL（与 CEF 原生 devtools URL 同形）。 */
+export function buildDevToolsInspectorUrl(port: number, page: CdpTarget): string | null {
+  const ws = typeof page.webSocketDebuggerUrl === 'string' ? page.webSocketDebuggerUrl : ''
+  if (ws === '') return null
+  const wsParam = ws.replace(/^wss?:\/\//, '')
+  return `http://127.0.0.1:${port}/devtools/inspector.html?ws=${wsParam}&dockSide=undocked`
+}
+
+/** 读 /json/list 拿页面目标并组装前端 URL；拿不到返回 null（调用方只记日志，不重试）。 */
+export async function resolveDevToolsInspectorUrl(port: number): Promise<string | null> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/json/list`)
+    if (!response.ok) return null
+    const targets = (await response.json()) as CdpTarget[]
+    const page = pickDevToolsPageTarget(targets)
+    if (page === null) return null
+    return buildDevToolsInspectorUrl(port, page)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 关闭旧入口留下的 inspector target（原生 openDevTools/上一版壳）。
+ * 必须在壳自己的 DevTools 窗口创建之前调用——新窗口的前端是普通页面目标，不在这个列表里。
+ * 走 /json/version 的 browser webSocketDebuggerUrl；失败返回 false（不影响新窗口打开）。
+ */
+export async function closeDevToolsTarget(port: number): Promise<boolean> {
+  try {
+    const listResponse = await fetch(`http://127.0.0.1:${port}/json/list`)
+    if (!listResponse.ok) return false
+    const targets = (await listResponse.json()) as CdpTarget[]
+    const inspector = targets.find((target) => typeof target.url === 'string' && target.url.includes('/devtools/inspector.html'))
+    if (inspector === undefined) return false
+    const versionResponse = await fetch(`http://127.0.0.1:${port}/json/version`)
+    if (!versionResponse.ok) return false
+    const version = (await versionResponse.json()) as CdpVersion
+    const browserUrl = version.webSocketDebuggerUrl
+    if (browserUrl === undefined || browserUrl === '') return false
+    return await new Promise<boolean>((resolve) => {
+      let settled = false
+      const finish = (value: boolean): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        try { socket.close() } catch { /* 已断开 */ }
+        resolve(value)
+      }
+      const timer = setTimeout(() => finish(false), 3000)
+      const socket = new WebSocket(browserUrl)
+      socket.addEventListener('open', () => {
+        socket.send(JSON.stringify({ id: 1, method: 'Target.closeTarget', params: { targetId: inspector.id } }))
+      })
+      socket.addEventListener('message', (event) => {
+        try {
+          const message = JSON.parse(String(event.data)) as { id?: number; error?: unknown }
+          if (message.id === 1) finish(message.error === undefined)
+        } catch { /* 非 JSON 帧忽略 */ }
+      })
+      socket.addEventListener('error', () => finish(false))
+      socket.addEventListener('close', () => finish(false))
+    })
+  } catch {
+    return false
+  }
+}
