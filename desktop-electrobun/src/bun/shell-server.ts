@@ -477,6 +477,10 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
   const server = Bun.serve<WsData, string>({
     hostname: '127.0.0.1',
     port: options.port,
+    // #159：Bun 默认 ~10s idleTimeout 会切断首帧后空闲的健康 SSE（/plugins/events、
+    // /api/auto-continue-bridge），页面看到 ERR_INCOMPLETE_CHUNKED_ENCODING。这里显式关闭；
+    // 该口只绑 127.0.0.1，不设有限值以免任何有限超时在 SSE 空闲时重演本次断流。
+    idleTimeout: 0,
     async fetch(request, srv) {
       const url = new URL(request.url)
       const decision = decide({
