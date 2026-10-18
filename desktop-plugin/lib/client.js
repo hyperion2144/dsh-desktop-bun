@@ -1349,6 +1349,8 @@ var INITIAL = {
 function useInitialData(onLoadError) {
   const [data, setData] = (0, import_react2.useState)(INITIAL);
   const [loaded, setLoaded] = (0, import_react2.useState)(null);
+  const onLoadErrorRef = (0, import_react2.useRef)(onLoadError);
+  onLoadErrorRef.current = onLoadError;
   (0, import_react2.useEffect)(() => {
     let cancelled = false;
     void (async () => {
@@ -1390,13 +1392,13 @@ function useInitialData(onLoadError) {
         setLoaded(next);
       } catch (err) {
         if (cancelled) return;
-        onLoadError(`\u8BFB\u53D6\u8BBE\u7F6E\u5931\u8D25\uFF1A${String(err)}`);
+        onLoadErrorRef.current(`\u8BFB\u53D6\u8BBE\u7F6E\u5931\u8D25\uFF1A${String(err)}`);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [onLoadError]);
+  }, []);
   const refreshData = (0, import_react2.useCallback)(async () => {
     try {
       const d = await invoke2("get_desktop_settings_data");
@@ -2008,12 +2010,24 @@ function MobileAccessCard({
 }) {
   const [muxHeartbeatInput, setMuxHeartbeatInput] = (0, import_react10.useState)("30000");
   const [desktopLayoutOnPhones, setDesktopLayoutOnPhones] = (0, import_react10.useState)(false);
+  const [guardBackoffInput, setGuardBackoffInput] = (0, import_react10.useState)("10000");
+  const [guardBackoffNote, setGuardBackoffNote] = (0, import_react10.useState)(null);
   const [mobileLayoutNote, setMobileLayoutNote] = (0, import_react10.useState)(null);
+  const muxInputRef = (0, import_react10.useRef)(null);
+  const guardInputRef = (0, import_react10.useRef)(null);
   (0, import_react10.useEffect)(() => {
     setDesktopLayoutOnPhones(desktop.desktop_layout_on_phones === true);
+  }, [desktop.desktop_layout_on_phones]);
+  (0, import_react10.useEffect)(() => {
+    if (typeof document !== "undefined" && document.activeElement === muxInputRef.current) return;
     const hb = desktop.mux_heartbeat_ms;
     setMuxHeartbeatInput(typeof hb === "number" ? String(hb) : "30000");
-  }, [desktop]);
+  }, [desktop.mux_heartbeat_ms]);
+  (0, import_react10.useEffect)(() => {
+    if (typeof document !== "undefined" && document.activeElement === guardInputRef.current) return;
+    const v = desktop.mobile_guard_backoff_ms;
+    setGuardBackoffInput(typeof v === "number" && v > 0 ? String(v) : "10000");
+  }, [desktop.mobile_guard_backoff_ms]);
   const handleSaveMuxHeartbeat = () => {
     const raw = muxHeartbeatInput.trim();
     const parsed = raw === "" ? 3e4 : parseInt(raw, 10);
@@ -2027,6 +2041,16 @@ function MobileAccessCard({
         v === 0 ? "\u5DF2\u4FDD\u5B58\uFF1A\u4E0D\u8986\u76D6\u5FC3\u8DF3\uFF08dsh \u9ED8\u8BA4 2s\uFF09\uFF0C\u91CD\u542F dsh \u751F\u6548\u3002" : `\u5DF2\u4FDD\u5B58\uFF1Amux \u5FC3\u8DF3 ${v}ms\uFF08dsh \u539F\u751F 2s\uFF09\uFF0C\u91CD\u542F dsh \u751F\u6548\u3002`
       )
     ).catch((e) => onNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`));
+  };
+  const handleSaveGuardBackoff = () => {
+    const raw = guardBackoffInput.trim();
+    const parsed = raw === "" ? 1e4 : parseInt(raw, 10);
+    if (Number.isNaN(parsed) || parsed < 1e3) {
+      setGuardBackoffNote("\u9000\u907F\u57FA\u6570\u9700\u4E3A \u22651000 \u7684\u6574\u6570\u6BEB\u79D2\uFF08\u9ED8\u8BA4 10000\uFF09");
+      return;
+    }
+    const v = Math.min(6e5, parsed);
+    void nsSave({ mobile_guard_backoff_ms: v }).then(() => setGuardBackoffNote(`\u5DF2\u4FDD\u5B58\uFF1A\u4F1A\u8BDD\u5B88\u536B\u9000\u907F\u57FA\u6570 ${v}ms\uFF0C\u91CD\u542F dsh \u751F\u6548\u3002`)).catch((e) => setGuardBackoffNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`));
   };
   const handleToggleMobileLayout = (next) => {
     setDesktopLayoutOnPhones(next);
@@ -2045,6 +2069,7 @@ function MobileAccessCard({
         "input",
         {
           placeholder: "30000",
+          ref: muxInputRef,
           "data-desktop-settings": "mux-heartbeat-ms",
           style: { ...INPUT_BASE_STYLE, width: 100 },
           value: muxHeartbeatInput,
@@ -2058,6 +2083,23 @@ function MobileAccessCard({
       /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("code", { children: "/api/remote.mux" }),
       " \u7684\u5FC3\u8DF3\u95F4\u9694\uFF08\u6BEB\u79D2\uFF09\u3002dsh \u539F\u751F 2s \u4E14\u8FDE\u4E22 2 \u6B21\u5373\u65AD\u5F00\uFF0C \u79FB\u52A8\u7AEF\u5207\u540E\u53F0/\u5F31\u7F51\u4F1A\u88AB\u79D2\u5224\u6B7B\uFF08\u8868\u73B0\u4E3A\u300C\u80FD\u53D1\u6D88\u606F\u3001\u6536\u4E0D\u5230\u65B0\u6D88\u606F\u300D\uFF09\uFF1B\u58F3\u9ED8\u8BA4\u8986\u76D6\u4E3A 30000\u3002 \u586B 0 = \u4E0D\u8986\u76D6\uFF08\u56DE\u9000 dsh \u9ED8\u8BA4\uFF09\uFF0C\u6539\u52A8\u91CD\u542F dsh \u751F\u6548\u3002"
     ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: { ...LABEL_STYLE, marginTop: 12 }, children: "\u79FB\u52A8\u7AEF\u4F1A\u8BDD\u5B88\u536B" }),
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { style: ROW_STYLE, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
+        "input",
+        {
+          placeholder: "10000",
+          "data-desktop-settings": "mobile-guard-backoff-ms",
+          style: { ...INPUT_BASE_STYLE, width: 100 },
+          value: guardBackoffInput,
+          onChange: (e) => setGuardBackoffInput(e.target.value),
+          ref: guardInputRef
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveGuardBackoff, children: "\u4FDD\u5B58" })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: NOTE_STYLE, children: "\u79FB\u52A8\u7AEF\u58F3\u63A2\u6D4B\u5230\u4F1A\u8BDD\u5931\u6548\u65F6\uFF0C\u7B2C 2 \u6B21\u8D77\u6309\u300C\u57FA\u6570 \xD7 2^(n-2)\u300D\u9000\u907F\u91CD\u8FDE\uFF08\u5C01\u9876 30s\uFF09\u3002\u9ED8\u8BA4 10000ms\uFF1B \u8C03\u5927\u80FD\u51CF\u5C11\u5F31\u7F51\u4E0B\u7684\u300C\u65AD\u2014\u91CD\u8FDE\u300D\u6296\u52A8\uFF0C\u4EE3\u4EF7\u662F\u6062\u590D\u53D8\u6162\u3002\u6539\u52A8\u91CD\u542F dsh \u751F\u6548\u3002" }),
+    guardBackoffNote && /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: NOTE_STYLE, children: guardBackoffNote }),
     /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: { ...LABEL_STYLE, marginTop: 12 }, children: "\u79FB\u52A8\u7AEF\u5E03\u5C40" }),
     /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: ROW_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
       /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(

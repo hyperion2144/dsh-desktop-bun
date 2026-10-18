@@ -72,5 +72,5 @@ settings.yaml（`dsh-desktop-tauriapp:` 块）：`ws_keepalive_ms`（ping 间隔
 ## 测试
 
 ```sh
-node --test mobile/dsh-mobile-access/test
+cd plugins/dsh-mobile-access && node --test test/*.test.mjs
 ```

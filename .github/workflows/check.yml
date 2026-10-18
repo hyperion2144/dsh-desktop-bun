@@ -14,6 +14,7 @@ on:
       - 'resources/**'
       - 'desktop-plugin/**'
       - 'plugins/**'
+      - 'mobile/**'
       - 'scripts/**'
       - '.github/workflows/build.yml'
       - '.github/workflows/check.yml'
@@ -23,6 +24,7 @@ on:
       - 'resources/**'
       - 'desktop-plugin/**'
       - 'plugins/**'
+      - 'mobile/**'
       - 'scripts/**'
       - '.github/workflows/build.yml'
       - '.github/workflows/check.yml'
@@ -81,6 +83,22 @@ jobs:
       - name: 插件测试
         working-directory: desktop-plugin
         run: bun run test:client
+
+      # 移动端快检（#33）：shell-web 与 dsh-mobile-access 都是无依赖的纯 node --test
+      # 套件（19 + 71 例），不装依赖直接跑；node 22 由 setup-node 固定
+      # （dsh-mobile-access 的 engines 门槛 >=22）。旧仓 mobile 测试从未进 CI，这里是补齐。
+      - name: Setup Node.js 22（移动端快检）
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 移动端共享模块测试（shell-web）
+        working-directory: mobile/shell-web
+        run: npm test
+
+      - name: 手机访问服务测试（dsh-mobile-access）
+        working-directory: plugins/dsh-mobile-access
+        run: npm test
 
   # Windows 可跑性兜底（#18 拍板新增）：check 覆盖 Windows 特殊路径。
   # 只跑测试面（壳 bun test + 插件 test:client），typecheck 与原生准备单跑

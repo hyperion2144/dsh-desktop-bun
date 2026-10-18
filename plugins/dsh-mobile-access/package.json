@@ -30,7 +30,7 @@
     }
   },
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test --test-timeout=60000 --test-force-exit test/*.test.mjs"
   },
   "engines": {
     "node": ">=22"

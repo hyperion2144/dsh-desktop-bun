@@ -31,6 +31,20 @@ function readUiThemePreference() {
   }
 }
 
+/** #175：移动端会话守卫的退避基数（桌面设置 mobile_guard_backoff_ms；缺省/非法回 10000）。
+ *  随 /api/pair/info 下发，两端壳开机时读一次；改设置后重启 dsh 生效。 */
+const DEFAULT_GUARD_BACKOFF_MS = 10_000;
+function readMobileGuardBackoff() {
+  try {
+    const raw = readShellSetting('mobile_guard_backoff_ms');
+    const n = typeof raw === 'number' ? raw : NaN;
+    if (!Number.isFinite(n) || n < 1_000) return DEFAULT_GUARD_BACKOFF_MS;
+    return Math.min(600_000, Math.round(n));
+  } catch {
+    return DEFAULT_GUARD_BACKOFF_MS;
+  }
+}
+
 export function createMobileAccessService(opts = {}) {
   const {
     upstreamHost = '127.0.0.1',
@@ -126,20 +140,21 @@ export function createMobileAccessService(opts = {}) {
       // lane 自有控制面住在保留命名空间（LANE_PREFIX/*，含冻结别名 /pair、/api/pair/*），
       // 由 routePairing 先于转发处理；打到这里的一律要求 cookie，杜绝「前缀豁免 +
       // 上游路径归一化」绕过。命名空间外的一切路径（含 dsh 自有路由）原样透传，不做白名单。
-      const cookie = parseCookie(req.headers.cookie, 'dsh_mobile_session');
+      // #195 延伸：重复 Cookie 头（见 parseCookies 注释）取任一命中即放行。
+      const cookies = parseCookies(req.headers.cookie, 'dsh_mobile_session');
       // PWA 清单放行（精确路径）：浏览器对 <link rel=manifest> 的获取不保证携带会话 cookie，
       // 401 会把「桌面通知」等面板卡在加载中；清单非敏感，透传上游即可（#43）。
       if ((req.url ?? '').split('?')[0] === '/manifest.webmanifest') return { ok: true };
       // 顺手把该设备的最新 UA/IP/接入路径刷新下来（#145 延伸）：
       // ①已配对的老设备（早先只存了名字）不用重新配对就能被富化；
       // ②同一台设备换入口（局域网↔隧道）时面板能跟上。
-      return {
-        ok: store.isDevice(cookie, {
-          ua: req.headers['user-agent'] ?? '',
-          ip: clientIp(req),
-          entry: entryKind(req),
-        }),
+      const meta = {
+        ua: req.headers['user-agent'] ?? '',
+        ip: clientIp(req),
+        entry: entryKind(req),
       };
+      const ok = cookies.some((c) => store.isDevice(c, meta));
+      return { ok };
     },
     onInjectSkip: opts.warn
       ? (p) => opts.warn('[dsh-mobile-access] 上游压缩 HTML，跳过注入（该页无 polyfill/桌面补丁）: ' + p)
@@ -311,7 +326,7 @@ export function createMobileAccessService(opts = {}) {
     // 包括 OPTIONS 预检与 dsh 自有路径，一律交还反代透传，lane 绝不代答（#145）。
     const path = laneRoutePath(req.url.split('?')[0]);
     if (path === null) return false;
-    const authed = store.isDevice(parseCookie(req.headers.cookie, 'dsh_mobile_session'));
+    const authed = parseCookies(req.headers.cookie, 'dsh_mobile_session').some((c) => store.isDevice(c));
     const owner = isLocalOwner(req);
     const canManage = owner || authed;
     const unpaired401 = () => {
@@ -381,6 +396,8 @@ export function createMobileAccessService(opts = {}) {
         customTunnelUrl,
         uiTheme: readUiThemePreference(),
         dshAuth: dshAuth.hasCredential(),
+        // #175：会话守卫的退避基数（移动端壳开机读；缺省 10s，原硬编码 2s 弱网抖动大）。
+        guard: { backoffBaseMs: readMobileGuardBackoff() },
       });
       return true;
     }
@@ -612,14 +629,26 @@ export function createMobileAccessService(opts = {}) {
   };
 }
 
-export function parseCookie(header, name) {
-  if (!header) return '';
-  for (const part of header.split(';')) {
+/**
+ * 取某个 cookie 的**全部**候选值（#195 延伸）：RFC 6265 允许客户端重复发 Cookie 头，
+ * Node 会把重复头用逗号并成一条；iOS 的 NSURLSession 还会把 Cookie 存储里的值再补一份。
+ * 单值解析遇到「A,A」会整体比对失败，这里按 `;` 与 `,` 切开逐条返回，交给调用方任一命中即通过。
+ */
+export function parseCookies(header, name) {
+  const out = [];
+  if (!header) return out;
+  for (const part of header.split(/[;,]/)) {
     const i = part.indexOf('=');
     if (i < 0) continue;
-    if (part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+    if (part.slice(0, i).trim() !== name) continue;
+    const v = part.slice(i + 1).trim();
+    if (v) out.push(v);
   }
-  return '';
+  return out;
+}
+
+export function parseCookie(header, name) {
+  return parseCookies(header, name)[0] ?? '';
 }
 
 // CORS 源白名单：仅放行来自回环（本机 dsh 设置页）与壳协议页（#154）的跨域读取；其它 Origin 一律不回显。

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { createMobileAccessService, parseCookie } from '../lib/index.mjs';
+import { createMobileAccessService, parseCookie, parseCookies } from '../lib/index.mjs';
 import { createMemoryStorage } from '../lib/pairing.mjs';
 import { LANE_PREFIX, lanePath } from '../lib/lane-routes.mjs';
 
@@ -271,6 +271,16 @@ test('SSE 事件路由：属主 loopback 放行，隧道必须已配对 cookie',
 test('parseCookie', () => {
   assert.equal(parseCookie('a=1; dsh_mobile_session=abc; b=2', 'dsh_mobile_session'), 'abc');
   assert.equal(parseCookie('', 'x'), '');
+});
+
+test('parseCookies：重复 Cookie 头（逗号合并 / 多值）返回全部候选', () => {
+  // iOS NSURLSession 会把 Cookie 存储里的值再补一份，Node 用逗号把重复头并成一条。
+  assert.deepEqual(
+    parseCookies('dsh_mobile_session=abc,dsh_mobile_session=abc', 'dsh_mobile_session'),
+    ['abc', 'abc'],
+  );
+  assert.deepEqual(parseCookies('x=1; dsh_mobile_session=v1; y=2', 'dsh_mobile_session'), ['v1']);
+  assert.deepEqual(parseCookies('', 'dsh_mobile_session'), []);
 });
 
 

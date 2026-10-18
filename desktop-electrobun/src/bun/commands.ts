@@ -246,6 +246,7 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
         remote_addr: settings.remoteAddr ?? null,
         remote_list: settings.remoteList,
         mux_heartbeat_ms: settings.muxHeartbeatMs ?? null,
+        mobile_guard_backoff_ms: settings.mobileGuardBackoffMs ?? null,
         desktop_layout_on_phones: settings.desktopLayoutOnPhones ?? null,
         prevent_sleep: settings.preventSleep ?? null,
         dev_tools: settings.devTools ?? null,
