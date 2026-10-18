@@ -29,6 +29,10 @@ export interface AdmissionInput {
   token: string
   origin?: string | null
   secFetchSite?: string | null
+  /** 请求方法与 Fetch Metadata 的顶层导航标记：只给 OAuth 回调那条窄豁免用（#169）。 */
+  method?: string
+  secFetchMode?: string | null
+  secFetchDest?: string | null
   selfOrigin: string
 }
 
@@ -57,9 +61,38 @@ export function isCrossSite(input: Pick<AdmissionInput, 'origin' | 'secFetchSite
   return false
 }
 
+/** OAuth 回调端点：唯一允许跨站进来的路径（浏览器从平台页顶层跳回）。 */
+export const OAUTH_CALLBACK_PATH = '/oauth/callback'
+
+/**
+ * 窄豁免（#169）：只放「跨站 + GET + 顶层文档导航 + 精确 /oauth/callback」。
+ * 校验面与另外几道闸门配合，缺一不可：
+ *   · 只认 GET：回调是浏览器导航，POST/预检一律不放；
+ *   · 只认 Sec-Fetch-Mode: navigate：Fetch Metadata 由浏览器自己写、页面脚本改不了，
+ *     iframe 的嵌套文档（nested-navigate）与 fetch/XHR（cors/no-cors）都不算；
+ *   · Dest 有值就只能是 document：图片/script 等子资源加载不放；
+ *   · 精确路径：查询串（code/state）照常转发，路径本身不给通配。
+ * 代价与收益见 docs/adr/0005-oauth-callback-admission-exemption.md。
+ */
+export function isOAuthCallbackNavigation(
+  input: Pick<AdmissionInput, 'pathname' | 'method' | 'secFetchMode' | 'secFetchDest'>,
+): boolean {
+  if (input.pathname !== OAUTH_CALLBACK_PATH) return false
+  if ((input.method ?? 'GET').toUpperCase() !== 'GET') return false
+  if (input.secFetchMode !== 'navigate') return false
+  if (input.secFetchDest !== undefined && input.secFetchDest !== null && input.secFetchDest !== 'document') {
+    return false
+  }
+  return true
+}
+
 export function decide(input: AdmissionInput): AdmissionDecision {
   const { pathname, token } = input
   if (isCrossSite(input)) {
+    // #169：OAuth 回调是唯一放行的跨站请求（浏览器从平台页顶层跳回），其余照旧 403。
+    if (isOAuthCallbackNavigation(input)) {
+      return { kind: 'data', rel: pathname, stripped: pathname }
+    }
     return { kind: 'reject', rel: pathname, stripped: pathname, status: FORBIDDEN_STATUS, reason: 'cross-site' }
   }
   if (pathname.startsWith(SHELL_PREFIX)) return { kind: 'shell', rel: pathname.slice(SHELL_PREFIX.length), stripped: pathname }

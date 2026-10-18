@@ -61,6 +61,30 @@ describe('准入：两类准入 + 壳自答端点', () => {
     expect(plugin.rel).toBe('/plugins/index.html')
     expect(decide({ pathname: `/${TOKEN}/sub/`, token: TOKEN, selfOrigin: SELF }).stripped).toBe('/sub/')
   })
+
+  test('OAuth 回调：只放「跨站 + GET + 顶层文档导航」到精确路径（#169）', () => {
+    const callback = {
+      pathname: '/oauth/callback',
+      token: TOKEN,
+      selfOrigin: SELF,
+      origin: 'https://platform.deepseek.com',
+      secFetchSite: 'cross-site',
+      secFetchMode: 'navigate',
+      secFetchDest: 'document',
+      method: 'GET',
+    }
+    const admitted = decide(callback)
+    expect(admitted.kind).toBe('data')
+    expect(admitted.stripped).toBe('/oauth/callback')
+    // 同一条路径的其它跨站形态照旧 403：POST、非顶层导航、非文档子资源
+    expect(decide({ ...callback, method: 'POST' }).kind).toBe('reject')
+    expect(decide({ ...callback, secFetchMode: 'cors', secFetchDest: 'empty' }).kind).toBe('reject')
+    expect(decide({ ...callback, secFetchDest: 'image' }).kind).toBe('reject')
+    // 路径对不上不享豁免
+    expect(decide({ ...callback, pathname: '/api/session' }).kind).toBe('reject')
+    // 没有 Fetch Metadata 的客户端（curl/老浏览器）本就不算跨站：照常走数据面
+    expect(decide({ pathname: '/oauth/callback', token: TOKEN, selfOrigin: SELF, method: 'GET' }).kind).toBe('data')
+  })
 })
 
 describe('静态资产解析（静态优先 + 穿越防护）', () => {
