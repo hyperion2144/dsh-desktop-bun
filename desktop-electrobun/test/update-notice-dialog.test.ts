@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   UPDATE_NOTICE_HEIGHT,
   UPDATE_NOTICE_OP_METHOD,
+  UPDATE_NOTICE_CLOSE_METHOD,
   UPDATE_NOTICE_STATUS_METHOD,
   UPDATE_NOTICE_MAX_HEIGHT,
   UPDATE_NOTICE_MIN_HEIGHT,
@@ -295,6 +296,17 @@ describe('updateNoticeHtml：内嵌页面', () => {
   test('动作失败时进度条收回去，不留一条卡在 0% 的空进度', () => {
     const script = scriptOf(updateNoticeHtml(payload()))
     expect((script.match(/renderStatus\(null\)/g) ?? []).length).toBe(2)
+  })
+
+  // #160 实机：点「稍后」毫无反应。页面里的 window.close() 在 html: 文档里是空操作
+  // （Chromium 忽略非脚本打开文档的 window.close），所以关窗必须请壳代劳。
+  test('关窗一律请壳代劳：脚本里不许再出现 window.close()', () => {
+    const script = scriptOf(updateNoticeHtml(payload()))
+    expect(script).not.toContain('window.close(')
+    expect(script).toContain(`invokeShell(${JSON.stringify(UPDATE_NOTICE_CLOSE_METHOD)}`)
+    // 「稍后」与动作成功后的自动关窗都走 closeSelf，两条路都不自己关。
+    expect(script).toContain("if (op.op === 'later') { window.__dshUpdateNoticeOp = op; closeSelf(); return }")
+    expect(script).toContain('setTimeout(closeSelf, 350)')
   })
 })
 

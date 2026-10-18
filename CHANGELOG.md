@@ -66,6 +66,7 @@
 - dev_tools 的 CEF / WebView2 分叉收进渲染后端描述符（#110）：调试口 env 名与值编码、C environ 写入器、DevTools 打开方式统一由新文件 `render-backend.ts` 提供，`applyCdpDebugPort` 改收必传的 `backend`；删除无人消费的 `plan.menuEnabled` 与未用 import。纯重构，运行行为不变。
 
 ### Fixed
+- 更新提醒窗点「稍后」没反应（#160）：关窗改由壳代劳——页面里的 window.close 在 html: 文档上是空操作（Chromium 忽略非脚本打开文档的关窗），动作成功后的自动关窗同修。
 - inspector「NodeJS 诊断」面板快捷键首载静默失效（#68）：按声明物化 rc.2（宿主侧 bootstrap 路由与 Worker 就绪的竞态上游已修）；bun-preload 新增 Patch 16 给 client.js 的 bootstrap 失败加有界退避（250ms→8s、6 次）并补 F7 的页面注册失败日志；dev/test 前置新增物化树与声明版本不一致的 fail-fast。
 - 内置 PTC 模式下 run_code 报 worker-exit ERR_SOCKET_CLOSED（#152）：壳的 Bun preload 给 PTC worker 的 fd 7 控制通道补 Bun 侧 Duplex 兜底，覆盖 per-call 与 persistent 两个入口。
 - 重签后屏幕录制授权失效（#143）：`sign-app.mjs` 给各层签名指定以 `CFBundleIdentifier` 锚定的 designated requirement，取代默认的 cdhash——此前每次重签/换构建都会让系统已存的授权失配，开关亮着也照样反复弹窗。

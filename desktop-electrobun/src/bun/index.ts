@@ -1364,6 +1364,9 @@ function updateNoticeRpcFor(profile: string): Promise<unknown> {
     downloadStatus: () => uiService().downloadStatus(),
     // 页面量好的窗高（#130）：句柄按当前 x/y/宽度重设，只动高度；窗已关就安静跳过。
     resize: (height) => updateNoticeWindows.get(profile)?.resize(height),
+    // 关窗（#160）：页面侧关不掉自己（html: 文档里的 window.close() 是空操作），由壳代劳。
+    // 句柄按 profile 存着，所以关的恒是发起请求的那扇窗；窗已关就安静跳过。
+    close: () => updateNoticeWindows.get(profile)?.close(),
   })
   updateNoticeRpcs.set(profile, created)
   return created

@@ -19,6 +19,7 @@
 import {
   UPDATE_NOTICE_OP_METHOD,
   UPDATE_NOTICE_RESIZE_METHOD,
+  UPDATE_NOTICE_CLOSE_METHOD,
   updateNoticeOp,
   updateNoticeResizeHeight,
   type UpdateNoticeOp,
@@ -38,7 +39,13 @@ export interface UpdateNoticeRpcDeps {
   downloadStatus: () => { active: boolean; version: string; resolved: number; downloaded: number }
   /** 页面量好的窗高（#130）：壳按当前 x/y/宽度重新 setFrame，只动高度。 */
   resize: (height: number) => void
+  /** 请壳关掉本窗（#160）：页面自己关不了自己，只能让壳代劳。 */
+  close: () => void
+
 }
+
+/** 关窗前给回包留的时间（#160）：够官方通道把响应发出去，再让窗消失。 */
+export const UPDATE_NOTICE_CLOSE_DELAY_MS = 120
 
 /** handlers 表（纯逻辑，可单测）：形状不认就不猜，直接 throw 让页面显示失败。 */
 export function updateNoticeRpcRequests(deps: UpdateNoticeRpcDeps): {
@@ -61,6 +68,14 @@ export function updateNoticeRpcRequests(deps: UpdateNoticeRpcDeps): {
         const height = updateNoticeResizeHeight(params)
         if (height === null) throw new Error('窗高不认这个负载')
         deps.resize(height)
+        return {}
+      },
+      // 关窗（#160）：页面点「稍后」与动作成功后的自动关窗都走这里。页面侧的 window.close()
+      // 在 html: 文档里是空操作，所以关窗必须是壳的动作——与主窗 window_close 同口径。
+      // 不收参数：谁来叫都一样，关的都是本窗（窗由壳按 profile 单例持有）。
+      [UPDATE_NOTICE_CLOSE_METHOD]: async () => {
+        // 回包先发、窗后关：直接在 handler 里同步 close() 会让这次请求的响应随窗一起消失。
+        setTimeout(() => deps.close(), UPDATE_NOTICE_CLOSE_DELAY_MS)
         return {}
       },
     },

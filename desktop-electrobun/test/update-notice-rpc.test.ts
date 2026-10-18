@@ -6,12 +6,14 @@
 import { describe, expect, test } from 'bun:test'
 import {
   UPDATE_NOTICE_OP_METHOD,
+  UPDATE_NOTICE_CLOSE_METHOD,
   UPDATE_NOTICE_RESIZE_METHOD,
   UPDATE_NOTICE_STATUS_METHOD,
   type UpdateNoticeOp,
 } from '../src/bun/update-notice-dialog.ts'
 import {
   UPDATE_NOTICE_RPC_MAX_REQUEST_TIME,
+  UPDATE_NOTICE_CLOSE_DELAY_MS,
   UPDATE_NOTICE_STATUS_METHOD as STATUS_METHOD,
   updateNoticeRpcRequests,
   type UpdateNoticeRpcDeps,
@@ -22,6 +24,7 @@ function deps(over: Partial<UpdateNoticeRpcDeps> = {}): UpdateNoticeRpcDeps {
     run: async () => ({ ok: true, message: '走好了' }),
     downloadStatus: () => ({ active: false, version: '', resolved: 0, downloaded: 0 }),
     resize: () => {},
+    close: () => {},
     ...over,
   }
 }
@@ -31,6 +34,7 @@ function harness(over: Partial<UpdateNoticeRpcDeps> = {}): {
   invoke: (params: unknown) => Promise<unknown>
   status: (params?: unknown) => Promise<unknown>
   resize: (params: unknown) => Promise<unknown>
+  close: (params?: unknown) => Promise<unknown>
 } {
   const seen: UpdateNoticeOp[] = []
   const { requests } = updateNoticeRpcRequests(
@@ -45,14 +49,22 @@ function harness(over: Partial<UpdateNoticeRpcDeps> = {}): {
   const invoke = requests[UPDATE_NOTICE_OP_METHOD]
   const status = requests[STATUS_METHOD]
   const resize = requests[UPDATE_NOTICE_RESIZE_METHOD]
-  if (invoke === undefined || status === undefined || resize === undefined) throw new Error('handler 缺失')
-  return { seen, invoke, status, resize }
+  const close = requests[UPDATE_NOTICE_CLOSE_METHOD]
+  if (invoke === undefined || status === undefined || resize === undefined || close === undefined)
+    throw new Error('handler 缺失')
+  return { seen, invoke, status, resize, close }
 }
 
 describe('提醒卡动作的官方 RPC 通道', () => {
   test('动作与只读查询各占一个方法名，页面与壳各认这一处', () => {
     const { requests } = updateNoticeRpcRequests(deps())
-    expect(Object.keys(requests)).toEqual([UPDATE_NOTICE_OP_METHOD, STATUS_METHOD, UPDATE_NOTICE_RESIZE_METHOD])
+    expect(Object.keys(requests)).toEqual([
+      UPDATE_NOTICE_OP_METHOD,
+      STATUS_METHOD,
+      UPDATE_NOTICE_RESIZE_METHOD,
+      UPDATE_NOTICE_CLOSE_METHOD,
+    ])
+    expect(UPDATE_NOTICE_CLOSE_METHOD).toBe('update_notice_close')
     expect(UPDATE_NOTICE_OP_METHOD).toBe('update_notice_op')
     expect(STATUS_METHOD).toBe('runtime_download_status')
     // 同一串在两处定义：页面引 dialog 的常量，壳命令表也按这个名字注册。
@@ -156,5 +168,31 @@ describe('提醒卡画进度用的只读查询', () => {
     await expect(resize(null)).rejects.toThrow('窗高不认这个负载')
     await expect(resize({ height: '420' })).rejects.toThrow('窗高不认这个负载')
     await expect(resize(420)).rejects.toThrow('窗高不认这个负载')
+  })
+})
+
+// #160 实机：点「稍后」毫无反应。页面里的 window.close() 在这种 html: 文档里是空操作——
+// Chromium 忽略非脚本打开文档的 window.close，Electrobun 的注入胶水也没覆写它。所以关窗必须是
+// 壳的动作（与主窗 window_close 同口径）。这里钉的是：壳真的去关，且关在回包之后。
+describe('关窗交给壳（#160）', () => {
+  test('页面叫一声壳就去关；handler 自己先返回，窗稍后才关', async () => {
+    const closed: number[] = []
+    const { close } = harness({
+      close: () => void closed.push(closed.length + 1),
+    })
+    expect(closed).toEqual([])
+    await close()
+    // 回包先发：handler 返回时窗还没关，否则这次请求的响应会随窗一起消失（页面只见报错）。
+    expect(closed).toEqual([])
+    await new Promise((resolve) => setTimeout(resolve, UPDATE_NOTICE_CLOSE_DELAY_MS + 60))
+    expect(closed).toEqual([1])
+  })
+
+  test('关窗不收参数：谁来叫都一样，关的都是本窗', async () => {
+    const closed: number[] = []
+    const { close } = harness({ close: () => void closed.push(1) })
+    await expect(close({ whatever: true })).resolves.toEqual({})
+    await new Promise((resolve) => setTimeout(resolve, UPDATE_NOTICE_CLOSE_DELAY_MS + 60))
+    expect(closed).toEqual([1])
   })
 })
