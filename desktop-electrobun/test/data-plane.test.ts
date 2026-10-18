@@ -9,7 +9,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { startShellServer } from '../src/bun/shell-server.ts'
+import { loopbackOrigin, startShellServer } from '../src/bun/shell-server.ts'
 import type { LoopbackAggregation } from '../src/shared/settings.ts'
 import { createRpcRouter, dispatchRpc } from '../src/bun/rpc.ts'
 
@@ -82,14 +82,6 @@ function startUpstream(): Upstream {
   }
 }
 
-/** 拿一个空闲端口（Bun.serve 探针占用后立即放掉）——壳的 port 参数不吃 0（rpc.test 同款）。 */
-function takeFreePort(): number {
-  const probe = Bun.serve({ port: 0, fetch: () => new Response('probe') })
-  const port = probe.port
-  probe.stop(true)
-  if (port === undefined) throw new Error('临时端口没拿到')
-  return port
-}
 function withServer(upstreamOrigin: string, aggregation?: () => LoopbackAggregation): { origin: string; cleanup: () => void } {
   const dist = mkdtempSync(join(tmpdir(), 'dsh-dp-'))
   const server = startShellServer({
@@ -97,7 +89,8 @@ function withServer(upstreamOrigin: string, aggregation?: () => LoopbackAggregat
     token: 'tok',
     cookie: 'dsh-auth-x=v1.y',
     upstreamOrigin,
-    port: takeFreePort(),
+    // #168：端口交给系统分配，句柄里的 origin 就是真实端口（不再「先占后放」挑端口，那个窗口会被抢）。
+    port: 0,
     bootPayload: () => null,
     onRpc: (raw) => dispatchRpc(createRpcRouter({}), raw),
     aggregation,
@@ -293,5 +286,38 @@ describe('#54 数据面聚合', () => {
       shell.cleanup()
       upstream.stop()
     }
+  })
+})
+
+describe('#168 端口语义：句柄的 origin 一律是真实绑定端口', () => {
+  test('port: 0 ⇒ 系统分配；句柄、origin 与 health 三处口径一致，且能直接访问', async () => {
+    const dist = mkdtempSync(join(tmpdir(), 'dsh-port0-'))
+    // 旧形状：传 0 时 Bun.serve 绑上了临时端口，但句柄回的是「端口 0」的 origin，按它发请求直接报
+    // typo/port 错。这里钉死新形状：句柄报真实端口。
+    const server = startShellServer({
+      distDir: dist,
+      token: 'tok',
+      cookie: 'dsh-auth-x=v1.y',
+      upstreamOrigin: 'http://127.0.0.1:1',
+      port: 0,
+      bootPayload: () => null,
+    })
+    try {
+      expect(server.port).toBeGreaterThan(0)
+      expect(server.origin).toBe(loopbackOrigin(server.port))
+      const health = (await (await fetch(`${server.origin}/__shell__/health`)).json()) as {
+        ok: boolean
+        origin: string
+      }
+      expect(health.ok).toBe(true)
+      expect(health.origin).toBe(server.origin)
+    } finally {
+      server.stop()
+      rmSync(dist, { recursive: true, force: true })
+    }
+  })
+
+  test('loopbackOrigin：给定端口就是 origin（传具体端口的契约不变）', () => {
+    expect(loopbackOrigin(41000)).toBe('http://127.0.0.1:41000')
   })
 })
