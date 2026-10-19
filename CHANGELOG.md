@@ -9,6 +9,7 @@
 - 壳主进程 console 默认 tee 进 `shell.log`，托盘/DevTools 排障不再依赖不可见的 stdout（#178）。
 - 构建产物断言覆盖 macOS `launcher` 原生 Mach-O、exec shim 残留、`app/bun/index.js` 关键符号与 `tray.png`；`pretest`/`predev` 预检 Bun 1.4.x（#178）。
 - preload 汇总行不再把 `DSH_BUN_COMPAT_DISABLE_HMR` 说成「HMR 关闭」：当前运行时无人读这个 env（死开关），HMR 的真开关在 profile 的 bundle patch——profile 模式下开着，只监听 profile 配置文件。
+- dev 打包可选「只带链接」：`DSH_SHELL_BUILTIN_LINK=<runtime 目录>` 时，dev 包里的内置 dsh 运行时改成一条指向该目录的目录链接，build 不再每次拷几百 MB 的实体树（不开这个开关时行为不变）。
 
 ### Added
 
