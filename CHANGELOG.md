@@ -8,6 +8,7 @@
 
 - 壳主进程 console 默认 tee 进 `shell.log`，托盘/DevTools 排障不再依赖不可见的 stdout（#178）。
 - 构建产物断言覆盖 macOS `launcher` 原生 Mach-O、exec shim 残留、`app/bun/index.js` 关键符号与 `tray.png`；`pretest`/`predev` 预检 Bun 1.4.x（#178）。
+- preload 汇总行不再把 `DSH_BUN_COMPAT_DISABLE_HMR` 说成「HMR 关闭」：当前运行时无人读这个 env（死开关），HMR 的真开关在 profile 的 bundle patch——profile 模式下开着，只监听 profile 配置文件。
 
 ### Added
 
@@ -176,3 +177,4 @@
 - Windows 安装器：静默安装/安装目录记忆/开始菜单快捷方式/卸载器；载荷打包期解并，装完即可直接使用。
 - 单实例互斥与跨启动端口认领；壳异常退出后孤儿进程清扫；宿主崩溃自动恢复（退避重启，3 次封顶后告警）。
 - 运行时下载卡死、误报超时、进度条永久定格、偏好内置版本被当未装（#97）：面板下载 dsh 运行时先报「超时」但下载其实在继续、弹窗一关进度条就再不动、刷新后按钮恢复而进度条仍在；设置里钉的就是随包内置的 0.2.1-alpha.2，壳却报「偏好版本 dsh 0.2.1-alpha.2 未在已装目录中找到（已回退最高版 0.2.1-alpha.1）」。五处修复：① 客户端不再给下载类调用挂超时（`shell-rpc` 新增 `noTimeout`，`download_runtime`/`cancel_runtime_download` 均走它）——官方通道 120s 上限只会丢回包、不会取消后台任务，所以成败一律由轮询快照判定，不再有「请求超时」这个失败形态；② 终态判定从轮询 effect 的 then 分支里抽成纯函数 `desktop-plugin/src/client/runtime-download-ui.ts::decideRuntimeDownload`——非进行中一律**撤掉进度条**（这正是超时弹窗一关就定格的成因），成功摘格、失败写原因、取消写中性终态，面板重开（未赶上进行中那一拍）照样恢复终态但不重复弹提示，终态同值不重写；③ 壳侧安装停止从「只 kill pnpm 直接子进程」改为**树级停止**（取消与 15 分钟看门狗共用 `stopProcessTree`）——孙进程继承 stdout/stderr 写端，只杀直接子进程管道等不到 EOF，`installRuntime` 永远不 settle，状态也就永远落不下来；④ 偏好版本比较把**内置树**纳入候选（`selectRuntimeVersion` 收 `builtin`，`resolveRuntimeSelection` 读内置版本号并以 `kind:'builtin'` 正确回退），不再把「就是内置的那个号」判成未安装；⑤ 面板「当前使用」与行内「使用中」改为**以实际在跑的那棵树**（`catalog.running`）为准，钉的号与实际不一致时如实说明「已选择 X，重启后生效」，不再两行同显「使用中」。
+- 第三方插件的 const 重赋值在 Bun 转译期整条死掉（1 entry did not activate）：Bun 在转译期就拒绝生成「const 绑定被重赋值」的模块（`BuildMessage: This assignment will throw because "patch" is a constant`），模块根本不加载 → 插件入口 import 失败 → app-boot 记 failed → 那条 entry 不激活（dsh-cost-meter 1.9.13 的 `lib/index.js` 先 `const patch = {` 后又给 `patch` 赋值；Node 只是运行时才炸，故只有 Bun 宿主中招）。bun-preload 新增 Patch 17：用 Bun 自己的转译器体检，加载时把被重赋值的 const 绑定放宽成 let——作用域只限 profile 直接依赖里的 ESM 插件包（Bun 的 onLoad 不能拒绝接管、交回内容一律按 ESM 读，接管 CJS 会静默丢 module.exports），零落盘不还原，逃生开关 `DSH_SHELL_PRELOAD_RELAX_CONST=0`；作用域跟随 profile 实时刷新（监听 manifest 与 node_modules 目录，清单已写、包还在装也算在内），宿主起来之后才装的插件当场就能接管——装完即生效，不用重启 DSH（#205）。
