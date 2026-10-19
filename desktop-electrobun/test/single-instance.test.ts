@@ -5,11 +5,11 @@
 //      ⇒ 锁文件 + 「激活已有实例后自己退出」；锁文件里还留着死进程的 pid 时必须能接管。
 //   2. 启动那 10–60 秒里要有可见进度，失败要留在屏幕上给出原因，别只转圈或干脆白屏。
 
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { startShellServer } from '../src/bun/shell-server.ts'
+import { startShellServer } from '../src/bun/net/shell-server.ts'
 import {
   ACTIVATE_PATH,
   acquireInstance,
@@ -19,13 +19,16 @@ import {
   releaseInstance,
   updateInstance,
   defaultIsOurProcess,
+  firstArgOfPsArgs,
+  imageFromTasklist,
+  pathMatches,
   readBootId,
   writeInstance,
   type InstanceRecord,
-} from '../src/bun/single-instance.ts'
-import { SPLASH_HEIGHT, SPLASH_WIDTH, splashFailScript, splashHtml, splashStageScript } from '../src/bun/splash.ts'
-import { DIALOG_CLOSE_ATTR, DIALOG_TITLEBAR_HEIGHT, dialogTitlebarFrameHeight } from '../src/bun/dialog-titlebar.ts'
-import { FAILED_LABEL, SHELL_STAGES, stageLabel, stagePercent } from '../src/bun/stages.ts'
+} from '../src/bun/platform/single-instance.ts'
+import { SPLASH_HEIGHT, SPLASH_WIDTH, splashFailScript, splashHtml, splashStageScript } from '../src/bun/windows/splash.ts'
+import { DIALOG_CLOSE_ATTR, DIALOG_TITLEBAR_HEIGHT, dialogTitlebarFrameHeight } from '../src/bun/windows/dialog-titlebar.ts'
+import { FAILED_LABEL, SHELL_STAGES, stageLabel, stagePercent } from '../src/bun/platform/stages.ts'
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'dsh-instance-'))
@@ -39,6 +42,7 @@ function record(overrides: Partial<InstanceRecord> = {}): InstanceRecord {
     profile: 'desktop',
     startedAt: '2026-10-11T00:00:00.000Z',
     bootId: '',
+    exePath: overrides.exePath ?? '',
     ...overrides,
   }
 }
@@ -56,6 +60,12 @@ describe('单实例锁', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  test('#202 tasklist CSV 行取镜像名（win32 身份判定的解析层）', () => {
+    expect(imageFromTasklist('"launcher.exe","1234","Console","1","45,678 K"')).toBe('launcher.exe')
+    expect(imageFromTasklist('"bun.exe","5678","Console","1","12,345 K"')).toBe('bun.exe')
+    expect(imageFromTasklist('INFO: No tasks are running which match the specified criteria.')).toBe('')
+    expect(imageFromTasklist('')).toBe('')
+  })
   test('已有活着的实例 ⇒ 放弃并把它带回来', () => {
     const dir = tempDir()
     const file = join(dir, 'shell-instance.json')
@@ -498,5 +508,70 @@ describe('启动界面的标题带（#164）', () => {
       expect(html).not.toContain(DIALOG_CLOSE_ATTR)
       expect(dialogTitlebarFrameHeight(SPLASH_HEIGHT, platform)).toBe(SPLASH_HEIGHT + DIALOG_TITLEBAR_HEIGHT)
     }
+  })
+})
+
+describe('#202 加固：锁里存 exePath 深验证（防同开机 pid 复用给同名进程误判）', () => {
+  const realSpawnSync = Bun.spawnSync
+  afterEach(() => {
+    ;(Bun as { spawnSync: typeof Bun.spawnSync }).spawnSync = realSpawnSync
+  })
+
+  /** 按「argv 拼串」键返回假 stdout；未命中键返回空输出（进程不存在/读不到）。 */
+  function fakeSpawn(outputs: Record<string, string>): void {
+    ;(Bun as { spawnSync: unknown }).spawnSync = ((cmd: readonly string[]) => {
+      const stdout = outputs[cmd.join(' ')] ?? ''
+      return { stdout: new TextEncoder().encode(stdout) }
+    }) as unknown as typeof Bun.spawnSync
+  }
+
+  const OURS = '/app/DeepSeekHarnessDesktopBUN/App/bin/bun.exe'
+
+  test('pid 复用给用户自己的 bun（同名不同路径）→ 不认，接管锁', () => {
+    fakeSpawn({
+      'tasklist /FI PID eq 4242 /FO CSV /NH': '"bun.exe","4242","Console","1","4,096"',
+      'ps -p 4242 -o comm=': 'bun',
+      'ps -p 4242 -o args=': '/Users/someone/.bun/bin/bun run unrelated-script.js',
+    })
+    expect(defaultIsOurProcess(4242, OURS)).toBe(false)
+  })
+
+  test('可执行路径与锁里一致（大小写/引号差异归一）→ 认', () => {
+    fakeSpawn({
+      'tasklist /FI PID eq 4242 /FO CSV /NH': '"bun.exe","4242","Console","1","4,096"',
+      'ps -p 4242 -o comm=': 'bun',
+      'ps -p 4242 -o args=': '"/APP/deepseekharnessdesktopbun/APP/BIN/bun.exe" index.js',
+      // Windows 深验证走 PowerShell（键 = argv 拼串）；mac 上不会查到这个键
+      "powershell -NoProfile -Command (Get-CimInstance Win32_Process -Filter 'ProcessId = 4242').ExecutablePath": '"/APP/deepseekharnessdesktopbun/APP/BIN/bun.exe"',
+    })
+    expect(defaultIsOurProcess(4242, OURS)).toBe(true)
+  })
+
+  test('深验证读不到路径（进程刚退/权限）→ 不认', () => {
+    fakeSpawn({
+      'tasklist /FI PID eq 4242 /FO CSV /NH': '"bun.exe","4242","Console","1","4,096"',
+      'ps -p 4242 -o comm=': 'bun',
+    })
+    expect(defaultIsOurProcess(4242, OURS)).toBe(false)
+  })
+
+  test('旧锁没有 exePath（升级兼容）→ 回退镜像名粗筛结果', () => {
+    fakeSpawn({
+      'tasklist /FI PID eq 4242 /FO CSV /NH': '"bun.exe","4242","Console","1","4,096"',
+      'ps -p 4242 -o comm=': 'bun',
+    })
+    expect(defaultIsOurProcess(4242)).toBe(true)
+  })
+
+  test('pathMatches：去引号 + 大小写归一后全等', () => {
+    expect(pathMatches('"/App/Bin/bun.exe"', '/app/bin/bun.exe')).toBe(true)
+    expect(pathMatches('/app/bin/bun.exe', '/other/bun.exe')).toBe(false)
+    expect(pathMatches('  ', '')).toBe(false)
+  })
+
+  test('firstArgOfPsArgs：取 argv[0]，引号包裹取引号内', () => {
+    expect(firstArgOfPsArgs('/usr/bin/bun run x.js')).toBe('/usr/bin/bun')
+    expect(firstArgOfPsArgs('"/path with space/bun" --flag')).toBe('/path with space/bun')
+    expect(firstArgOfPsArgs('')).toBe('')
   })
 })

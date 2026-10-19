@@ -26,10 +26,10 @@ import {
   normalizeGuestRect,
   parseGuestReport,
   type GuestPush,
-} from '../src/shared/guest-policy.ts'
-import { createGuestManager, type GuestViewLike } from '../src/bun/guest-manager.ts'
-import { coreLibCandidates, coreLibNames, loadNativeWebviewCore, type NativeWebviewCore } from '../src/bun/native-webview.ts'
-import { carrierScript } from '../src/bun/carrier.ts'
+} from '../src/shared/profiles/guest-policy.ts'
+import { createGuestManager, type GuestViewLike } from '../src/bun/windows/guest-manager.ts'
+import { coreLibCandidates, coreLibNames, loadNativeWebviewCore, type NativeWebviewCore } from '../src/bun/windows/native-webview.ts'
+import { carrierScript } from '../src/bun/windows/carrier.ts'
 
 /** 假视图：记录调用，可手动发事件。 */
 function fakeView(id = 7) {

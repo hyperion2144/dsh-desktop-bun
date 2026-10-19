@@ -10,7 +10,7 @@ import {
   titlebarScript,
   WINDOWS_TITLEBAR_HEIGHT,
   WINDOW_STATE_METHOD,
-} from '../src/bun/titlebar.ts'
+} from '../src/bun/windows/titlebar.ts'
 
 class StubNode {
   tag: string

@@ -1,20 +1,21 @@
-import type { ClientContext } from './ctx-types.ts'
+import type { ClientContext } from './bridge/ctx-types.ts'
 import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
-import { applyAdvancedShell } from './advanced-shell.ts'
-import { registerDownloadsTab } from './downloads-tab.tsx'
-import { installDownloadInterceptor } from './download-intercept.ts'
-import { installDesktopBrowserBridge } from './desktop-browser-bridge.ts'
+import { applyAdvancedShell } from './shell/advanced-shell.ts'
+import { registerDownloadsTab } from './features/downloads-tab.tsx'
+import { installDownloadInterceptor } from './bridge/download-intercept.ts'
+import { installDesktopBrowserBridge } from './bridge/desktop-browser-bridge.ts'
 import { registerDesktopSettings } from './desktop-settings.tsx'
-import { registerNotificationsTab } from './notifications-tab.tsx'
-import { requestDesktopClientEnvironment } from './environment.ts'
-import { installDesktopPlatformBridge } from './platform-keyboard.ts'
-import { shellRpc } from './shell-rpc.ts'
-import { installComposerInputGuard } from './composer-input-guard.ts'
-import { createConsoleBatch } from './console-batch.ts'
+import { registerNotificationsTab } from './features/notifications-tab.tsx'
+import { requestDesktopClientEnvironment } from './features/environment.ts'
+import { installDesktopPlatformBridge } from './bridge/platform-keyboard.ts'
+import { shellRpc } from './shell/shell-rpc.ts'
+import type { CommandName } from '../../../contracts/index.ts'
+import { installComposerInputGuard } from './ui/composer-input-guard.ts'
+import { createConsoleBatch } from './shell/console-batch.ts'
 
-export { applyAdvancedShell } from './advanced-shell.ts'
-export { parseDesktopClientEnvironment, requestDesktopClientEnvironment } from './environment.ts'
-export type { DesktopClientEnvironment, DesktopClientPlatform } from './environment.ts'
+export { applyAdvancedShell } from './shell/advanced-shell.ts'
+export { parseDesktopClientEnvironment, requestDesktopClientEnvironment } from './features/environment.ts'
+export type { DesktopClientEnvironment, DesktopClientPlatform } from './features/environment.ts'
 
 /** Services required by advanced presentation. */
 export const inject = [
@@ -36,7 +37,7 @@ export const inject = [
  */
 function installWebviewConsoleMirror(): void {
   // 壳 RPC 统一通道（#50）：官方桥/中继/同源 fetch 三选一，均不通则 no-op（保留原 console 行为）。
-  const invoke = (cmd: string, args: unknown): void => {
+  const invoke = (cmd: CommandName, args: unknown): void => {
     void shellRpc.invoke(cmd, args as Record<string, unknown>).catch(() => {})
   }
   // 攒批上报（#54 数据面聚合）：多条 console 合并成一次 RPC（log_console_batch），壳侧
@@ -44,7 +45,7 @@ function installWebviewConsoleMirror(): void {
   let batchSupported = true
   const consoleBatch = createConsoleBatch({
     send: (items) => {
-      const send = (cmd: string, args: unknown): Promise<void> | null => {
+      const send = (cmd: CommandName, args: unknown): Promise<void> | null => {
         // #50 合并 #54：探测换壳 RPC 统一通道（Tauri shim 已删，旧探测永远拿不到）
         if (!shellRpc.available()) return null
         return shellRpc.invoke(cmd, args as Record<string, unknown>)

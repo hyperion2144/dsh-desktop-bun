@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { startLaneForwarder } from '../src/bun/lane-forwarder.ts'
+import { startLaneForwarder } from '../src/bun/net/lane-forwarder.ts'
 
 /** 起一个 echo 目标：收到什么回什么（前缀可区分多个目标）。 */
 async function startEcho(prefix: string): Promise<number> {

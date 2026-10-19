@@ -6,8 +6,8 @@ import {
   isValidProfileName,
   profileDialogHtml,
   profileOpRequest,
-} from '../src/bun/profile-dialog.ts'
-import { DIALOG_CLOSE_ATTR, DIALOG_TITLEBAR_CLASS } from '../src/bun/dialog-titlebar.ts'
+} from '../src/bun/windows/profile-dialog.ts'
+import { DIALOG_CLOSE_ATTR, DIALOG_TITLEBAR_CLASS } from '../src/bun/windows/dialog-titlebar.ts'
 
 describe('isValidProfileName', () => {
   test('合法名', () => {

@@ -16,10 +16,10 @@ import {
   injectYml,
   insertRows,
   versionAtLeast,
-} from '../src/shared/inject-yml.ts'
-import { PROFILE_BUNDLES, profileFiles, profilePackageJson } from '../src/shared/profile-template.ts'
-import { profileExists, scaffoldProfile } from '../src/bun/profile-scaffold.ts'
-import { cleanupStagedPlugins, materializePoolPackage, stagePlugins } from '../src/bun/plugin-staging.ts'
+} from '../src/shared/profiles/inject-yml.ts'
+import { PROFILE_BUNDLES, profileFiles, profilePackageJson } from '../src/shared/profiles/profile-template.ts'
+import { profileExists, scaffoldProfile } from '../src/bun/profiles/profile-scaffold.ts'
+import { cleanupStagedPlugins, materializePoolPackage, stagePlugins } from '../src/bun/profiles/plugin-staging.ts'
 
 const tempDir = (): string => mkdtempSync(join(tmpdir(), 'dsh-staging-'))
 

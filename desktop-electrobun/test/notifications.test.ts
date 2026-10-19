@@ -9,18 +9,18 @@ import { describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createCommandTable, type CommandDeps } from '../src/bun/commands.ts'
-import type { RpcContext } from '../src/bun/rpc.ts'
-import { importSound, listSounds, type Notifier } from '../src/bun/notifications.ts'
-import { systemDefaultSoundCommand } from '../src/bun/sound-playback.ts'
-import { SOUND_FORMATS, soundFormatMatches } from '../src/shared/notify-policy.ts'
+import { createCommandTable, type CommandDeps } from '../src/bun/commands/commands.ts'
+import type { RpcContext } from '../src/bun/commands/rpc.ts'
+import { importSound, listSounds, type Notifier } from '../src/bun/notify/notifications.ts'
+import { systemDefaultSoundCommand } from '../src/bun/notify/sound-playback.ts'
+import { SOUND_FORMATS, soundFormatMatches } from '../src/shared/notify/notify-policy.ts'
 import {
   defaultSettings,
   NOTIFICATION_GROUPS,
   NOTIFICATION_SCENARIOS,
   type DesktopSettings,
-} from '../src/shared/settings.ts'
-import { loadSettings, saveSettings, updateSettings } from '../src/bun/settings-store.ts'
+} from '../src/shared/settings/settings.ts'
+import { loadSettings, saveSettings, updateSettings } from '../src/bun/platform/settings-store.ts'
 
 interface Harness {
   deps: CommandDeps

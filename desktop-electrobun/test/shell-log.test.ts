@@ -12,7 +12,7 @@ import { join } from 'node:path'
 const logDir = mkdtempSync(join(tmpdir(), 'dsh-shell-log-'))
 process.env.DSH_SHELL_LOG = join(logDir, 'shell.log')
 
-import { installShellConsoleTee, resolveShellLogFile, shellLogLine, shellLogSink } from '../src/bun/shell-log.ts'
+import { installShellConsoleTee, resolveShellLogFile, shellLogLine, shellLogSink } from '../src/bun/platform/shell-log.ts'
 
 describe('shell-log：路径解析', () => {
   test('DSH_SHELL_LOG 优先', () => {

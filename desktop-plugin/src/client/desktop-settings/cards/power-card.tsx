@@ -4,7 +4,7 @@ import React, { useEffect, useState } from 'react'
 import { SectionBox } from '../chrome.tsx'
 import { NOTE_STYLE, ROW_STYLE, WARN_NOTE_STYLE } from '../styles.ts'
 import { nsSave } from '../rpc.ts'
-import { keepAwakeNote } from '../../keep-awake-note.ts'
+import { keepAwakeNote } from '../../features/keep-awake-note.ts'
 import type { DesktopData } from '../types.ts'
 
 export function PowerCard({ desktop }: { desktop: DesktopData }): React.ReactElement {

@@ -17,7 +17,7 @@ import {
   splitAuthority,
   startupAction,
   validProfileName,
-} from '../src/shared/profile-ops.ts'
+} from '../src/shared/profiles/profile-ops.ts'
 
 describe('profile 名称校验（旧壳 valid_profile_name）', () => {
   test('字母数字下划线连字符可以，其余不行', () => {

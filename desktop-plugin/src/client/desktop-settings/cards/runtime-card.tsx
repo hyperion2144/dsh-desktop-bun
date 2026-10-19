@@ -8,7 +8,7 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { PfBtn, SectionBox, showToast } from '../chrome.tsx'
 import { DANGER_NOTE_STYLE, NOTE_STYLE } from '../styles.ts'
-import { ThemeSelect } from '../../theme-select.tsx'
+import { ThemeSelect } from '../../ui/theme-select.tsx'
 import {
   currentRuntimeLine,
   decideRuntimeDownload,
@@ -19,7 +19,7 @@ import {
   stripDownloadErrorPrefix,
   type RuntimeDownloadEntry,
   type RuntimeDownloadSnapshot,
-} from '../../runtime-download-ui.ts'
+} from '../../features/runtime-download-ui.ts'
 import { invoke, nsSave } from '../rpc.ts'
 import type { Notify, RuntimeCatalog } from '../types.ts'
 
@@ -222,37 +222,25 @@ export function RuntimeCard({ notify }: { notify: Notify }): React.ReactElement 
               <div style={{ ...DANGER_NOTE_STYLE, marginBottom: 6, whiteSpace: 'pre-wrap' }}>{`⚠ ${runtimeCatalog.note}`}</div>
             )}
             {(() => {
-              // 折叠（#95）：默认只显示各渠道头版 + 已下载版本，其余收进「展开全部」
+              // 折叠（#95）：默认只显示各渠道头版 + 本地可用版本，其余收进「展开全部」。
+              // 候选全集来自判定层（#186/#189）：candidates 已是 内置 ∪ 已下载 ∪ 目录 的归一列表
+              //（去重、降序），这里只做展示裁剪，不再自己并集/去重/过滤 catalog。
+              const all = runtimeCatalog.candidates
               const seen = new Set<string>()
-              const heads: typeof runtimeCatalog.catalog = []
+              // 渠道头版只在未下载的远端段里挑（旧口径：目录里每渠道第一条）；
+              // 本地行（内置/已下载）无论目录列没列都常驻——#107 并集与内置回退已被候选集覆盖。
+              const remoteRows = all.filter((c) => c.source === 'remote')
+              const heads: typeof remoteRows = []
               for (const ch of ['latest', 'alpha', 'rc']) {
-                const e = runtimeCatalog.catalog.find((c) => c.channel === ch)
+                const e = remoteRows.find((c) => c.channel === ch)
                 if (e && !seen.has(e.version)) {
                   seen.add(e.version)
                   heads.push(e)
                 }
               }
-              const installedPinned = runtimeCatalog.catalog.filter(
-                (c) =>
-                  !seen.has(c.version) &&
-                  runtimeCatalog.installed.some((i) => i.version === c.version),
-              )
-              const rest = runtimeCatalog.catalog.filter((c) => !seen.has(c.version))
-              // #107 并集渲染：installed 中不在 catalog 的版本（目录拉取失败/版本已下架）也要可见
-              const installedOnly = runtimeCatalog.installed
-                .filter((i) => !runtimeCatalog.catalog.some((c) => c.version === i.version))
-                .map((i) => ({ version: i.version, channel: '' }))
-              // 补：内置版本同样可能不在 catalog（目录拉取失败时）——必须可见以切回内置
-              if (
-                runtimeCatalog.builtin &&
-                !runtimeCatalog.catalog.some((c) => c.version === runtimeCatalog.builtin) &&
-                !installedOnly.some((i) => i.version === runtimeCatalog.builtin)
-              ) {
-                installedOnly.unshift({ version: runtimeCatalog.builtin, channel: '' })
-              }
-              const visible = runtimeExpanded
-                ? [...runtimeCatalog.catalog, ...installedOnly]
-                : [...heads, ...installedPinned, ...installedOnly.filter((i) => !seen.has(i.version))]
+              const localRows = all.filter((c) => c.local && !seen.has(c.version))
+              const rest = all.filter((c) => !seen.has(c.version) && !c.local)
+              const visible = runtimeExpanded ? all : [...heads, ...localRows]
               return (
                 <>
                   {visible.map((c) => {
@@ -392,7 +380,7 @@ export function RuntimeCard({ notify }: { notify: Notify }): React.ReactElement 
                   })}
                   {rest.length > 0 && !runtimeExpanded && (
                     <PfBtn variant="ghost" style={{ marginTop: 4 }} onClick={() => setRuntimeExpanded(true)}>
-                      展开全部 {runtimeCatalog.catalog.length} 个版本 ▾
+                      展开全部 {all.length} 个版本 ▾
                     </PfBtn>
                   )}
                   {runtimeExpanded && (

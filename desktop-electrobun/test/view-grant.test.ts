@@ -11,7 +11,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { startShellServer } from '../src/bun/shell-server.ts'
+import { startShellServer } from '../src/bun/net/shell-server.ts'
 import {
   GUEST_ALLOWED_COMMANDS,
   REMOTE_ALLOWED_COMMANDS,
@@ -19,7 +19,7 @@ import {
   createViewRegistry,
   denyReason,
   isCommandAllowed,
-} from '../src/shared/view-grant.ts'
+} from '../src/shared/net/view-grant.ts'
 
 function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix))

@@ -13,9 +13,9 @@ import {
   diagnosticsFileName,
   diagnosticsSummary,
   type DiagnosticsInput,
-} from '../src/shared/diagnostics.ts'
-import { exportDiagnostics, diagnosticsDir } from '../src/bun/diagnostics.ts'
-import { appVersionCandidates, resolveAppVersion } from '../src/bun/app-version.ts'
+} from '../src/shared/app/diagnostics.ts'
+import { exportDiagnostics, diagnosticsDir } from '../src/bun/commands/diagnostics.ts'
+import { appVersionCandidates, resolveAppVersion } from '../src/bun/platform/app-version.ts'
 
 function sampleInput(overrides: Partial<DiagnosticsInput> = {}): DiagnosticsInput {
   return {

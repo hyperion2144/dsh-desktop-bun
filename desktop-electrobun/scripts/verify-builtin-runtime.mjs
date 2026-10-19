@@ -13,7 +13,7 @@ import {
   DECLARATION_FILE,
   readBuiltinRuntimeDeclaration,
   verifyBuiltinTree,
-} from '../src/shared/builtin-runtime.ts'
+} from '../src/shared/runtime/builtin-runtime.ts'
 
 const projectRoot = resolve(import.meta.dir, '..')
 const explicit = process.env.DSH_SHELL_BUILTIN_DIR

@@ -8,12 +8,12 @@ import {
   type UpdateNoticeCheckResult,
   type UpdateNoticeRuntimeProbe,
   type UpdateNoticeShellProbe,
-} from '../src/bun/update-notice-check.ts'
-import type { UpdateNoticePayload } from '../src/bun/update-notice-dialog.ts'
-import { evaluateRuntimeUpdates, type RuntimeUpdateReport } from '../src/shared/runtime-update.ts'
-import type { UpdateView } from '../src/shared/update.ts'
-import type { UpdateNoticeState } from '../src/bun/update-notice-store.ts'
-import type { UpdateNoticeTarget } from '../src/shared/update-notice-policy.ts'
+} from '../src/bun/commands/update-notice-check.ts'
+import type { UpdateNoticePayload } from '../src/bun/windows/update-notice-dialog.ts'
+import { evaluateRuntimeUpdates, type RuntimeUpdateReport } from '../src/shared/runtime/runtime-update.ts'
+import type { UpdateView } from '../src/shared/runtime/update.ts'
+import type { UpdateNoticeState } from '../src/bun/commands/update-notice-store.ts'
+import type { UpdateNoticeTarget } from '../src/shared/notify/update-notice-policy.ts'
 
 const shellView = (overrides: Partial<UpdateView> = {}): UpdateView =>
   ({

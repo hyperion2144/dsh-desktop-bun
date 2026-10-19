@@ -13,7 +13,7 @@ import {
   MIME_TO_EXTENSIONS,
   NORMALIZE_ACCEPT_SOURCE,
   normalizeAcceptValue,
-} from '../src/bun/accept-shim.ts'
+} from '../src/bun/windows/accept-shim.ts'
 
 const norm = (accept: string, appendAllFiles = false) =>
   normalizeAcceptValue(accept, appendAllFiles, MIME_TO_EXTENSIONS)

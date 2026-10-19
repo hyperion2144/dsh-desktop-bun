@@ -3,7 +3,7 @@
 import React, { useState } from 'react'
 import { PfBtn, SectionBox } from '../chrome.tsx'
 import { FLEX_1_STYLE, NOTE_STYLE, ROW_STYLE } from '../styles.ts'
-import { ThemeSelect } from '../../theme-select.tsx'
+import { ThemeSelect } from '../../ui/theme-select.tsx'
 import { invoke, nsSave } from '../rpc.ts'
 import { normalizeRemote } from '../format.ts'
 import type { DesktopData, Notify } from '../types.ts'

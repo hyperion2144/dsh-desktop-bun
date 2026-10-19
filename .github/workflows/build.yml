@@ -4,7 +4,7 @@ name: Build
 #
 # 为什么必须有产物断言这一步：Electrobun 的 `renderer: 'cef'` 在**没打 CEF** 时会静默回落
 # 系统 webview（mac `nativeWrapper.mm:8359` / win `nativeWrapper.cpp:8944` / linux
-# `nativeWrapper.cpp:591`），外观上完全看不出——但那就等于把 #200 那族 JavaScriptCore 崩溃
+# `nativeWrapper.cpp:591`），外观上完全看不出——但那就等于把当初编号被重排前的 JavaScriptCore 崩溃族
 # 原样带回来。所以打包后立刻用 `scripts/assert-artifact.mjs` 翻产物（见该脚本注释）。
 # #84 起该断言的渲染器载荷口径平台条件化：mac/linux 仍要求 CEF 载荷，win 反向核验（出现 CEF 即策略回归/包体回胖）。
 #
@@ -24,12 +24,8 @@ on:
         required: false
         default: ''
         type: string
-  pull_request:
-    # PR 只跑移动端出包（桌面三平台全量太重，见下方 build 作业的 if 守卫）。
-    # 改 build.yml 自身也触发一次，保证这条流水线在 PR 里被验证。
-    paths:
-      - 'mobile/**'
-      - '.github/workflows/build.yml'
+  # pull_request/push 分支不触发任何构建（#200）：构建不跟提交走，只在手动 dispatch、
+  # tag push 与每日定时兑底时跑（移动端与桌面同一条路径）。
   push:
     tags:
       # 全部 tag 都触发（AC 原文「tag push 触发全量流水线」，未限定前缀；'**' 连含斜杠的 tag 名也匹配）
@@ -39,10 +35,10 @@ on:
     # schedule 事件只在默认分支触发（官方语义），无需 ref 守卫；与 dispatch/tag 共用同一条流水线。
     - cron: '30 18 * * *'
 #
-# 触发策略（#7 方案 A + #8 定时兜底）：push(main) 与 pull_request 一律只跑检查（见 check.yml）——
-# 每次全量约 40 runner-分钟（三平台打包 + NSIS + 冒烟），不该发生在每一轮
-# 迭代上。完整构建只留给手动 dispatch、tag push 与每日定时兜底（schedule，见 on:）；
-# main 打包链由兜底持续验证，hutch/NSIS/runner 镜像漂移最迟次日暴露。
+# 触发策略（#7 方案 A + #8 定时兑底）：push 与 pull_request 一律只跑检查（见 check.yml）——
+# 每次全量约 40 runner-分钟（三平台打包 + NSIS + 冒烟 + 移动端），不该发生在每一轮
+# 迭代上。构建（桌面+移动端）只留给手动 dispatch、tag push 与每日定时兑底（schedule，见 on:）；
+# main 打包链由兑底持续验证，hutch/NSIS/runner 镜像漂移最迟次日暴露。
 # 注：这里只做「构建 + 断言 + 存 CI 产物」。真正的发布（把安装包与 `<platformPrefix>-update.json` +
 # `<platformPrefix>-*.app.tar.zst` 作为 Release 资产传上去）还没接——自动更新的清单就是靠这两个资产名稳定地
 # 指到最新一版，缺了它们更新永远不可用。等允许打 tag 时再加一个 release job。
@@ -54,8 +50,8 @@ jobs:
   build:
     name: 构建 + 产物断言（${{ matrix.label }}）
     # mode=shots-only 时只跑安装器 UI 出图（转发 job），全量构建跳过；
-    # PR 只出移动端包（见 build-mobile），桌面全量留给 tag / dispatch / 每日兜底
-    if: github.event_name != 'pull_request' && inputs.mode != 'shots-only'
+    # 桌面全量留给 tag / dispatch / 每日兑底（不跟提交走，#200）
+    if: inputs.mode != 'shots-only'
     runs-on: ${{ matrix.os }}
     # hutch 首次构建要下载 cottontail/Electrobun/CEF/bun 四件套，下载器无超时（run 38493719636 实证挂 85 分钟）；
     # 全量正常 ~15 分钟，40 分钟兜底防挂死占 runner
@@ -161,7 +157,25 @@ jobs:
         working-directory: desktop-electrobun
         shell: pwsh
         run: |
-          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) { choco install nsis -y --no-progress }
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            # 新镜像不再预装 NSIS（run 39221084307 实证）；choco 社区源对 nsis 包持续 5xx（快验 run 39226403427 实证 503×3）——
+            # 改官方 zip 直下（sourceforge CDN 稳定，安装即用，无需安装器）
+            $nsisRoot = "$env:RUNNER_TEMP\nsis"
+            $nsisZip = "$env:RUNNER_TEMP\nsis.zip"
+            $ok = $false
+            foreach ($i in 1..3) {
+              curl.exe -fSL --retry 3 -o "$nsisZip" "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.11/nsis-3.11.zip"
+              if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+              Start-Sleep -Seconds (10 * $i)
+            }
+            if (-not $ok) { Write-Error 'NSIS zip 下载失败（三次重试后仍不可用）'; exit 1 }
+            Expand-Archive "$nsisZip" -DestinationPath "$nsisRoot" -Force
+            "$nsisRoot\nsis-3.11\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+            $env:PATH = "$nsisRoot\nsis-3.11\Bin;$env:PATH"   # 同 step 内立即生效（GITHUB_PATH 只对后续 step 生效，曾致全量构建找不到 makensis）
+            # GITHUB_PATH 对后续 step 生效；本 step 内用全路径自验
+            & "$nsisRoot\nsis-3.11\Bin\makensis.exe" -VERSION
+            if ($LASTEXITCODE -ne 0) { Write-Error 'makensis 不可用（zip 解压后自验失败）'; exit 1 }
+          }
           # 品牌图不入库（.gitignore）：安装器构建前先按 resources/app-icon.ico 生成（#92 的生成器 / #91 消费）
           bun run prepare:installer-assets
           pwsh -File scripts/build-window-frame.ps1
@@ -507,8 +521,8 @@ jobs:
             desktop-electrobun/artifacts/linux-*.tar.gz
           if-no-files-found: error
 
-  # 移动端出包（#33）：与桌面同一条构建路径（tag push / dispatch / schedule），
-  # PR 触发时只跑这里（桌面 job 由 if 守卫跳过）。产物在 Actions run 的 Artifacts 里。
+  # 移动端出包（#33）：与桌面同一条构建路径（tag push / dispatch / schedule，不跟提交走 #200）。
+  # 产物在 Actions run 的 Artifacts 里。
   # Android = debug 签名 APK（可直接安装）；iOS = 未签名 IPA（AltStore 等侧载）。
   build-mobile:
     name: 移动端出包（${{ matrix.target }}）

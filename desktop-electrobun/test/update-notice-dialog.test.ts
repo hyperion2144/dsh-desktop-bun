@@ -14,10 +14,10 @@ import {
   updateNoticeOp,
   updateNoticeResizeHeight,
   type UpdateNoticePayload,
-} from '../src/bun/update-notice-dialog.ts'
-import { DIALOG_CLOSE_ATTR, DIALOG_TITLEBAR_CLASS } from '../src/bun/dialog-titlebar.ts'
-import { evaluateRuntimeUpdates } from '../src/shared/runtime-update.ts'
-import type { UpdateView } from '../src/shared/update.ts'
+} from '../src/bun/windows/update-notice-dialog.ts'
+import { DIALOG_CLOSE_ATTR, DIALOG_TITLEBAR_CLASS } from '../src/bun/windows/dialog-titlebar.ts'
+import { evaluateRuntimeUpdates } from '../src/shared/runtime/runtime-update.ts'
+import type { UpdateView } from '../src/shared/runtime/update.ts'
 
 function shellView(overrides: Partial<UpdateView> = {}): UpdateView {
   return {

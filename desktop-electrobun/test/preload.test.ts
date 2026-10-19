@@ -5,7 +5,7 @@
 // 这组用例锁三件事：脚本可被 JS 引擎解析、failed 返回 Promise、失败浮层可操作（刷新重试）。
 import { describe, expect, test } from 'bun:test'
 import { BOOT_ENDPOINT, bootPreloadScript } from '../src/bun/preload.ts'
-import { VIEW_TOKEN_HEADER } from '../src/shared/view-grant.ts'
+import { VIEW_TOKEN_HEADER } from '../src/shared/net/view-grant.ts'
 
 describe('preload 脚本（#101 boot 失败路径）', () => {
   const script = bootPreloadScript('zh-CN', 'darwin', 'http://127.0.0.1:1', 'tok-test')

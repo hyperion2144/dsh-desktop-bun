@@ -4,7 +4,7 @@
 // 每个卡片模块要拿样式就得 import 入口——而入口 import 卡片，卡片又 import 入口。
 // 拆到这里后依赖是单向的：卡片 → styles → （无）。
 import type { CSSProperties } from 'react'
-import { devToolsConfirmCopy, devToolsDisableCopy } from '../devtools-toggle.ts'
+import { devToolsConfirmCopy, devToolsDisableCopy } from '../shell/devtools-toggle.ts'
 
 // ── 样式：PANEL_CSS 装一份挂在 [data-desktop-settings] 下的类名样式（按钮/输入框/标签/小字注等复用样式）；
 //    其他局部样式直接用 JSX style 对象，视觉与原 cssText 等价。

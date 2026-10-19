@@ -15,8 +15,8 @@
  *
  * 退出码：0 = 安装器已生成；1 = 找不到产物 / makensis 失败。
  */
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
-import { join, resolve, sep } from 'node:path'
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { join, relative, resolve, sep } from 'node:path'
 import { execSync, spawnSync } from 'node:child_process'
 
 const projectRoot = resolve(import.meta.dir, '..')
@@ -238,6 +238,76 @@ if (process.platform === 'win32' && appDir.length > 80) {
   console.log(`[installer] 应用树已复制到短路径（源路径 ${appDir.length} 字符）：${shortDir}`)
 }
 
+// #199：launcher.exe 的版本资源 FileDescription/ProductName 是 Electrobun 默认值（BUN），
+// 无 AUMID 的窗口在任务栏右键/任务管理器里就显示它；窗口缩略图标题图标在窗口进程未注册
+// WM_GETICON 时也回退 exe 图标资源——而 electrobun.config 的 win.icon 在 Windows 打包
+// 未生效（用户实测缩略图仍是默认 exe 白框图标），这里一并补嵌官方多帧 ico。
+// 补丁工具用 electron/rcedit 的官方 release 独立 exe（最新 v2.0.0，资产名 rcedit-x64.exe）：
+// 不走 npx —— npx 对该包在 runner 上报 "could not determine executable to run"
+//（run 39223480969 实证，mac/win 同栽）；v2.1.1 只是 npm 版本号，GitHub 无此 release（快验 CI 404 实证）。
+if (process.platform !== 'win32') {
+  console.log('[installer] 非 Windows 环境：跳过 launcher.exe 补丁（安装器只在 Windows CI 出）')
+} else {
+  // #203 四轮：壳侧窗口图标兑底从安装树的 app-icon.ico 文件加载（ExtractIconExW 读不出
+  // rcedit 资源段，装包诊断实证）——把 ico 拷进 bin/，与 bun.exe/launcher.exe 同目录。
+  try {
+    copyFileSync(iconPath, join(appDir, 'bin', 'app-icon.ico'))
+  } catch (copyError) {
+    console.error(`[installer] app-icon.ico 拷入 bin 失败（壳窗口图标将兑不到文件）：${copyError instanceof Error ? copyError.message : String(copyError)}`)
+  }
+  const launcherInPack = join(packDir, relative(appDir, launcher))
+  // 测试注入：集成测试用假 rcedit 验证接线（真 rcedit 对占位 launcher.exe 会拒载）；
+  // 快验 CI 的「安装器构建」step 用真替身载荷（notepad.exe）验证真 rcedit 链。
+  const rceditExe = process.env.DSH_INSTALLER_RCEDIT ?? join(buildRoot, 'rcedit-x64.exe')
+  if (!existsSync(rceditExe)) {
+    let lastError = ''
+    let done = false
+    for (let attempt = 1; attempt <= 3 && !done; attempt++) {
+      try {
+        execSync(
+          `curl -fSL --retry 3 -o "${rceditExe}" "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe"`,
+          { stdio: 'pipe' },
+        )
+        done = true
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error)
+        if (attempt < 3) Bun.sleepSync(3000)
+      }
+    }
+    if (!done) {
+      console.error(`[installer] rcedit.exe 下载失败（三次重试）：${lastError}`)
+      process.exit(1)
+    }
+  }
+  // launcher.exe（壳窗口宿主）必补；bin/bun.exe 存在时一并补显示名——
+  // 任务管理器「进程」页用 FileDescription 显示，缺省回落 exe 名 BUN（#204 第七轮反馈）。
+  const bunInPack = join(packDir, relative(appDir, join(appDir, 'bin', 'bun.exe')))
+  const patchTargets = [launcherInPack, ...(existsSync(bunInPack) ? [bunInPack] : [])]
+  for (const patchTarget of patchTargets) {
+    let patchError = ''
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        execSync(
+          `"${rceditExe}" "${patchTarget}" --set-icon "${iconPath}" --set-version-string FileDescription "DeepSeek Harness Desktop BUN" --set-version-string ProductName "DeepSeek Harness Desktop BUN"`,
+          { stdio: 'pipe' },
+        )
+        patchError = ''
+        break
+      } catch (error) {
+        // GitHub release 与补丁执行都会碰网络抖动，重试后再失败才拦
+        patchError = error instanceof Error ? error.message : String(error)
+        if (attempt < 3) Bun.sleepSync(3000)
+      }
+    }
+    if (patchError !== '') {
+      console.error(`[installer] rcedit 补丁三次重试后仍失败（${patchTarget}）：${patchError}`)
+      console.error('[installer] 验收包必须带显示名/图标补丁（右键 BUN、缩略图默认图标就是漏网结果），拦下构建')
+      process.exit(1)
+    }
+  }
+  console.log(`[installer] ${patchTargets.length} 个 exe 元数据与图标已更新（FileDescription/ProductName/set-icon）`)
+}
+
 // Windows 长路径前缀：应用树里 node_modules 很深，删暂存/备份目录必须绕过 MAX_PATH 规范化。
 // UNC 路径（\\server\share）不能带这个前缀——.nsi 里按 $INSTDIR 前两个字符判断，UNC 时留空退回普通路径。
 const longPrefix = '\\\\?\\'
@@ -249,11 +319,19 @@ const buildId = (() => {
   try { return `${execSync('git rev-parse --short HEAD').toString().trim()}-${new Date().toISOString().slice(5, 16).replace(/[-:T]/g, '')}` }
   catch { return `dev-${Date.now()}` }
 })()
+
+// WinShell 插件（仓内自持，见 installer/plugins/README.md）：给开始菜单快捷方式写
+// AppUserModelID。没有它，任务栏固定项与应用无法按 AUMID 关联——应用退出后点固定图标拉不起来（#199）。
+// 官方 electron-builder NSIS 模板同款做法（SetLnkAUMI）+ 同一插件分发物。
+const nsisPluginDir = join(projectRoot, 'installer', 'plugins', 'x86-unicode')
+
 const nsiTemplate = `
 ; Unicode true：快捷方式名里的中文（卸载）必须走 Unicode 安装器，否则开始菜单乱码
 Unicode true
 !define APP_NAME "DeepSeek Harness Desktop BUN"
 !define APP_ID "DeepSeekHarnessDesktopBUN"
+; WinShell 插件目录（仓内自持）：SetLnkAUMI 用（#199 任务栏固定项）
+!addplugindir "${nsiEscape(nsisPluginDir)}"
 !define APP_DIR_NAME "${nsiEscape(appDirName)}"
 !define INSTALL_ROOT "DSHDesktopBun"  ; 安装根目录名（比 APP_ID 短，给深层 node_modules 留 MAX_PATH 余量）
 
@@ -565,6 +643,11 @@ Section "install"
   WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@" "UninstallString" "$INSTDIR\\App\\uninstall.exe"
   CreateDirectory "$SMPROGRAMS\\@@APP_NAME@@"
   CreateShortCut "$SMPROGRAMS\\@@APP_NAME@@\\@@APP_NAME@@.lnk" "$INSTDIR\\App\\bin\\launcher.exe"
+  ; #199：开始菜单 lnk 写入 AppUserModelID——固定到任务栏后，应用退出也能由固定图标拉起
+  WinShell::SetLnkAUMI "$SMPROGRAMS\\@@APP_NAME@@\\@@APP_NAME@@.lnk" "@@APP_ID@@"
+  ; #199：安装即注册 AUMID 身份（显示名/图标），不依赖首次启动；卸载段会清同一个键
+  WriteRegStr HKCU "Software\\Classes\\AppUserModelId\\@@APP_ID@@" "DisplayName" "$(DSH_TEXT_APP_NAME)"
+  WriteRegStr HKCU "Software\\Classes\\AppUserModelId\\@@APP_ID@@" "IconUri" "$INSTDIR\\App\\bin\\launcher.exe"
   CreateShortCut "$SMPROGRAMS\\@@APP_NAME@@\\$(DSH_TEXT_UNINSTALL_SHORTCUT).lnk" "$INSTDIR\\App\\uninstall.exe"
   ; 删掉旧版本备份才算提交完成；删不掉（占用/长路径）只留残留，不回滚已经可用的新版
   StrCmp $DshOldMoved "1" 0 dsh_install_done
@@ -724,7 +807,14 @@ console.log(`[installer] NSIS 脚本：${nsiPath}`)
 /** 定位 makensis：PATH 上先找，找不到再探 choco/NSIS 的固定安装位置（CI 刚装完时 PATH 可能还没刷新）。 */
 function resolveMakensis() {
   const probe = spawnSync(process.platform === 'win32' ? 'where.exe' : 'which', ['makensis'], { encoding: 'utf8' })
-  const fromPath = typeof probe.stdout === 'string' ? probe.stdout.split(/\r?\n/)[0]?.trim() ?? '' : ''
+  // where 会把无扩展名的替身文件也列出来（集成测试的假 makensis 目录里 sh 替身与 .cmd 并存）；
+  // win32 只认真正可执行的 .exe/.cmd/.bat，避免拿到 sh 替身后 CreateProcess/cmd 直接失败。
+  const lines = typeof probe.stdout === 'string'
+    ? probe.stdout.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== '')
+    : []
+  const fromPath = process.platform === 'win32'
+    ? lines.find((line) => /\.(exe|cmd|bat)$/i.test(line)) ?? ''
+    : lines[0] ?? ''
   if (probe.status === 0 && fromPath !== '') return fromPath
   const candidates = process.platform === 'win32'
     ? [
@@ -751,11 +841,12 @@ mkdirSync(join(projectRoot, 'artifacts'), { recursive: true })
 // /INPUTCHARSET UTF8：ui.nsh / strings.nsh 都不带 BOM，显式声明按 UTF-8 解码（BOM 只按文件生效）
 // makensis 的开关在 Windows 用 / 前缀、在 POSIX（macOS/Linux）用 - 前缀，混用会被当成脚本名
 const makensisDash = process.platform === 'win32' ? '/' : '-'
-const makensis = spawnSync(
-  makensisPath,
-  [`${makensisDash}WX`, `${makensisDash}INPUTCHARSET`, 'UTF8', nsiPath],
-  { stdio: 'inherit' },
-)
+// Windows 的 CreateProcess（spawnSync 不带 shell）不执行 .cmd/.bat（集成测试的假 makensis 就是 .cmd）；
+// win32 用 shell 拼串让 cmd /c 接手（路径手动加引号），POSIX 保持数组形式直接执行。
+const makensisArgs = [`${makensisDash}WX`, `${makensisDash}INPUTCHARSET`, 'UTF8', nsiPath]
+const makensis = process.platform === 'win32'
+  ? spawnSync(`"${makensisPath}" ${makensisArgs.map((a) => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`, { stdio: 'inherit', shell: true })
+  : spawnSync(makensisPath, makensisArgs, { stdio: 'inherit' })
 if (makensis.status !== 0 || makensis.error !== undefined) {
   console.error('[installer] makensis 编译失败（看上方 NSIS 输出定位 .nsi 行号）')
   process.exit(1)

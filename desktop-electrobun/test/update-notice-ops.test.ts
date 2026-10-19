@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createUpdateNoticeOpRunner, type UpdateNoticeOpDeps } from '../src/bun/update-notice-ops.ts'
+import { createUpdateNoticeOpRunner, type UpdateNoticeOpDeps } from '../src/bun/commands/update-notice-ops.ts'
 
 interface Call {
   name: string

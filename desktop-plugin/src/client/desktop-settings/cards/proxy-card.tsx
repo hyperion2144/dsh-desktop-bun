@@ -5,9 +5,9 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { PfBtn, SectionBox } from '../chrome.tsx'
 import { FLEX_1_STYLE, INPUT_FULL_STYLE, LABEL_STYLE, NOTE_STYLE } from '../styles.ts'
-import { ThemeSelect } from '../../theme-select.tsx'
+import { ThemeSelect } from '../../ui/theme-select.tsx'
 import { invoke, nsSave } from '../rpc.ts'
-import type { InitialData } from '../use-initial-data.ts'
+import type { PanelSnapshot } from '../panel-data.ts'
 import type { Notify, ProxySettings } from '../types.ts'
 
 export function ProxyCard({
@@ -18,7 +18,7 @@ export function ProxyCard({
 }: {
   proxy: ProxySettings
   proxyEffective: ProxySettings['effective']
-  loaded: InitialData | null
+  loaded: PanelSnapshot | null
   notify: Notify
 }): React.ReactElement {
   // 代理五个字段在面板里是**一份可编辑草稿**：切 tab 不该把没保存的编辑冲掉，

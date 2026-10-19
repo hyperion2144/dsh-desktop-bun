@@ -1,18 +1,19 @@
 // 桌面设置 Tab 入口：注册 `settings.section` 插槽，并只做编排（见 DesktopSettingsPanel 的注释）。
 // 纯 React JSX + hooks 重写（先前是 React 入口 + document.createElement 手拼 DOM 的混合写法，已被否决）：
 // 禁止 document.createElement / innerHTML / appendChild，UI 全部由 JSX 返回；状态 useState/useEffect/useCallback 声明式管理。
-// （唯一例外是下面 `check_startup_needed` 的两个启动检查弹窗仍是手拼 DOM——那是壳发起的独立流程，不属于面板，留在 #129 处理。）
+// （唯一例外：`check_startup_needed` 的两个启动检查弹窗——壳发起的独立流程，不走 React 树，在 desktop-settings/startup-flow.ts。）
 //
 // #144 分层：本文件过去是 2341 行的单体——类型、样式、RPC 通道、通用外壳件、15 张卡，加一个 1790 行的
 // DesktopSettingsPanel 全挤在一处；卡片层想复用 SectionBox/PfBtn 就得反向 import 入口，于是入口与卡片互为依赖。
 // 现在入口只留「注册 + 编排」，其余按职责下沉：types / rpc / styles / chrome / loopback-aggregation / format / cards。
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import type { ClientContext } from './ctx-types.ts'
-import { shellRpc } from './shell-rpc.ts'
+import type { ClientContext } from './bridge/ctx-types.ts'
+import { shellRpc } from './shell/shell-rpc.ts'
+import { usePanelData } from './desktop-settings/use-panel-data.ts'
+import { runStartupFlow } from './desktop-settings/startup-flow.ts'
 import { ensureStyles, NOTE_STYLE, ROOT_STYLE } from './desktop-settings/styles.ts'
-import { captureNsRpc, hasNsRpc, invoke } from './desktop-settings/rpc.ts'
+import { captureNsRpc, hasNsRpc, invokeCommand } from './desktop-settings/rpc.ts'
 import { showToast } from './desktop-settings/chrome.tsx'
-import { useInitialData } from './desktop-settings/use-initial-data.ts'
 import type { BannerMsg, Notify } from './desktop-settings/types.ts'
 import { DependenciesCard } from './desktop-settings/cards/dependencies-card.tsx'
 import { DevToolsCard } from './desktop-settings/cards/devtools-card.tsx'
@@ -53,33 +54,6 @@ function DesktopSettingsPanel(): React.ReactElement {
     }
   }, [msg])
 
-  // 通用长任务状态（#95 拒绝静默）：新建/迁移的任务卡全程可见
-  const [taskInfo, setTaskInfo] = useState<{
-    running: boolean
-    finished: boolean
-    kind: string
-    title: string
-    stage: string
-    done: number
-    total: number
-    error: string
-    result: string
-  } | null>(null)
-  useEffect(() => {
-    const timer = setInterval(() => {
-      void invoke<{
-        running: boolean; finished: boolean; kind: string; title: string; stage: string;
-        done: number; total: number; error: string; result: string
-      }>('task_status')
-        .then((t) => {
-          // 任务开启或进行中刷新；结束后保留末态（直到下一次任务开始）
-          if (t.running || t.finished) setTaskInfo(t)
-        })
-        .catch(() => {})
-    }, 600)
-    return () => clearInterval(timer)
-  }, [])
-
   // 下载 section 内嵌反馈（保留原 note(box, …) 行为）
   const [downloadBoxNote, setDownloadBoxNote] = useState<string | null>(null)
 
@@ -88,7 +62,7 @@ function DesktopSettingsPanel(): React.ReactElement {
   }, [])
 
   // 首次挂载拉齐所有设置数据（一次 fetch → 一份切片）。
-  const { data, loaded, refreshData } = useInitialData((text) => notify({ ok: false, text }))
+  const { data, loaded, refreshData, taskInfo } = usePanelData((text) => notify({ ok: false, text }))
   const { desktop, proxy, proxyEffective, loopbackAggregation } = data
 
   return (
@@ -238,103 +212,15 @@ export function registerDesktopSettings(ctx: ClientContext): void {
   )
 
   // dsh 启动后：取回启动时选择的 profile，通过 nsSave 持久化到 settings.yaml
-  void invoke<string | null>('get_pending_active_profile').then((profile) => {
+  void invokeCommand('get_pending_active_profile').then((profile) => {
     if (profile && hasNsRpc()) {
       void nsSave({ active_profile: profile }).catch(() => {})
     }
   }).catch(() => {})
 
   // 启动检查：前端加载后调 check_startup_needed，根据返回显示弹窗
-  void invoke<{ action: string; profiles?: string[]; profile?: string; details?: { dir_exists: boolean; missing_files: string[]; node_modules_exists: boolean } }>('check_startup_needed').then((res) => {
-    if (!res || res.action === 'none') return
-    if (res.action === 'profile-selection') {
-      const profiles = res.profiles ?? []
-      const el = document.createElement('div')
-      el.style.cssText = 'position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)'
-      const card = document.createElement('div')
-      card.style.cssText = 'background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l2,#ffffff1f);border-radius:12px;padding:24px;min-width:320px;max-width:400px'
-      const title = document.createElement('div')
-      title.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:16px;color:var(--dsw-alias-label-primary,#e7eaf0)'
-      title.textContent = '选择要启动的 Profile'
-      card.appendChild(title)
-      const list = document.createElement('div')
-      list.style.cssText = 'display:flex;flex-direction:column;gap:8px'
-      for (const p of profiles) {
-        const btn = document.createElement('button')
-        btn.style.cssText = 'padding:10px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer;text-align:left'
-        btn.textContent = p
-        btn.onmouseenter = () => btn.style.background = 'var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07))'
-        btn.onmouseleave = () => btn.style.background = 'transparent'
-        btn.onclick = () => {
-          el.remove()
-          showToast(`正在启动 ${p} profile…`, true)
-          void invoke('confirm_startup_profile', { name: p, repair: false }).catch((e) => showToast(`启动失败：${String(e)}`, false))
-        }
-        list.appendChild(btn)
-      }
-      const input = document.createElement('input')
-      input.style.cssText = 'margin-top:12px;padding:8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;width:100%;box-sizing:border-box'
-      input.placeholder = '或输入新 profile 名称'
-      const startBtn = document.createElement('button')
-      startBtn.style.cssText = 'margin-top:8px;padding:8px 14px;border-radius:8px;border:none;background:var(--dsw-alias-brand-primary-new-color,#4176e6);color:#fff;font-size:13px;cursor:pointer;width:100%'
-      startBtn.textContent = '新建并启动'
-      startBtn.onclick = () => {
-        const name = input.value.trim()
-        if (!name) return
-        el.remove()
-        showToast(`正在创建并启动 ${name} profile…`, true)
-        void invoke('confirm_startup_profile', { name, repair: true }).catch((e) => showToast(`创建失败：${String(e)}`, false))
-      }
-      card.appendChild(list)
-      card.appendChild(input)
-      card.appendChild(startBtn)
-      el.appendChild(card)
-      document.body.appendChild(el)
-      return
-    }
-    if (res.action === 'profile-incomplete') {
-      const profile = res.profile ?? ''
-      if (!profile) return
-      const details = res.details
-      const missingDesc = details ? [
-        ...details.missing_files,
-        ...(details.node_modules_exists ? [] : ['node_modules']),
-        ...(details.dir_exists ? [] : ['profile 目录']),
-      ].join(', ') : ''
-      const el = document.createElement('div')
-      el.style.cssText = 'position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)'
-      const card = document.createElement('div')
-      card.style.cssText = 'background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l2,#ffffff1f);border-radius:12px;padding:24px;min-width:340px;max-width:420px;text-align:center'
-      const title = document.createElement('div')
-      title.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:8px;color:var(--dsw-alias-label-primary,#e7eaf0)'
-      title.textContent = `Profile「${profile}」不完整`
-      const desc = document.createElement('div')
-      desc.style.cssText = 'font-size:12px;color:var(--dsw-alias-label-secondary,#9aa4b2);margin-bottom:20px'
-      desc.textContent = `缺失：${missingDesc}。是否修复？`
-      const btns = document.createElement('div')
-      btns.style.cssText = 'display:flex;gap:10px'
-      const noBtn = document.createElement('button')
-      noBtn.style.cssText = 'flex:1;padding:10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer'
-      noBtn.textContent = '直接启动'
-      noBtn.onclick = () => {
-        el.remove()
-        void invoke('confirm_startup_profile', { name: profile, repair: false }).catch((e) => showToast(`启动失败：${String(e)}`, false))
-      }
-      const yesBtn = document.createElement('button')
-      yesBtn.style.cssText = 'flex:1;padding:10px;border-radius:8px;border:none;background:var(--dsw-alias-brand-primary-new-color,#4176e6);color:#fff;font-size:13px;cursor:pointer'
-      yesBtn.textContent = '修复并启动'
-      yesBtn.onclick = () => {
-        el.remove()
-        showToast(`正在修复 ${profile} profile…`, true)
-        void invoke('confirm_startup_profile', { name: profile, repair: true }).catch((e) => showToast(`修复失败：${String(e)}`, false))
-      }
-      btns.appendChild(noBtn)
-      btns.appendChild(yesBtn)
-      card.appendChild(title)
-      card.appendChild(desc)
-      card.appendChild(btns)
-      el.appendChild(card)
-      document.body.appendChild(el)
-    }
-  }).catch(() => {})
+  // 启动检查：前端加载后调 check_startup_needed，按契约裁决弹窗（模型与 DOM 在 startup-flow.ts）。
+  void invokeCommand('check_startup_needed')
+    .then((res) => runStartupFlow(res, showToast))
+    .catch(() => {})
 }

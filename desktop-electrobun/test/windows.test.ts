@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { closeAction, offsetFrame, planWindowOpen, windowKey } from '../src/shared/window-targets.ts'
+import { closeAction, offsetFrame, planWindowOpen, windowKey } from '../src/shared/app/window-targets.ts'
 
 // 多窗口的纯逻辑（`desktop/src-tauri/src/ui/multiwin.rs` 的等价物）。
 // 真起窗口的那部分只能在实机上看（缝 ③/手动），这里锁的是语义：谁聚焦、谁关、窗口落哪。

@@ -9,18 +9,21 @@
 // 纯逻辑 + 注入式 spawn / sleep / isAlive，无需真实进程。
 
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   awaitParentExit,
+  buildRelaySource,
+  cefDirFromExecPath,
+  cefLockState,
   planRelaunch,
   relaunchDesktopApp,
   relaunchParentPid,
   RELAUNCH_PID_ENV,
   RELAUNCH_WAIT_DEADLINE_MS,
-} from '../src/bun/app-restart.ts'
-import { acquireInstance, type InstanceRecord } from '../src/bun/single-instance.ts'
+} from '../src/bun/platform/app-restart.ts'
+import { acquireInstance, type InstanceRecord } from '../src/bun/platform/single-instance.ts'
 
 describe('planRelaunch（能不能自拉起）', () => {
   test('打包态 + 有 launcher ⇒ 拉起它', () => {
@@ -108,25 +111,144 @@ describe('awaitParentExit（等旧壳退干净）', () => {
 })
 
 describe('relaunchDesktopApp（真拉起）', () => {
-  test('成功时把旧 pid 经 env 传给新实例（它得知道自己要接班）', async () => {
-    let seen: { exe: string; env: Record<string, string> } | null = null
+  test('成功时 spawn 的是中继（bun -e），脚本带旧 pid 与 launcher 路径，env 透传 RELAUNCH_PID', async () => {
+    let seen: { argv: string[]; env: Record<string, string> } | null = null
     const plan = await relaunchDesktopApp({
       isPackaged: true,
       launcherExe: '/Applications/X.app/Contents/MacOS/launcher',
       pid: 4242,
+      platform: 'darwin',
+      cefDir: '/support/CEF',
       env: { PATH: '/usr/bin' },
-      spawn: (exe, env) => {
-        seen = { exe, env }
+      spawn: (argv, env) => {
+        seen = { argv, env }
       },
     })
     expect(plan.ok).toBe(true)
     expect(seen).not.toBeNull()
-    const got = seen as unknown as { exe: string; env: Record<string, string> }
-    expect(got.exe).toBe('/Applications/X.app/Contents/MacOS/launcher')
+    const got = seen as unknown as { argv: string[]; env: Record<string, string> }
+    // 中继进程 = 本壳同款 bun 跑内联脚本（#204：等旧实例含 CEF 退净再拉 launcher）
+    expect(got.argv[0]).toBe(process.execPath)
+    expect(got.argv[1]).toBe('-e')
+    expect(got.argv[2]).toContain('parentPid = 4242;')
+    expect(got.argv[2]).toContain(JSON.stringify('/Applications/X.app/Contents/MacOS/launcher'))
+    expect(got.argv[2]).toContain(JSON.stringify('/support/CEF'))
     expect(got.env[RELAUNCH_PID_ENV]).toBe('4242')
     expect(got.env.PATH).toBe('/usr/bin')
   })
 
+  test('cefDir 不传时中继退化成纯 pid 等待（脚本不含 CEF 锁段）', async () => {
+    let source = ''
+    const plan = await relaunchDesktopApp({
+      isPackaged: true,
+      launcherExe: '/x/launcher',
+      pid: 7,
+      platform: 'darwin',
+      spawn: (argv) => {
+        source = argv[2] ?? ''
+      },
+    })
+    expect(plan.ok).toBe(true)
+    expect(plan.ok).toBe(true)
+    expect(source).toContain('cefDir = "";')
+    // 锁段代码始终在脚本里，靠 cefDir 空串运行时短路；真正的不拉锁行为由下面的真跑测试覆盖
+    expect(source).toContain("if (cefDir !== '') {")
+  })
+
+  test('cefLockState：锁不存在/指向死 pid = released，活着 = held-alive，读不出 = unknown', () => {
+    expect(cefLockState({ lockExists: false })).toBe('released')
+    expect(cefLockState({ lockExists: true, rawLockTarget: 'MacBook-4242', targetPidAlive: () => true })).toBe('held-alive')
+    expect(cefLockState({ lockExists: true, rawLockTarget: 'MacBook-4242', targetPidAlive: () => false })).toBe('released')
+    expect(cefLockState({ lockExists: true, rawLockTarget: null })).toBe('unknown')
+    expect(cefLockState({ lockExists: true, rawLockTarget: 'garbage' })).toBe('unknown')
+  })
+
+  test('cefDirFromExecPath：mac 从实际安装根反推 CEF/，Windows 返回 null（WebView2 无 CEF 锁）', () => {
+    expect(
+      cefDirFromExecPath('/Apps/DSH/DeepSeek Harness Desktop BUN.app/Contents/MacOS/bun', 'darwin'),
+    ).toBe('/Apps/DSH/CEF')
+    expect(cefDirFromExecPath('C:\\Apps\\DSH\\App\\bin\\bun.exe', 'win32')).toBeNull()
+  })
+
+  test('中继脚本含 Windows WebView2 进程等待段（宿主死后 msedgewebview2 有尾巴，#209）', () => {
+    const source = buildRelaySource({ pid: 7, launcherExe: '/x/launcher' })
+    expect(source).toContain('msedgewebview2')
+    expect(source).toContain("log('WebView2 进程等待结束')")
+  })
+
+  test('真跑中继脚本：旧 pid 已死 + stale 锁 → 拉起假 launcher（等 350ms 内完成）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-'))
+    // Windows CreateProcess 不认 shebang：用独名 exe 替身（notepad 拷贝）验证「中继能 spawn 真 exe」，
+    // marker 断言只在 POSIX 做（spawn 的进程树管理跨平台差异大，拉起可执行性已验证到）。
+    const win32 = process.platform === 'win32'
+    const launcher = join(dir, win32 ? 'dsh-relay-probe.exe' : 'fake-launcher.mjs')
+    const marker = join(dir, 'launched')
+    if (win32) {
+      copyFileSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'notepad.exe'), launcher)
+    } else {
+      writeFileSync(launcher, `#!/usr/bin/env bun\nimport { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(marker)}, 'ok')`)
+    }
+    if (!win32) chmodSync(launcher, 0o755)
+    // stale SingletonLock：symlink 指向不存在的 pid
+    mkdirSync(join(dir, 'CEF'))
+    symlinkSync('stubhost-999999', join(dir, 'CEF', 'SingletonLock'))
+    const relay = buildRelaySource({
+      pid: 999998,
+      launcherExe: launcher,
+      cefDir: join(dir, 'CEF'),
+      pollMs: 50,
+      pidWaitMs: 400,
+      lockWaitMs: 400,
+    })
+    const proc = Bun.spawnSync({ cmd: [process.execPath, '-e', relay], stdout: 'ignore', stderr: 'ignore' })
+    expect(proc.exitCode).toBe(0)
+    if (!win32) {
+      // 中继 unref 拉起后立即退出；marker 由孤儿化的假 launcher 异步写出，轮询等它
+      let launched = false
+      for (let i = 0; i < 40 && !launched; i++) {
+        launched = existsSync(marker)
+        if (!launched) await Bun.sleep(50)
+      }
+      expect(launched).toBe(true)
+    } else {
+      // 替身 notepad 挂着：按独名清掉（不碰用户开的记事本）
+      Bun.spawnSync(['taskkill', '/F', '/IM', 'dsh-relay-probe.exe'], { stdout: 'ignore', stderr: 'ignore' })
+    }
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('#211：Windows 直拉路径——spawn 的是 launcher 本尊（中继会被旧壳退出时收割）', async () => {
+    const calls: string[][] = []
+    const plan = await relaunchDesktopApp({
+      isPackaged: true,
+      launcherExe: 'C:\\Apps\\DSH\\App\\bin\\launcher.exe',
+      pid: 4242,
+      platform: 'win32',
+      spawn: (argv) => {
+        calls.push(argv)
+      },
+    })
+    expect(plan.ok).toBe(true)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toEqual(['C:\\Apps\\DSH\\App\\bin\\launcher.exe'])
+  })
+
+  test('#211：非 Windows 仍走中继（argv = bun -e 中继脚本）', async () => {
+    const calls: string[][] = []
+    const plan = await relaunchDesktopApp({
+      isPackaged: true,
+      launcherExe: '/Applications/X.app/Contents/MacOS/launcher',
+      pid: 4242,
+      platform: 'darwin',
+      spawn: (argv) => {
+        calls.push(argv)
+      },
+    })
+    expect(plan.ok).toBe(true)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.[0]).toBe(process.execPath)
+    expect(calls[0]?.[1]).toBe('-e')
+  })
   test('spawn 抛错 ⇒ spawn-failed + 可读原因，不是裸异常', async () => {
     const plan = await relaunchDesktopApp({
       isPackaged: true,
@@ -172,6 +294,7 @@ describe('接班与单实例锁（succeedsPid 兜底）', () => {
         profile: 'desktop',
         startedAt: '2026-10-16T00:00:00.000Z',
         bootId: '',
+        exePath: '',
       } satisfies InstanceRecord),
     )
     return file

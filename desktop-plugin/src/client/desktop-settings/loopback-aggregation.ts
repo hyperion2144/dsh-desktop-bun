@@ -16,7 +16,7 @@ export const LOOPBACK_AGGREGATION_OPTIONS: ReadonlyArray<{
 }> = [
   { value: 'full', label: '全开', detail: '合并并发 GET，并整条缓冲 ≤256KB 的响应' },
   // 默认档＝壳侧 DEFAULT_LOOPBACK_AGGREGATION。面板不跨包 import 壳代码，两边各写一份字面量，
-  // 所以改默认值必须两边同时改（test-client.mjs 会核对这里与 use-initial-data.ts 的初始值都等于 stream）。
+  // 所以改默认值必须两边同时改（test-client.mjs 会核对这里与 panel-data.ts 占位值都等于 stream）。
   { value: 'stream', label: '只关缓冲（默认）', detail: '仍合并，但响应边到边下发' },
   { value: 'none', label: '全关', detail: '不合并，每个请求各自打宿主' },
 ]

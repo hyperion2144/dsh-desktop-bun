@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-import { dshHome } from '../src/bun/runtime.ts'
+import { dshHome } from '../src/bun/runtime/runtime.ts'
 
 describe('dshHome（#1：home 计算不吃 env.HOME）', () => {
   test('DSH_HOME 显式设置 → 原样使用', () => {
@@ -31,7 +31,7 @@ describe('dshHome（#1：home 计算不吃 env.HOME）', () => {
   test('service.ts 不再有 `env.HOME ?? \'.\'` 这种相对路径 fallback，且委托 dshHome', () => {
     // service.ts 的 home 计算难以单测（startService 会拉起整条服务面），这里对源码做
     // 契约断言：坏的 fallback 一旦回来就红。
-    const source = readFileSync(new URL('../src/bun/service.ts', import.meta.url), 'utf8')
+    const source = readFileSync(new URL('../src/bun/host/service.ts', import.meta.url), 'utf8')
     expect(source).not.toMatch(/env\.HOME\s*\?\?\s*['"]\.['"]/)
     expect(source).toContain('dshHome(env)')
   })

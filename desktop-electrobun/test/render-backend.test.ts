@@ -2,14 +2,14 @@
 // 这些字段以前散在 devtools.ts 的 5 处三元与 index.ts 的日志/菜单分支里；这里锁住描述符契约。
 import { describe, expect, test } from 'bun:test'
 
-import { DEVTOOLS_PORT_OVERRIDE_ENV } from '../src/bun/devtools.ts'
+import { DEVTOOLS_PORT_OVERRIDE_ENV } from '../src/bun/windows/devtools.ts'
 import {
   CEF_RENDER_BACKEND,
   DEVTOOLS_PORT_ENV,
   resolveRenderBackend,
   WEBVIEW2_DEVTOOLS_ARGS_ENV,
   WEBVIEW2_RENDER_BACKEND,
-} from '../src/bun/render-backend.ts'
+} from '../src/bun/windows/render-backend.ts'
 
 describe('resolveRenderBackend（构建期唯一选择点）', () => {
   test('availableRenderers 含 cef → CEF 描述符（mac/linux）', () => {
@@ -42,7 +42,7 @@ describe('WebView2 描述符（win）', () => {
     expect(WEBVIEW2_RENDER_BACKEND.renderer).toBe('native')
     expect(WEBVIEW2_RENDER_BACKEND.label).toBe('WebView2')
     expect(WEBVIEW2_RENDER_BACKEND.devToolsEnv.name).toBe(WEBVIEW2_DEVTOOLS_ARGS_ENV)
-    expect(WEBVIEW2_RENDER_BACKEND.devToolsEnv.encode(9333)).toBe('--remote-debugging-port=9333')
+    expect(WEBVIEW2_RENDER_BACKEND.devToolsEnv.encode(9333)).toBe('--remote-debugging-port=9333 --remote-allow-origins=*')
     expect(WEBVIEW2_RENDER_BACKEND.devToolsEnv.appendToExisting).toBe(true)
     expect(WEBVIEW2_RENDER_BACKEND.devToolsOpen).toBe('keystroke')
     expect(WEBVIEW2_RENDER_BACKEND.devToolsLogHint).not.toBe('')

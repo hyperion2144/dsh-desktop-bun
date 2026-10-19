@@ -5,8 +5,8 @@ import {
   NPM_REGISTRY_ORIGIN,
   packageDocUrl,
   runtimeInstallability,
-} from '../src/shared/runtime-installability.ts'
-import { NPM_PACKAGE } from '../src/shared/runtime-catalog.ts'
+} from '../src/shared/runtime/runtime-installability.ts'
+import { NPM_PACKAGE } from '../src/shared/runtime/runtime-catalog.ts'
 
 interface RegistryStub {
   /** 包名 → 该包有哪些版本在架。 */

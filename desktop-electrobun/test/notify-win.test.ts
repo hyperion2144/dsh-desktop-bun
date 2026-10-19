@@ -1,6 +1,6 @@
 // Windows 气泡通知（#62）：脚本构造 + fire-and-forget 投递，全部注入不 spawn 真进程。
 import { describe, expect, test } from 'bun:test'
-import { showWindowsBalloon, windowsBalloonCommand, windowsBalloonScript } from '../src/bun/notify-win.ts'
+import { showWindowsBalloon, windowsBalloonCommand, windowsBalloonScript } from '../src/bun/notify/notify-win.ts'
 
 describe('windows 气泡通知', () => {
   test('脚本含标题/正文，单引号翻倍转义', () => {

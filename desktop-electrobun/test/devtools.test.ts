@@ -17,15 +17,15 @@ import {
   sendDevToolsKeystroke,
   buildDevToolsInspectorUrl,
   pickDevToolsPageTarget,
-} from '../src/bun/devtools.ts'
+} from '../src/bun/windows/devtools.ts'
 import {
   CEF_RENDER_BACKEND,
   DEVTOOLS_PORT_ENV,
   WEBVIEW2_DEVTOOLS_ARGS_ENV,
   WEBVIEW2_RENDER_BACKEND,
-} from '../src/bun/render-backend.ts'
-import { loadSettings, saveSettings, settingsPath } from '../src/bun/settings-store.ts'
-import { normalizeSettings, serializeSettings } from '../src/shared/settings.ts'
+} from '../src/bun/windows/render-backend.ts'
+import { loadSettings, saveSettings, settingsPath } from '../src/bun/platform/settings-store.ts'
+import { normalizeSettings, serializeSettings } from '../src/shared/settings/settings.ts'
 
 /** 恒空闲/恒占用的探活桩：plan 的可测性靠它，不碰真网络。 */
 const alwaysFree = async (): Promise<boolean> => true
@@ -67,8 +67,8 @@ describe('applyCdpDebugPort（C environ 双写：mac libc setenv / win kernel32�
       },
     })
     expect(ok).toBe(true)
-    expect(env[WEBVIEW2_DEVTOOLS_ARGS_ENV]).toBe('--remote-debugging-port=9333')
-    expect(calls).toEqual([[WEBVIEW2_DEVTOOLS_ARGS_ENV, '--remote-debugging-port=9333']])
+    expect(env[WEBVIEW2_DEVTOOLS_ARGS_ENV]).toBe('--remote-debugging-port=9333 --remote-allow-origins=*')
+    expect(calls).toEqual([[WEBVIEW2_DEVTOOLS_ARGS_ENV, '--remote-debugging-port=9333 --remote-allow-origins=*']])
   })
 
   test('win WebView2：已有自定义参数时合并追加（Bun map 与 C environ 同值）；C environ 失败仍 fail-closed', () => {
@@ -84,9 +84,9 @@ describe('applyCdpDebugPort（C environ 双写：mac libc setenv / win kernel32�
         },
       }),
     ).toBe(false)
-    expect(env[WEBVIEW2_DEVTOOLS_ARGS_ENV]).toBe('--disable-gpu --remote-debugging-port=9333')
+    expect(env[WEBVIEW2_DEVTOOLS_ARGS_ENV]).toBe('--disable-gpu --remote-debugging-port=9333 --remote-allow-origins=*')
     // C environ 是 WebView2 loader 实际读取的载体：必须收到合并值，而非裸 --remote-debugging-port
-    expect(calls).toEqual([[WEBVIEW2_DEVTOOLS_ARGS_ENV, '--disable-gpu --remote-debugging-port=9333']])
+    expect(calls).toEqual([[WEBVIEW2_DEVTOOLS_ARGS_ENV, '--disable-gpu --remote-debugging-port=9333 --remote-allow-origins=*']])
   })
 
   // libSystem.dylib 是 macOS 专属路径：Linux/Windows 上 dlopen 直接抛错——这条冒烟只能在 darwin 跑

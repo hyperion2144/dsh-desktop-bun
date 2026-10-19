@@ -4,12 +4,12 @@ import {
   PROFILE_OP_METHOD,
   type ProfileOpRequest,
   type ProfileOpResult,
-} from '../src/bun/profile-dialog.ts'
+} from '../src/bun/windows/profile-dialog.ts'
 import {
   PROFILE_CLOSE_DELAY_MS,
   PROFILE_OP_RPC_MAX_REQUEST_TIME,
   profileOpRpcRequests,
-} from '../src/bun/profile-op-rpc.ts'
+} from '../src/bun/commands/profile-op-rpc.ts'
 
 type Handler = (params: unknown) => Promise<unknown>
 

@@ -2,7 +2,7 @@
 // 这里只测纯函数——「什么时候弹」的每一条口径都在这儿钉死。
 
 import { describe, expect, test } from 'bun:test'
-import { decideUpdateNotice, updateNoticeKey, type UpdateNoticePolicyInput } from '../src/shared/update-notice-policy.ts'
+import { decideUpdateNotice, updateNoticeKey, type UpdateNoticePolicyInput } from '../src/shared/notify/update-notice-policy.ts'
 
 function input(overrides: Partial<UpdateNoticePolicyInput> = {}): UpdateNoticePolicyInput {
   return {

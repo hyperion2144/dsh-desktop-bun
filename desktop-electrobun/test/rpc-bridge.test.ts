@@ -7,10 +7,10 @@
 //   4. 命令表未就绪/命令抛错，都回可读错误而不是 resolve undefined。
 
 import { describe, expect, test } from 'bun:test'
-import { createRpcRouter, type RpcHandler } from '../src/bun/rpc.ts'
-import { createShellRpcFunnel, type ShellRpcDeps } from '../src/bun/rpc-bridge.ts'
-import { deriveMaximized, type WindowFrame } from '../src/bun/window-max.ts'
-import { createViewRegistry } from '../src/shared/view-grant.ts'
+import { createRpcRouter, type RpcHandler } from '../src/bun/commands/rpc.ts'
+import { createShellRpcFunnel, type ShellRpcDeps } from '../src/bun/commands/rpc-bridge.ts'
+import { deriveMaximized, type WindowFrame } from '../src/bun/windows/window-max.ts'
+import { createViewRegistry } from '../src/shared/net/view-grant.ts'
 function makeDeps(overrides: Partial<ShellRpcDeps> = {}): ShellRpcDeps {
   const views = createViewRegistry()
   return {

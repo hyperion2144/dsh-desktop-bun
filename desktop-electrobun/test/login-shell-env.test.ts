@@ -15,7 +15,7 @@ import {
   parseLoginShellOutput,
   readLoginShellEnvironment,
   resolveLoginShellTimeoutMs,
-} from '../src/bun/login-shell-env.ts'
+} from '../src/bun/platform/login-shell-env.ts'
 
 const DELIMITER = '_DSH_SHELL_ENV_DELIMITER_'
 const MARKER = `\0${DELIMITER}\0`

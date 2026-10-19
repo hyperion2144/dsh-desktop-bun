@@ -5,7 +5,8 @@
 // nsRpc（dsh settings 服务的 connection 捕获口）过去是个模块级可变变量，由注册入口写、
 // 由「回填启动时 profile」那处读；把它和它的捕获口收在一起，调用方只拿得到
 // 「有没有可用」和「存不存」两个动作，不用知道它是个可变量。
-import { shellRpc, type ShellRpcInvokeOptions } from '../shell-rpc.ts'
+import { shellRpc, type ShellRpcInvokeOptions } from '../shell/shell-rpc.ts'
+import type { CommandArgs, CommandName, CommandResult } from '../../../../contracts/index.ts'
 import type { NsRpc } from './types.ts'
 
 /** 壳 RPC 统一通道（#50）：签名保持旧本地 invoke 不变，调用点零改动。 */
@@ -16,6 +17,25 @@ export function invoke<T = unknown>(
   options?: ShellRpcInvokeOptions,
 ): Promise<T> {
   return shellRpc.invoke<T>(cmd, args, options)
+}
+
+/**
+ * 类型化命令通道（#190）：cmd 锚在 contracts/ 的 Commands 上——
+ * 命令名拼错、参数缺字段、回执用错类型都在编译期报，形状只有契约一处事实源。
+ * noTimeout 等传输选项不进契约，作尾参（#97 下载类长任务用）。
+ */
+export function invokeCommand<K extends CommandName>(
+  cmd: K,
+  args: CommandArgs<K>,
+  options?: ShellRpcInvokeOptions,
+): Promise<CommandResult<K>>
+export function invokeCommand<K extends CommandName>(cmd: K): Promise<CommandResult<K>>
+export function invokeCommand<K extends CommandName>(
+  cmd: K,
+  args?: CommandArgs<K>,
+  options?: ShellRpcInvokeOptions,
+): Promise<CommandResult<K>> {
+  return shellRpc.invoke<CommandResult<K>>(cmd, args as Record<string, unknown> | undefined, options)
 }
 
 let nsRpc: NsRpc | null = null
@@ -39,11 +59,11 @@ export function hasNsRpc(): boolean {
 }
 
 export async function nsSave(patch: Record<string, unknown>): Promise<void> {
-  await invoke('save_desktop_settings', { patch })
+  await invokeCommand('save_desktop_settings', { patch })
 }
 
 export async function nsGet(): Promise<Record<string, unknown>> {
   // 读侧走既有 get_desktop_settings_data 的设置段（同一 Rust 读源）
-  const d = await invoke<{ settings?: Record<string, unknown> }>('get_desktop_settings_data')
+  const d = await invokeCommand('get_desktop_settings_data')
   return (d.settings && typeof d.settings === 'object' ? d.settings : {}) as Record<string, unknown>
 }

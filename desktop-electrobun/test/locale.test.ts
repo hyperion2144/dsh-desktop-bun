@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { FALLBACK_LOCALE, localeCandidates, normalizeLocale } from '../src/bun/locale.ts'
+import { FALLBACK_LOCALE, localeCandidates, normalizeLocale } from '../src/bun/platform/locale.ts'
 
 describe('系统语言归一（页面语言就靠它）', () => {
   test('AppleLocale 形式（下划线）转 BCP-47', () => {

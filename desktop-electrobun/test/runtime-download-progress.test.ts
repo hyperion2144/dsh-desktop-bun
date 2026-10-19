@@ -1,7 +1,7 @@
 // 下载进度的百分比（实机反馈：提醒卡点了「下载并切换」之后要有进度条，面板那种）。
 // 公式只有这一份（面板与提醒卡共用），所以这里把口径钉死：没解析出包数就不假装有进度。
 import { describe, expect, test } from 'bun:test'
-import { downloadPercent } from '../src/shared/runtime-download-progress.ts'
+import { downloadPercent } from '../src/shared/runtime/runtime-download-progress.ts'
 
 describe('下载进度百分比', () => {
   test('按 downloaded / resolved 算，四舍五入', () => {

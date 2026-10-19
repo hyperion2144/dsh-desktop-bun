@@ -5,12 +5,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { planRelaunch } from '../src/bun/app-restart.ts'
+import { planRelaunch } from '../src/bun/platform/app-restart.ts'
 import {
   layout,
   rememberLauncherExecutablePath,
   resolveLauncherForRelaunch,
-} from '../src/bun/runtime.ts'
+} from '../src/bun/runtime/runtime.ts'
 
 let tempDirs: string[] = []
 

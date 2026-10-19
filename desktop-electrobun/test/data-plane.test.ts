@@ -9,9 +9,9 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loopbackOrigin, startShellServer } from '../src/bun/shell-server.ts'
-import type { LoopbackAggregation } from '../src/shared/settings.ts'
-import { createRpcRouter, dispatchRpc } from '../src/bun/rpc.ts'
+import { loopbackOrigin, startShellServer } from '../src/bun/net/shell-server.ts'
+import type { LoopbackAggregation } from '../src/shared/settings/settings.ts'
+import { createRpcRouter, dispatchRpc } from '../src/bun/commands/rpc.ts'
 
 const delayed = (value: Response, ms: number): Promise<Response> =>
   new Promise((resolve) => setTimeout(() => resolve(value), ms))

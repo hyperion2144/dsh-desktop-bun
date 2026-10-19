@@ -7,8 +7,8 @@ import {
   shellThemeAttr,
   shellThemeFromPatchYaml,
   shellThemeStyle,
-} from '../src/shared/shell-theme.ts'
-import { PROFILE_PATCH_FILE, readShellTheme } from '../src/bun/theme-source.ts'
+} from '../src/shared/settings/shell-theme.ts'
+import { PROFILE_PATCH_FILE, readShellTheme } from '../src/bun/platform/theme-source.ts'
 
 /** 隔离实例里那份文件的真实形状（用户直接在 profile 目录里手改的）。 */
 const PATCH_LIGHT = `# Your patch layer for this dsh profile, applied after every bundle layer:

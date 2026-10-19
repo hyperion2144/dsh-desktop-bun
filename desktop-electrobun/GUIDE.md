@@ -56,9 +56,6 @@
 | dsh 运行时 | 列出已装版本，可下载 / 切换 / 卸载（卸载进回收站，重启时清理） |
 | 代理 | off / system（读系统设置，含凭据）/ manual（手填）；会注入给 dsh 子进程 |
 | 下载 | 并发数等下载管理器参数 |
-
-旧版（Tauri 壳）的 `settings.yaml` 会在首次启动时**只读迁移**成新格式，不会被改动或删除——回退旧版本设置不丢。
-
 ## 故障排查
 
 1. **启动卡住 / 失败**：启动界面会显示红字原因；壳日志在 `$DSH_HOME/shell.log`（主进程 console / 服务 / 页面控制台，已轮转；托盘/DevTools 排障先看这里），Electrobun 进程日志在 `~/Library/Logs/com.hyperion.dsh-desktop-bun/`（macOS）或 `%LOCALAPPDATA%\DeepSeekHarnessDesktopBUN\`（Windows）。
@@ -69,10 +66,3 @@
 6. **插件起不来 / 模型列表空**：设置 →「依赖状态」看是否需要「重建依赖」（pnpm 大版本不一致时需要）。
 7. **完全重置**：退出应用后删 `~/.dsh` 下对应 profile（会丢会话与设置，慎用）。
 
-## 与旧版（Tauri 壳）的差异
-
-- 渲染引擎是 CEF/V8：长会话高吞吐下不再触发系统 WKWebView 的 JIT 崩溃（白屏后自动刷新）特有的问题面。
-- 每个 profile 独立窗口（不再单窗切换 profile）。
-- 托盘无文字标题，纯图标；左键点击聚焦窗口。
-- 桌宠暂未迁移（维护者决定不做）。
-- 应用名 / bundle id：`DeepSeek Harness Desktop BUN`（`com.hyperion.dsh-desktop-bun`）。

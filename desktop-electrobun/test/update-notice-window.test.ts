@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test'
-import { evaluateRuntimeUpdates } from '../src/shared/runtime-update.ts'
-import type { UpdateNoticePayload } from '../src/bun/update-notice-dialog.ts'
-import { UPDATE_NOTICE_HEIGHT, UPDATE_NOTICE_WIDTH } from '../src/bun/update-notice-dialog.ts'
+import { evaluateRuntimeUpdates } from '../src/shared/runtime/runtime-update.ts'
+import type { UpdateNoticePayload } from '../src/bun/windows/update-notice-dialog.ts'
+import { UPDATE_NOTICE_HEIGHT, UPDATE_NOTICE_WIDTH } from '../src/bun/windows/update-notice-dialog.ts'
 import {
   UPDATE_NOTICE_TITLE,
   createUpdateNoticeWindow,
   type NoticeWindowLike,
   type NoticeWindowOptions,
-} from '../src/bun/update-notice-window.ts'
+} from '../src/bun/windows/update-notice-window.ts'
 
 class FakeWindow implements NoticeWindowLike {
   closed = false

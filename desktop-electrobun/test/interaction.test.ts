@@ -11,16 +11,16 @@ import {
   isOpenablePath,
   contextMenuScript,
   type ShellMenuItem,
-} from '../src/bun/context-menu.ts'
-import { OPEN_EXTERNAL_METHOD, externalLinksScript, isExternalUrl, isOpenableUrl } from '../src/bun/external.ts'
+} from '../src/bun/windows/context-menu.ts'
+import { OPEN_EXTERNAL_METHOD, externalLinksScript, isExternalUrl, isOpenableUrl } from '../src/bun/windows/external.ts'
 import {
   TITLEBAR_WINDOW_METHODS,
   titlebarScript,
   WINDOWS_TITLEBAR_HEIGHT,
   WINDOW_STATE_METHOD,
   TITLEBAR_WINDOW_ENDPOINT,
-} from '../src/bun/titlebar.ts'
-import { VIEW_TOKEN_HEADER } from '../src/shared/view-grant.ts'
+} from '../src/bun/windows/titlebar.ts'
+import { VIEW_TOKEN_HEADER } from '../src/shared/net/view-grant.ts'
 
 const SELF = 'http://127.0.0.1:6391'
 

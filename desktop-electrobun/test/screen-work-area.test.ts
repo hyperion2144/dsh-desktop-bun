@@ -4,7 +4,7 @@
 // 125% 缩放下四边全差 20%，启动旗标未落时最大化态恒假（#73 单方框图标）。本模块只做
 // 纯几何选择，让 window-max 的判定与 getFrame 用同一坐标空间；Screen 读取留在 index.ts。
 import { describe, expect, test } from 'bun:test'
-import { pickWorkArea, type DisplayWorkArea } from '../src/bun/screen-work-area.ts'
+import { pickWorkArea, type DisplayWorkArea } from '../src/bun/windows/screen-work-area.ts'
 
 // 主屏 2K@125% 的典型 WorkArea 逻辑值（物理 2560×1380 ÷1.25）。
 const PRIMARY: DisplayWorkArea = {

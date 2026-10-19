@@ -16,8 +16,9 @@ import {
   trayMenu,
   statusLabel,
   trayTitle,
-} from '../src/bun/tray-menu.ts'
-import { TRAY_LABEL_MAX, truncateTrayLabel, updateCheckLabel } from '../src/bun/tray-menu.ts'
+} from '../src/bun/platform/tray-menu.ts'
+import { TRAY_LABEL_MAX, truncateTrayLabel, updateCheckLabel } from '../src/bun/platform/tray-menu.ts'
+import { evaluateRuntimeUpdates } from '../src/shared/runtime/runtime-update.ts'
 import {
   DEFAULT_WINDOW_HEIGHT,
   DEFAULT_WINDOW_WIDTH,
@@ -32,7 +33,7 @@ import {
   readWindowFrame,
   sanitizeFrame,
   writeWindowFrame,
-} from '../src/bun/window-state.ts'
+} from '../src/bun/windows/window-state.ts'
 
 const labels = (items: TrayMenuItem[]): string[] =>
   items.map((item) => (item.type === 'divider' ? '---' : `${item.checked === true ? '✓ ' : ''}${item.label}`))
@@ -44,24 +45,37 @@ const isNormal = (item: TrayMenuItem): item is NormalItem => item.type === 'norm
 const findItem = (items: TrayMenuItem[], label: string): NormalItem | undefined =>
   items.find((item): item is NormalItem => isNormal(item) && item.label === label)
 
-const baseState = (overrides: Partial<TrayState> = {}): TrayState => ({
-  windowVisible: true,
-  profile: 'desktop',
-  profiles: ['desktop'],
-  openWindows: [],
-  hostRunning: true,
-  runtimeLabel: '内置 0.2.1-alpha.2',
-  builtinVersion: '0.2.1-alpha.2',
-  runningVersion: '0.2.1-alpha.2',
-  selected: null,
-  installed: [],
-  catalog: [],
-  downloading: null,
-  remoteAddr: null,
-  remoteList: [],
-  registerLabel: null,
-  ...overrides,
-})
+const baseState = (
+  overrides: Partial<TrayState> & { catalog?: Array<{ version: string; channel: string }> } = {},
+): TrayState => {
+  const { catalog = [], ...rest } = overrides
+  // 候选与内置口径和产线同一来源：判定层从同一组事实算出（#186/#189）
+  const report = evaluateRuntimeUpdates({
+    running: 'runningVersion' in rest ? (rest.runningVersion ?? null) : '0.2.1-alpha.2',
+    builtin: 'builtinVersion' in rest ? (rest.builtinVersion ?? null) : '0.2.1-alpha.2',
+    catalog,
+    installed: (rest.installed ?? []).map((version) => ({ version, source: '', installed_at: 0 })),
+  })
+  return {
+    windowVisible: true,
+    profile: 'desktop',
+    profiles: ['desktop'],
+    openWindows: [],
+    hostRunning: true,
+    runtimeLabel: '内置 0.2.1-alpha.2',
+    builtinVersion: '0.2.1-alpha.2',
+    runningVersion: '0.2.1-alpha.2',
+    selected: null,
+    installed: [],
+    downloading: null,
+    remoteAddr: null,
+    remoteList: [],
+    registerLabel: null,
+    candidates: report.candidates,
+    builtinDescriptor: report.builtinDescriptor,
+    ...rest,
+  }
+}
 
 // #117：托盘状态行讲的是「服务面在 / DSH 在不在 / 为什么不在」。
 // 服务面先于 DSH 存在，所以 stopped 与 failed 都有对应的菜单文案（以前只有「宿主未运行」一种）。

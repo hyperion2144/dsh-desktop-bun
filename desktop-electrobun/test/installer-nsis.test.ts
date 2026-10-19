@@ -103,6 +103,30 @@ describe('NSIS 事务性安装（#93）', () => {
     expect(installSection).toContain(String.raw`StrCpy $DshNewMoved ""`) // 提交点
   })
 
+
+  test('任务栏身份（#199）：lnk 写 AUMID + 注册表身份在提交点之后，卸载清同一键', () => {
+    const promoteAt = installSection.indexOf('Call DshPromoteDirectories')
+    expect(promoteAt).toBeGreaterThan(-1)
+    expect(installSection).toContain(String.raw`WinShell::SetLnkAUMI "$SMPROGRAMS\\@@APP_NAME@@\\@@APP_NAME@@.lnk" "@@APP_ID@@"`)
+    expect(installSection).toContain(String.raw`WriteRegStr HKCU "Software\\Classes\\AppUserModelId\\@@APP_ID@@" "DisplayName" "$(DSH_TEXT_APP_NAME)"`)
+    expect(installSection).toContain(String.raw`WriteRegStr HKCU "Software\\Classes\\AppUserModelId\\@@APP_ID@@" "IconUri" "$INSTDIR\\App\\bin\\launcher.exe"`)
+    expect(installSection.indexOf('SetLnkAUMI')).toBeGreaterThan(promoteAt) // 与注册表/快捷方式同一提交点之后
+    expect(uninstallSection).toContain(String.raw`DeleteRegKey HKCU "Software\\Classes\\AppUserModelId\\@@APP_ID@@"`)
+    expect(script).toContain('!addplugindir') // WinShell 插件目录挂载（仓内自持）
+  })
+
+  test('launcher.exe 元数据与图标补丁（#199）：rcedit 设图标 + 应用名（Electrobun win.icon 未生效的兑底）', () => {
+    expect(script).toContain('--set-icon')
+    expect(script).toContain('rcedit')
+    expect(script).toContain('--set-version-string FileDescription')
+    expect(script).toContain('--set-version-string ProductName')
+    // 补丁对象必须是包内 launcher（packDir 内相对 appDir 同路径），失败不阻断安装器主流程
+    expect(script).toContain('relative(appDir, launcher)')
+  })
+
+  test('窗口图标 ico 兑底（#203 四轮）：app-icon.ico 随安装树进 bin/，壳侧从文件加载', () => {
+    expect(script).toContain("copyFileSync(iconPath, join(appDir, 'bin', 'app-icon.ico'))")
+  })
   test('失败出口统一：先回滚，再非零退出码，每个失败分支都走它', () => {
     expect(failFn).toContain('Call DshCleanupDirectories')
     expect(failFn).toContain('SetErrorLevel 2')

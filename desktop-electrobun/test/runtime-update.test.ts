@@ -10,8 +10,9 @@ import {
   runtimeUpdateActionLabel,
   runtimeUpdateSourceLabel,
   topRuntimeUpdate,
+  remoteRuntimeCandidates,
   type RuntimeUpdateInput,
-} from '../src/shared/runtime-update.ts'
+} from '../src/shared/runtime/runtime-update.ts'
 
 const installed = (...versions: string[]): RuntimeUpdateInput['installed'] =>
   versions.map((version) => ({ version, source: '', installed_at: 0 }))
@@ -338,5 +339,85 @@ describe('目录与安装源不在一侧（实机修）', () => {
     })
     expect(report.entries[0]!.action).toBe('download-and-switch')
     expect(report.entries[0]!.plan[0]).toEqual({ rpc: 'download_runtime', args: { version: '0.2.1-rc.1', source: 'github' } })
+  })
+})
+
+describe('归一候选集 candidates（#186/#189）', () => {
+  test('candidates = 内置 ∪ 已下载 ∪ 目录 全集（含不高于基准的），降序；entries 仍只含严格更高的', () => {
+    const report = evaluateRuntimeUpdates({
+      running: '0.2.0',
+      builtin: '0.2.0',
+      catalog: [
+        { version: '0.3.0', channel: 'latest' },
+        { version: '0.1.9', channel: 'latest' },
+      ],
+      installed: installed('0.1.5'),
+    })
+    expect(report.candidates.map((entry) => entry.version)).toEqual(['0.3.0', '0.2.0', '0.1.9', '0.1.5'])
+    expect(versionsOf(report)).toEqual(['0.3.0'])
+  })
+
+  test('baseline 为 null 的早返回也带 candidates（切换面不依赖在跑版本）', () => {
+    const report = evaluateRuntimeUpdates({
+      running: null,
+      builtin: null,
+      catalog: [{ version: '0.3.0', channel: 'latest' }],
+      installed: installed('0.2.5'),
+    })
+    expect(report.entries).toEqual([])
+    expect(report.candidates.map((entry) => entry.version)).toEqual(['0.3.0', '0.2.5'])
+  })
+
+  test('同号去重优先级 builtin > downloaded > remote；候选行带动作与计划', () => {
+    const report = evaluateRuntimeUpdates({
+      running: '0.1.9',
+      builtin: '0.2.0',
+      catalog: [{ version: '0.2.0', channel: 'latest' }],
+      installed: installed('0.2.0'),
+    })
+    const merged = report.candidates.find((entry) => entry.version === '0.2.0')
+    expect(merged?.source).toBe('builtin')
+    expect(merged?.local).toBe(true)
+    expect(merged?.uninstallable).toBe(false)
+    expect(merged?.action).toBe('switch')
+  })
+
+  test('installable 只过滤 entries；candidates 的 remote 段不筛（装不装得上是提醒面的事）', () => {
+    const report = evaluateRuntimeUpdates({
+      running: '0.2.0',
+      builtin: '0.2.0',
+      catalog: [{ version: '0.3.0', channel: 'latest' }],
+      installed: [],
+      installable: [],
+    })
+    expect(report.entries).toEqual([])
+    expect(report.candidates.map((entry) => entry.version)).toContain('0.3.0')
+  })
+
+  test('remoteRuntimeCandidates = entries 里 source=remote 的版本号（两遍判定专用）', () => {
+    const report = evaluateRuntimeUpdates({
+      running: '0.1.9',
+      builtin: '0.2.0',
+      catalog: [{ version: '0.3.0', channel: 'latest' }],
+      installed: installed('0.2.5'),
+    })
+    expect(remoteRuntimeCandidates(report)).toEqual(['0.3.0'])
+  })
+
+  test('builtinDescriptor 三分支：bundled / external（dev 外部树）/ none', () => {
+    const bundled = evaluateRuntimeUpdates({ running: '0.2.0', builtin: '0.2.0', catalog: [], installed: [] })
+    expect(bundled.builtinDescriptor).toEqual({ version: '0.2.0', kind: 'bundled', label: '内置 0.2.0' })
+
+    const external = evaluateRuntimeUpdates({ running: '0.2.1-alpha.2', builtin: null, catalog: [], installed: [] })
+    expect(external.builtinDescriptor).toEqual({ version: '0.2.1-alpha.2', kind: 'external', label: '内置 0.2.1-alpha.2' })
+
+    const none = evaluateRuntimeUpdates({ running: null, builtin: null, catalog: [], installed: [] })
+    expect(none.builtinDescriptor).toEqual({ version: null, kind: 'none', label: '内置（版本未知）' })
+  })
+
+  test('ignored / lastNotified 不参与判定（evaluate 入参没有它们，钉住不变式）', () => {
+    const once = evaluateRuntimeUpdates({ running: '0.2.0', builtin: '0.2.0', catalog: [{ version: '0.3.0', channel: 'latest' }], installed: [] })
+    const twice = evaluateRuntimeUpdates({ running: '0.2.0', builtin: '0.2.0', catalog: [{ version: '0.3.0', channel: 'latest' }], installed: [] })
+    expect(twice).toEqual(once)
   })
 })

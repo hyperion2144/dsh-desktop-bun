@@ -1,7 +1,6 @@
-// 面板用到的数据形状，单独成模块：这些类型只描述「壳回吐什么」，不含任何逻辑，
-// 过去混在 2300 行的入口文件里，导致每个卡片模块都得 import 入口。
-import type { KeepAwakeCapabilityLike } from '../keep-awake-note.ts'
-
+// 面板用到的数据形状：**全部从根 contracts/ 派生**（#190）——形状只有契约一处事实源，
+// 这里只保留面板侧的名字与注释；手抄副本已删，改形状先改契约，编译期同步两端。
+import type { Commands } from '../../../../contracts/index.ts'
 /** dsh settings 服务的命名空间读写通道（#50 时期保留的捕获口，面板按它决定要不要落盘）。 */
 export interface NsRpc {
   rpc: { call: (channel: string, endpoint: string, payload?: unknown) => Promise<NsRpcResponse> }
@@ -13,87 +12,25 @@ export interface NsRpcResponse {
   value?: unknown
 }
 
-export interface ProxySettings {
-  proxy_mode: string
-  proxy_url: string
-  no_proxy: string
-  proxy_user: string
-  proxy_pass: string
-  effective?: { http?: string; https?: string; all?: string; no_proxy?: string }
-}
+/** 代理设置（get_proxy_settings 回执；effective 仅壳探测到系统代理时给出）。 */
+export type ProxySettings = Commands['get_proxy_settings']['result']
 
-export interface DesktopData {
-  remote_addr: string | null
-  remote_list: string[]
-  port: number
-  profiles: Array<{ name: string; active: boolean; selectable: boolean }>
-  /** #144 网关心跳覆盖（null/缺省 = 壳默认 30s；0 = 不覆盖） */
-  mux_heartbeat_ms?: number | null
-  /** #175 移动端会话守卫退避基数（毫秒；null/缺省 = 壳默认 10000，范围 1s..600s） */
-  mobile_guard_backoff_ms?: number | null
-  /** #147 路线 A：手机端是否改用桌面布局 */
-  desktop_layout_on_phones?: boolean | null
-  /** #186 防休眠：有会话在跑时阻止系统休眠（缺省 true；屏幕仍会照常熄灭） */
-  prevent_sleep?: boolean | null
-  /** #69 开发者工具：打包态重启后开远程调试口并放出菜单（CEF 或 win WebView2 载体；缺省 false；安全面） */
-  dev_tools?: boolean | null
-  /** #75 防休眠能力（壳探测到的系统抑制通道）：缺位 = 老壳，available:false = 本环境拿不到，面板必须明说降级 */
-  keep_awake?: KeepAwakeCapabilityLike | null
-}
+/** 设置面板首屏数据（get_desktop_settings_data 回执）。 */
+export type DesktopData = Commands['get_desktop_settings_data']['result']
 
-export interface DshSourceState {
-  mode: string
-  builtin: { dsh_version: string } | null
-  running: { mode: string; origin: string; port: number; version?: string } | null
-}
+/** 「dsh 来源」卡状态（get_dsh_source 回执）。 */
+export type DshSourceState = Commands['get_dsh_source']['result']
 
-export interface ProfilePortRow {
-  profile: string
-  page_port: number
-  upstream_port: number
-  lane_port: number
-  running: boolean
-}
+/** 端口表一行（list_profile_ports 回执元素）。 */
+export type ProfilePortRow = Commands['list_profile_ports']['result'][number]
+/** 运行时目录快照（list_runtime_catalog 回执）。 */
+export type RuntimeCatalog = Commands['list_runtime_catalog']['result']
 
-export interface RuntimeCatalog {
-  source: string
-  builtin: string | null
-  selected: string | null
-  installed: { version: string }[]
-  catalog: { version: string; channel: string }[]
-  /** #107：目录拉取失败时的降级标记（此时 catalog 为空、installed 为本地全部已装） */
-  error?: string
-  /** #79：运行时回退说明（偏好版本不在已装目录时的用户可见原因；无回退为 null） */
-  note?: string | null
-  /** 当前真正在跑的那棵树（override | installed | builtin）：标记「运行中」并禁掉它的下载/卸载 */
-  running?: { kind: string; version: string | null; dir: string | null } | null
-}
+/** 应用更新（#220 决策 11）：壳把框架 Updater 的状态机翻成这个视图，客户端只负责渲染。 */
+export type UpdateSnapshotLike = Commands['get_update_state']['result']
 
-/** 应用更新（#220 决策 11）：壳把框架 Updater 的状态机翻成这个视图，客户端只负责渲染 */
-export interface UpdateSnapshotLike {
-  available: boolean
-  reason: string
-  view: {
-    phase: string
-    label: string
-    message: string
-    current: string
-    latest: string
-    channel: string
-    progress: number | null
-    bytesDownloaded: number | null
-    totalBytes: number | null
-    error: string
-    updateReady: boolean
-  }
-  actions: { canCheck: boolean; canDownload: boolean; canApply: boolean; hint: string }
-}
-
-export interface MigrationStatus {
-  running: boolean
-  copied: number
-  total: number
-}
+/** 迁移进度（migration_status 回执）。 */
+export type MigrationStatus = Commands['migration_status']['result']
 
 export interface BannerMsg {
   ok: boolean

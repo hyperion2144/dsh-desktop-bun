@@ -12,7 +12,7 @@ import {
   stopProcessTree,
   sweepProcessRemnants,
   waitAllDead,
-} from '../src/bun/process-tree.ts'
+} from '../src/bun/host/process-tree.ts'
 
 describe('进程表解析', () => {
   test('ps 两列输出：坏行/表头/非法 pid 跳过', () => {

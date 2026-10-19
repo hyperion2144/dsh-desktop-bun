@@ -9,7 +9,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import {
   DECLARATION_FILE,
   readBuiltinRuntimeDeclaration,
-} from '../src/shared/builtin-runtime.ts'
+} from '../src/shared/runtime/builtin-runtime.ts'
 
 const projectRoot = resolve(import.meta.dir, '..')
 const tree = join(projectRoot, 'builtin-runtime')

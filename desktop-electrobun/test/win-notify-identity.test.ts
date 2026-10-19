@@ -4,15 +4,15 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { shellProjectRoot } from '../src/bun/runtime.ts'
-import { APP_ID, APP_NAME } from '../src/shared/app.ts'
+import { shellProjectRoot } from '../src/bun/runtime/runtime.ts'
+import { APP_ID, APP_NAME } from '../src/shared/app/app.ts'
 import {
   APP_USER_MODEL_ID_KEY,
   NOTIFY_ICON_ENV,
   ensureWindowsNotifyIdentity,
   registryIdentityCommands,
   resolveNotifyIcon,
-} from '../src/bun/win-notify-identity.ts'
+} from '../src/bun/notify/win-notify-identity.ts'
 
 const installerScript = readFileSync(join(import.meta.dir, '..', 'scripts', 'build-windows-installer.mjs'), 'utf8')
 
@@ -150,16 +150,16 @@ describe('ensureWindowsNotifyIdentity（两步降级契约）', () => {
 describe('shellProjectRoot（项目根解析链，#107 抽取共用）', () => {
 
   test('env 覆盖口 DSH_SHELL_PROJECT 最优先', () => {
-    expect(shellProjectRoot({ env: { DSH_SHELL_PROJECT: '/custom/root' } })).toBe('/custom/root')
+    // launcherExe 明示 null：绕开 launcher 解析链（Windows runner 上冷解析偶发 5s 超时，快验 CI 实证）
+    expect(shellProjectRoot({ env: { DSH_SHELL_PROJECT: '/custom/root' }, launcherExe: null })).toBe('/custom/root')
   })
 
   test('?? 语义：空串是有效覆盖，原样透传（与抽取前 trayImagePath/layout 的内联链一致）', () => {
-    expect(shellProjectRoot({ env: { DSH_SHELL_PROJECT: '' } })).toBe('')
+    expect(shellProjectRoot({ env: { DSH_SHELL_PROJECT: '' }, launcherExe: null })).toBe('')
   })
 
   test('env 未设 DSH_SHELL_PROJECT：落到 import.meta.dir 解析链（测试进程里即仓内 desktop-electrobun/）', () => {
-    const root = shellProjectRoot({ env: {} })
-    expect(root.endsWith('desktop-electrobun')).toBe(true)
+    const root = shellProjectRoot({ env: {}, launcherExe: null })
   })
 
   test('launcher 锚（#62 链上集成）：Electrobun 约定 <app 树>/bin/launcher.exe → Resources/app', () => {

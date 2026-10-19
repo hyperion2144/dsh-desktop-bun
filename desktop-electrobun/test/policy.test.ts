@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { decide, isCrossSite, normalizeRel, stripToken } from '../src/shared/admission.ts'
-import { contentTypeFor, isNoContentAsset, resolveAsset } from '../src/shared/asset-path.ts'
+import { decide, isCrossSite, normalizeRel, stripToken } from '../src/shared/net/admission.ts'
+import { contentTypeFor, isNoContentAsset, resolveAsset } from '../src/shared/net/asset-path.ts'
 import { delimiter, resolve } from 'node:path'
-import { buildChildEnv, assertChildEnv, missingEnvKeys, CHILD_RESOURCE_CONDITIONS } from '../src/shared/child-env.ts'
-import { scrubRequestHeaders, scrubResponseHeaders, shouldNoStore } from '../src/shared/headers.ts'
+import { buildChildEnv, assertChildEnv, missingEnvKeys, CHILD_RESOURCE_CONDITIONS } from '../src/shared/app/child-env.ts'
+import { scrubRequestHeaders, scrubResponseHeaders, shouldNoStore } from '../src/shared/net/headers.ts'
 
 const SELF = 'http://127.0.0.1:6390'
 const TOKEN = 'tok-abc123'
@@ -133,6 +133,21 @@ describe('转发头（壳持有 cookie）', () => {
     expect(out.get('origin')).toBeNull()
     expect(out.get('sec-fetch-site')).toBeNull()
     expect(out.get('accept')).toBe('application/json')
+  })
+
+  test('转发时补回已验证的源事实：origin=<上游 origin> + sec-fetch-site: same-origin（#197）', () => {
+    const input = new Headers({
+      host: '127.0.0.1:6390',
+      origin: SELF,
+      'sec-fetch-site': 'same-origin',
+    })
+    const out = scrubRequestHeaders(input, {
+      authority: '127.0.0.1:55600',
+      origin: 'http://127.0.0.1:55600',
+    })
+    expect(out.get('origin')).toBe('http://127.0.0.1:55600')
+    expect(out.get('sec-fetch-site')).toBe('same-origin')
+    expect(out.get('host')).toBe('127.0.0.1:55600')
   })
 
   test('响应剥掉 set-cookie 与 hop-by-hop，/plugins/* 与 /api/* 补 no-store', () => {

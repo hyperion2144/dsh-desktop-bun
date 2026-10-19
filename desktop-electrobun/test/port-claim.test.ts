@@ -7,8 +7,8 @@ import {
   profileLanePort,
   profilePort,
   type DesktopSettings,
-} from '../src/shared/settings.ts'
-import { decideClaim, extractTokenFromUrl } from '../src/shared/port-claim.ts'
+} from '../src/shared/settings/settings.ts'
+import { decideClaim, extractTokenFromUrl } from '../src/shared/net/port-claim.ts'
 const settings: DesktopSettings = { notifications: { enabled: true, scenarios: [] } } as unknown as DesktopSettings
 
 describe('端口认领判定（旧壳 decide_claim）', () => {

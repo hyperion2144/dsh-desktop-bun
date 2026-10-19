@@ -9,12 +9,12 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { startShellServer } from '../src/bun/shell-server.ts'
-import { createCommandTable, type CommandDeps } from '../src/bun/commands.ts'
-import { createRpcRouter, dispatchRpc, parseRpcRequest, rpcCommands, type RpcContext } from '../src/bun/rpc.ts'
-import { defaultSettings, profileLanePort, profilePort, type DesktopSettings } from '../src/shared/settings.ts'
-import { resolveProxyEnv } from '../src/shared/proxy-env.ts'
-import { loadSettings, saveSettings, updateSettings } from '../src/bun/settings-store.ts'
+import { startShellServer } from '../src/bun/net/shell-server.ts'
+import { createCommandTable, type CommandDeps } from '../src/bun/commands/commands.ts'
+import { createRpcRouter, dispatchRpc, parseRpcRequest, rpcCommands, type RpcContext } from '../src/bun/commands/rpc.ts'
+import { defaultSettings, profileLanePort, profilePort, type DesktopSettings } from '../src/shared/settings/settings.ts'
+import { resolveProxyEnv } from '../src/shared/net/proxy-env.ts'
+import { loadSettings, saveSettings, updateSettings } from '../src/bun/platform/settings-store.ts'
 
 function tempHome(): string {
   const home = mkdtempSync(join(tmpdir(), 'dsh-rpc-'))
@@ -480,6 +480,19 @@ describe('/__shell__/rpc 端点', () => {
   // 2026-10-18 Build Windows 单测：首个 loopback 请求偶发超过默认 5s（run 39106378160）；
   // 这里只验路由契约，给足 15s，避免主分支构建被单次慢请求判红。
   const RPC_TEST_TIMEOUT_MS = 15_000
+  /** Windows CI 偶发 port:0 监听就绪竞态（ConnectionRefused，run 39269733346 实证）：退避重试再判失败。 */
+  async function fetchShell(url: string, init?: RequestInit): Promise<Response> {
+    let lastError: unknown = null
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        return await fetch(url, init)
+      } catch (error) {
+        lastError = error
+        await Bun.sleep(50 * attempt)
+      }
+    }
+    throw lastError
+  }
   /**
    * 壳的端口交给系统分配（#168），句柄里的 origin 就是真实端口；上游只占位——这里要的就是
    * 「转发打不通」，固定一个没人听的端口即可（旧写法是先占后放挑端口，那个窗口会被别的 socket 抢走）。
@@ -514,7 +527,7 @@ describe('/__shell__/rpc 端点', () => {
 
   test('POST 根路径 ⇒ 命令结果原样回给页面', async () => {
     await withServer(async (origin) => {
-      const response = await fetch(`${origin}/__shell__/rpc`, {
+      const response = await fetchShell(`${origin}/__shell__/rpc`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ cmd: 'get_desktop_client_environment', args: {} }),
@@ -529,7 +542,7 @@ describe('/__shell__/rpc 端点', () => {
 
   test('带 token 前缀的同一个路径**不是** RPC（文档类，转发给上游）', async () => {
     await withServer(async (origin, token) => {
-      const response = await fetch(`${origin}/${token}/__shell__/rpc`, {
+      const response = await fetchShell(`${origin}/${token}/__shell__/rpc`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ cmd: 'get_desktop_client_environment', args: {} }),
@@ -542,7 +555,7 @@ describe('/__shell__/rpc 端点', () => {
 
   test('命令抛错 ⇒ 200 + ok:false（面板显示原因，不是永远转圈）', async () => {
     await withServer(async (origin) => {
-      const response = await fetch(`${origin}/__shell__/rpc`, {
+      const response = await fetchShell(`${origin}/__shell__/rpc`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ cmd: 'boom', args: {} }),
@@ -556,7 +569,7 @@ describe('/__shell__/rpc 端点', () => {
 
   test('GET ⇒ 405（RPC 只收 POST）', async () => {
     await withServer(async (origin) => {
-      const response = await fetch(`${origin}/__shell__/rpc`)
+      const response = await fetchShell(`${origin}/__shell__/rpc`)
       expect(response.status).toBe(405)
     })
   }, RPC_TEST_TIMEOUT_MS)

@@ -6,7 +6,7 @@ import {
   applicationMenuItems,
   installApplicationMenu,
   type MenuItem,
-} from '../src/bun/menu.ts'
+} from '../src/bun/windows/menu.ts'
 
 
 describe('应用菜单：系统剪贴板快捷键', () => {

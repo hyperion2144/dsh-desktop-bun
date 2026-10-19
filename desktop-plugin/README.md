@@ -1,154 +1,35 @@
-# DeepSeek Harness Desktop（dsh-desktop-tauriapp）
+# dsh-desktop-bun
 
-[![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)
-[![npm](https://img.shields.io/npm/v/dsh-desktop-tauriapp)](https://www.npmjs.com/package/dsh-desktop-tauriapp)
+DeepSeek Harness 桌面壳的桌面半区插件（DSH plugin）：随宿主挂载后给 dsh 页面注入桌面 chrome——标题栏适配、桌面设置面板、通知设置、下载管理、快捷键桥、控制台镜像等；并注册「DSH 桌面壳」技能与桌面设置的 settings 命名空间。
 
-> 主人好呀～ 这是 **DeepSeek Harness Desktop**：把 DeepSeek Harness 的 Web GUI 封装成 macOS / Windows 桌面应用——**内置运行时开箱即用**（无需自己装 Node 和 dsh）、托盘常驻、多 profile 多窗口、退出自动回收子进程。
-> 一键安装：`dsh plugin add dsh-desktop-tauriapp`（npm）或 `dsh plugin add github:hyperion2144/dsh-desktop-tauriapp`（GitHub）。
+壳本体（窗口、托盘、服务面、运行时管理）在 [`../desktop-electrobun/`](../desktop-electrobun/)，使用指南见 [GUIDE.md](../desktop-electrobun/GUIDE.md)。
 
-> **来源与致谢**：本仓库 fork 自 [happpsee/dsh-desktop-app](https://github.com/happpsee/dsh-desktop-app)，现由 [hyperion2144/dsh-desktop-tauriapp](https://github.com/hyperion2144/dsh-desktop-tauriapp) 独立演进维护；感谢原作者的开创性工作。
-
-## 新栈壳（Electrobun 版，开发中）
-
-`desktop-electrobun/` 是迁移中的新桌面壳（Electrobun/Bun 主进程 + CEF 渲染，替代 WKWebView/JSC，根因修复 #200 白屏刷新），能力已与旧壳对齐（清单见 issue [#220](https://github.com/hyperion2144/dsh-desktop-tauriapp/issues/220)），三平台 CI 每次构建出全套产物。构建与开发见 [desktop-electrobun/README.md](desktop-electrobun/README.md)，使用指南见 [desktop-electrobun/GUIDE.md](desktop-electrobun/GUIDE.md)；迁移独立仓 `dsh-desktop-bun` 的执行方案见 [docs/research/electrobun-repo-migration.md](docs/research/electrobun-repo-migration.md）。
-
-## 主要看点
-
-1. **内置运行时，零前置依赖**：Node sidecar + dsh 依赖树随安装包分发，双击即用；也可随时切换到自己装的外部 `dsh`
-2. **多 profile、多窗口**：每个 profile 独立端口与实例，托盘一键开新窗 / 就地切换；手机访问经 lane 反代跟随焦点窗口
-3. **桌面化体验**：插件式桌面 chrome（macOS 原生红绿灯 / Windows 自绘标题栏）、任务完成通知、**dsh 快捷键全链路可用（含桌面档 `desktop:<os>`）**、**会话运行中阻止系统休眠**、鲸鱼娘桌宠、下载管理器、侧边栏浏览器 guest 载体（#118）
-4. **国内网络友好**：rustup / cargo / npm / GitHub / NSIS 全套镜像配置与「哨兵」超时判定，Windows 无管理员工具链方案（见 [skill/](skill/) 与 [docs/](docs/)）
-
-## 安装
-
-### 直接下载（推荐）
-
-从 [Releases](../../releases) 下载对应平台安装包：
-
-| 平台 | 产物 |
-|---|---|
-| macOS（Apple Silicon） | `DeepSeek.Harness.Desktop_<版本>_aarch64.dmg` |
-| Windows | `DeepSeek.Harness.Desktop_<版本>_x64_zh-CN.msi`（或 `_x64-setup.exe`） |
-
-macOS 首次打开若非公证版本，需右键「打开」；Windows 网络下载的 exe 可能触发 SmartScreen 提示（本地构建不触发）。
-
-### 从源码构建
+## 构建
 
 ```bash
-bun run build:client        # esbuild 打包 src/client → lib/client.js（构建产出，非检查门禁）
+bun install
+bun run build:client        # esbuild 打包 src/client → lib/client.js（产物入库，随包分发）
 bun run typecheck           # tsc --noEmit（strict）
-bun run test:client         # 断言门禁（download-intercept / platform-keyboard / carrier / composer-input-guard）
+bun run test:client         # 断言门禁（需 Bun 1.4.x，与 CI 及 hutch 工具链对齐）
 ```
 
-旧 Tauri 壳（`desktop/`）已退役：应用构建/开发在 `desktop-electrobun/`（Electrobun/Bun 主进程 + CEF），见 [desktop-electrobun/README.md](desktop-electrobun/README.md)。
-
-发布链：升版本（`desktop-electrobun/package.json`）→ `git tag vX.Y.Z && git push` → build.yml tag 触发三平台全量构建出 artifact（`*-setup.exe` / `*.dmg` / `linux-*.tar.gz`，`assert:artifact` 复核内置运行时与 version.json）；draft release 自动发布 job 尚未启用（build.yml 内注释留档），发布目前为人工步骤。
-
-### 作为 DSH 插件 / 技能使用
-
-```bash
-# DSH 插件（npm / GitHub）
-dsh plugin add dsh-desktop-tauriapp
-dsh plugin add github:hyperion2144/dsh-desktop-tauriapp
-
-# 技能包（Claude Code / Claude Agent 兼容格式）
-cp -r skill ~/.claude/skills/dsh-desktop-tauriapp
-# DSH：复制到所运行 profile 的 skills 目录后加载 dsh-desktop-tauriapp 技能
-```
-
-## 特性
-
-### 运行时与进程
-
-- **内置运行时（默认）**：Node 24 sidecar + dsh 依赖树随包分发，经内部 API 代码路径启动（不走 CLI）；也可切换外部 dsh CLI（`DSH_BIN` → PATH → npm 全局）
-- **运行时版本管理**：应用内下载 / 切换 / 卸载 dsh 运行时版本（目录源可配 github / npm）；托盘「运行时版本」子菜单——已装点击即切，未装点击 = 下载→自动切换，全程系统通知反馈；内置版本可直接切回
-- **进程守护**：连接级健康探测（TCP 连不上才判异常），异常自动回启动页重建，自愈 3 次封顶（持续健康 ≥2 分钟才重置计数）；复用外部实例/远程只提示不代拉
-- **单实例 + 窗口状态记忆 + 退出回收**：重复双击聚焦已有窗口；位置大小自动恢复；只回收本次 spawn 的子进程，stdout/stderr 落盘日志
-
-### 多 profile 与多窗口
-
-- **per-profile 端口**：`web=3080`、`desktop=3081`，其余散列分配并持久化；设置页可改
-- **全新安装默认 `desktop` profile**（存量用户保持 `web`）；`desktop` 非 dsh 出厂模板，经 `--from-default-profile` 初始化
-- **托盘 Profile 分组**：聚焦已有窗口 / 在新窗口打开 / **就地切换本窗口的 profile** / 新建 / 全量迁移 A→B（排除锁与临时文件、符号链接感知、覆盖前备份）
-- **lane 反代跟随焦点窗口**：3091 稳定接入点指向焦点实例，手机侧零改动
-
-### 桌面化体验
-
-- **桌面 chrome（插件式局部注入）**：由内置插件的 client 在标准布局内注入局部拖拽区/状态条（不禁用 stock ui-layout）——macOS 用 `titleBarStyle: Overlay` 保留原生红绿灯；Windows 用 `decorations: false` 自绘标题栏按钮；配色随主题 token
-- **托盘常驻**：关闭窗口仅隐藏，托盘左键唤起、菜单退出，拦截 Cmd+Q 防误退；托盘含「重启 dsh 服务」「切换 Profile（本窗口）」「运行时版本」「dsh 服务地址」「本地端口…」「显示/隐藏桌宠」
-- **快捷键全链路（#187）**：桌面窗口不再吞键——壳在页面里装原生键盘桥（`dshDesktop.keyboard`），dsh 的快捷键按官方 `desktop:<os>` 档派发（命令面板 / 侧边栏 / `Ctrl/Cmd+Shift+.` 开合 NodeJS 诊断面板 / 关闭窗口等），改绑偏好存 `$DSH_HOME/desktop-keybindings.json`，改动即时生效
-- **会话运行中阻止系统休眠（#186）**：桌面设置可开关（默认开）。任一窗口有会话在跑就持系统级防休眠断言（macOS `IOPMAssertion` / Windows `SetThreadExecutionState`），等待审批或等待输入不持有，会话结束 / 关窗 / 退出应用立即释放；**屏幕仍照常熄灭**
-- **任务完成通知**：监听会话「忙碌→空闲」翻转，结束时 Dock 角标 +1；窗口失焦时弹系统通知（前台不打扰），回窗口自动清零；三平台通知权限 best-effort 申请并统一落日志
-- **鲸鱼娘桌宠**：透明置顶无边框小窗（纯 CSS 动画）、拖拽移动、左键唤起主窗、右键菜单（穿透/隐藏/退出）、任务完成弹气泡、位置记忆（多屏钳位）
-- **外链策略（对齐 dsh 官方桌面语义）**：新窗请求（`window.open` / `target=_blank`）→ 系统默认浏览器（应用内不开新窗）；异源顶层导航 → 阻止；`mailto:` / `tel:` → 系统。会话内链接的路由由 dsh 自己做（侧边栏/新标签），宿主不插手
-- **下载管理器**：blob/data 下载拦截 + 管理 Tab（分块写入、进度、完成通知）
-- **启动控制台**：加载页实时显示 dsh 子进程 stdout/stderr，可展开/收起/清空，启动失败直接看原因
-- **系统代理**：system 模式读系统设置（含凭证），manual 模式手填；壳侧所有网络（目录拉取、运行时下载、文件下载）统一走代理
-- **健壮定位**：Finder/资源管理器启动的 GUI 无终端 PATH，内置 nvm / npm-global / npx / Homebrew / 非标准盘符多级兜底探测
-
-### 设置与维护
-
-- **设置页区块**：dsh 来源（内置/外部，切换立即接管）· dsh 服务地址（本地/远程）· Profile · Profile 端口 · 迁移 Profile · dsh 运行时（下载/切换/卸载）· 下载 · 代理设置 · **依赖状态** · **通知** · **电源（阻止休眠）** · 手机访问
-- **依赖状态自检与一键重建**：dsh 的插件安装/卸载由内置 pnpm 执行，其 store 大版本必须与 profile 的 `node_modules` 一致；面板列出各 profile 记录的 pnpm / 内置版本 / 是否需重建（运行中禁重建），壳启动时后台检查，不一致仅弹提示、由用户手动重建（#124 起不再自动重建）
-- **诊断**：webview 控制台镜像到 `$DSH_HOME/dsh-desktop-webview.log`，应用日志在 `~/Library/Logs/com.arcreel.dsh-desktop-tauriapp/`
-
-## 仓库结构
+## 结构
 
 ```
-desktop-electrobun/  Electrobun+Bun 桌面壳（多窗口 + 内置 dsh 运行时管理）
-desktop-plugin/      dsh 插件（src/client/ 浏览器半区，esbuild → lib/client.js；scripts/ 含构建与验收脚本）
-plugins/             独立插件服务（dsh-mobile-access 手机访问服务，client.js 入库随包分发）
-mobile/              移动端壳（dsh-mobile-nav 布局插件子模块 + shell-web 共享模块 + Expo Android/iOS 壳 + harmony 鸿蒙壳）
-docs/                设计与审计文档
-resources/           内置资源（dsh 运行时素材 + 图标）
+index.js           插件入口：技能注册 + 桌面设置 schema + RPC 桥
+cordis.patch.yml   bundle 层：安装时自动挂载插件行
+src/client/        浏览器半区 TypeScript（桌面 chrome 各模块）
+lib/client.js      esbuild 产物（入库）
+scripts/           build-client / test-client / build-mobile-client
 ```
 
-## 移动端壳（Android / iOS / 鸿蒙）
+## 客户端能力一览
 
-仓库 `mobile/` 下有手机访问壳（配对桌面 dsh 后进入 WebView 使用）：
-
-| 平台 | 目录 | 构建/发布 |
-|------|------|-----------|
-| **Android + iOS** | `mobile/expo-app/`（Expo/RN 共用一套代码） | **随 GitHub CI 自动出包**：Android `app-debug.apk`（可直接安装）、iOS `DeepSeek.ipa`（未签名，用 [AltStore](https://altstore.io) 等免费签名侧载） |
-| **鸿蒙** | `mobile/harmony/`（ArkTS + ArkWeb） | **不随 CI 发布**——需本地 DevEco Studio 构建 + 华为账号签名，见 [mobile/harmony/README.md](mobile/harmony/README.md) |
-
-本地构建移动端：
-
-```bash
-# Android APK
-cd mobile/expo-app
-npm ci
-npx expo prebuild -p android
-cd android && ./gradlew assembleDebug   # 产物 app/build/outputs/apk/debug/app-debug.apk
-
-# iOS IPA（未签名）
-npx expo prebuild -p ios
-cd ios && pod install
-xcodebuild -workspace DeepSeek.xcworkspace -scheme DeepSeek -configuration Release \
-  -sdk iphoneos -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build
-# 打包 Payload/DeepSeek.app → DeepSeek.ipa
-```
-
-## 平台实测状态
-
-| 平台 | 状态 |
-|------|------|
-| macOS | ✅ 实测（内置/外部/受限 PATH 三条验收路径全绿） |
-| Windows | ✅ 实测（Win11 无管理员环境完整构建+打包+验收，见 [docs/windows-audit-report.md](docs/windows-audit-report.md)） |
-| Android | ✅ 实测（模拟器 + 真机安装运行） |
-| iOS/iPad | ✅ 实测（模拟器 + AltStore 侧载） |
-| 鸿蒙 | ✅ 实测（Mate 80 RS 真机扫码配对 + 浅色主题） |
+- **shell-rpc 统一传输层**：官方 Electrobun Typed RPC → mobile-access 中继 → 同源 HTTP `/__shell__/rpc` 三通道，请求级失败可见（通道边界见 [ADR-0005](../docs/adr/0005-shell-page-transport-boundary.md)）。
+- **桌面设置面板**（`desktop-settings/`）：dsh 运行时管理、profile 与端口、代理、通知、防休眠、开发者工具、手机访问、更新提醒等卡片。
+- **桌面 chrome**：标题栏三键与拖拽带（平台条件化）、右键菜单、下载拦截与管理 Tab、通知设置与音效、快捷键桥（官方 `desktop:<os>` 档）、console 镜像攒批上报。
+- **移动访问协作**：guest/远程视图的命令白名单与 mobile-access 中继同一套传输契约。
 
 ## 许可
 
-- 代码与文档：**MIT**（见 [LICENSE](LICENSE)）
-- 应用图标来源：`/Applications/DeepSeek Harness.app/Contents/Resources/icon.icns`（复用已安装客户端原图以保证一致）
-- 鲸鱼娘素材：CC BY-NC-SA 4.0 非商用素材随仓库保留（`skill/resources/whale-girl-LICENSE.txt`）
-- 另请注意：DeepSeek 鲸鱼为官方商标，本应用是非官方客户端
-
-## 已知限制
-- **桌宠**：macOS 打包（DMG）后透明可能丢失（tauri issue #13415，dev 正常）；置顶仅 Floating 级、盖不过全屏应用；Cmd+Tab 会出现桌宠条目（`skipTaskbar` 仅 Windows 生效）
-- **桌面档快捷键**：键桥是页面内实现，被 WebView / 系统菜单先消费的组合拿不到（macOS `Cmd+W` / `Cmd+Q` 仍走系统语义）；Windows 未在本机验证（本机无 Windows 编译目标，由 CI 把关）
-- **未签名分发**：macOS 非公证包需右键打开（`xattr -cr "/Applications/DeepSeek Harness Desktop.app"` 可解）；Windows 网络下载的 exe 触发 SmartScreen
-- **安装包体积**：内置运行时（Node 24 + dsh 依赖树）使 macOS dmg 约 200 MB 量级，Windows msi 约 240 MB
-- **侧边栏浏览器**：dsh 官方按 profile 名开关（仅 `desktop` profile 默认启用）；web profile 需在自己的 `cordis.patch.yml` 里 opt-in。宿主已实现独立 webview guest 载体（v0.10.0，[#118](https://github.com/hyperion2144/dsh-desktop-tauriapp/issues/118)）：侧边栏浏览器改为同窗子 webview，不再受 macOS 上 iframe 导航被守卫取消的影响
+MIT（见 [LICENSE](LICENSE)）。DeepSeek 鲸鱼为官方商标，本项目是非官方客户端。

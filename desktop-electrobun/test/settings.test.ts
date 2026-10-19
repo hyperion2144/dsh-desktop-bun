@@ -20,7 +20,7 @@ import {
   settingsSummary,
   defaultLanePortForProfile,
   defaultPortForProfile,
-} from '../src/shared/settings.ts'
+} from '../src/shared/settings/settings.ts'
 import {
   loadSettings,
   migrateFromLegacyYaml,
@@ -28,8 +28,8 @@ import {
   saveSettings,
   settingsPath,
   updateSettings,
-} from '../src/bun/settings-store.ts'
-import { layout } from '../src/bun/runtime.ts'
+} from '../src/bun/platform/settings-store.ts'
+import { layout } from '../src/bun/runtime/runtime.ts'
 
 const tempHome = (): string => mkdtempSync(join(tmpdir(), 'dsh-settings-'))
 

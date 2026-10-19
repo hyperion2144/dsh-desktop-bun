@@ -22,8 +22,8 @@ import {
   sortTasks,
   uniqueTargetPath,
   type DownloadTask,
-} from '../src/shared/downloads.ts'
-import { createDownloadManager, downloadsDir, tasksFileOf } from '../src/bun/downloads.ts'
+} from '../src/shared/app/downloads.ts'
+import { createDownloadManager, downloadsDir, tasksFileOf } from '../src/bun/commands/downloads.ts'
 
 function tempDir(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)))

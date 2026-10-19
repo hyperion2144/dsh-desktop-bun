@@ -1,0 +1,87 @@
+name: Installer check
+
+# Windows 安装器构建链的分钟级快验（#199 反馈：先单独验证，绿了再跑全量 Build）。
+# 不跑 Electrobun 全量打包（那是 15 分钟级的）：用系统 PE（notepad.exe 拷为 launcher.exe）
+# 造假产物树，把 build-windows-installer.mjs 的真链路全部走到——
+# 品牌图生成 → rcedit 补丁（真 Windows PE，真下载真执行）→ NSIS 编译 → 产物守卫。
+# 全量 Build（build.yml）覆盖「Electrobun 打包 + 真实载荷 + 三平台」；本工作流只盯安装器链路本身。
+# 触发：仅手动 dispatch（#200 口径：安装器链路不跟提交/PR 触发）。dispatch 只在合入 main 后
+# 可用（GitHub 只注册默认分支上的 workflow）——合入 main 后再手动跑快验。
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: 安装器链路快验（rcedit + NSIS）
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: 造假产物树（真 PE 替身，免 15 分钟 Electrobun 打包）
+        shell: pwsh
+        run: |
+          $root = "desktop-electrobun/build/stable-windows-x64/DeepSeekHarnessDesktopBUN"
+          New-Item -ItemType Directory -Force -Path "$root/bin", "desktop-electrobun/resources" | Out-Null
+          Copy-Item "C:\Windows\System32\notepad.exe" "$root/bin/launcher.exe"
+          Copy-Item "C:\Windows\System32\notepad.exe" "$root/bin/uninstall.exe"
+          # 打包期已解并的载荷占位（File /r 至少要有内容）
+          New-Item -ItemType Directory -Force -Path "$root/Resources" | Out-Null
+          Set-Content -Path "$root/Resources/payload.marker" -Value "stub"
+
+      - name: 品牌图
+        working-directory: desktop-electrobun
+        shell: pwsh
+        run: bun run prepare:installer-assets
+
+      - name: 确保 NSIS（新镜像不预装；choco 源不稳，改官方 zip 直下）
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            $nsisRoot = "$env:RUNNER_TEMP\nsis"
+            $nsisZip = "$env:RUNNER_TEMP\nsis.zip"
+            $ok = $false
+            foreach ($i in 1..3) {
+              curl.exe -fSL --retry 3 -o "$nsisZip" "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.11/nsis-3.11.zip"
+              if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+              Start-Sleep -Seconds (10 * $i)
+            }
+            if (-not $ok) { Write-Error 'NSIS zip 下载失败（三次重试后仍不可用）'; exit 1 }
+            Expand-Archive "$nsisZip" -DestinationPath "$nsisRoot" -Force
+            "$nsisRoot\nsis-3.11\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+            & "$nsisRoot\nsis-3.11\Bin\makensis.exe" -VERSION
+            if ($LASTEXITCODE -ne 0) { Write-Error 'makensis 不可用（zip 解压后自验失败）'; exit 1 }
+          }
+      - name: 安装器构建（rcedit 补丁 + NSIS，stub 载荷放行小产物）
+        working-directory: desktop-electrobun
+        shell: pwsh
+        env:
+          DSH_INSTALLER_ALLOW_STUB: '1'
+        run: bun run build:installer
+
+      - name: 断言：launcher 补丁生效 + 产物存在
+        shell: pwsh
+        run: |
+          # rcedit 打在短路径副本上（build-windows-installer.mjs 把应用树 robocopy 到 C:\dsh-pkg\App 防 MAX_PATH，
+          # NSIS 从短路径打包 —— 安装产物里的 launcher.exe 即这份）；原树只是构建中间物，读它必假阴。
+          $launcher = "C:\dsh-pkg\App\bin\launcher.exe"
+          $desc = (Get-Item $launcher).VersionInfo.FileDescription
+          $icon = (Get-Item $launcher).VersionInfo.ProductName
+          Write-Host "launcher.exe FileDescription = $desc / ProductName = $icon"
+          if ($desc -ne 'DeepSeek Harness Desktop BUN') { Write-Error 'rcedit 补丁未生效（FileDescription 不是应用名）'; exit 1 }
+          $setup = Get-ChildItem "desktop-electrobun/artifacts/windows-x64-*-setup.exe" -ErrorAction SilentlyContinue
+          if ($null -eq $setup) { Write-Error '安装器产物缺失'; exit 1 }
+          if ($setup.Length -le 0) { Write-Error '安装器产物为空'; exit 1 }
+          Write-Host "安装器产物：$($setup.Name)（$([math]::Round($setup.Length/1KB)) KB）"
+
+      - name: 安装器单元测试
+        working-directory: desktop-electrobun
+        run: bun test test/installer-build.test.ts test/installer-nsis.test.ts test/installer-assets.test.ts test/win-notify-identity.test.ts

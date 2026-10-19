@@ -18,8 +18,8 @@ import {
   migrateProfile,
   profileHealth,
   testProxyConnectivity,
-} from '../src/bun/profile-manager.ts'
-import { PROFILE_REQUIRED_FILES } from '../src/shared/profile-ops.ts'
+} from '../src/bun/profiles/profile-manager.ts'
+import { PROFILE_REQUIRED_FILES } from '../src/shared/profiles/profile-ops.ts'
 
 function tempRoot(): string {
   // macOS 的 /tmp 是指向 /private/tmp 的软链：realpath 一下免得断言里出现两种前缀
@@ -203,7 +203,7 @@ describe('依赖重建的前置条件（依赖解析）', () => {
   test('找不到 pnpm.cjs 时明确报错，而不是静默跳过', async () => {
     const home = tempRoot()
     seedProfile(home, 'desktop')
-    const { installProfileDependencies } = await import('../src/bun/profile-manager.ts')
+    const { installProfileDependencies } = await import('../src/bun/profiles/profile-manager.ts')
     const result = await installProfileDependencies({
       home,
       profile: 'desktop',

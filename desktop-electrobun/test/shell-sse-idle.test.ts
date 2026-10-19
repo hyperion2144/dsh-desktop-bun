@@ -8,7 +8,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { startShellServer } from '../src/bun/shell-server.ts'
+import { startShellServer } from '../src/bun/net/shell-server.ts'
 
 interface Upstream {
   origin: string
