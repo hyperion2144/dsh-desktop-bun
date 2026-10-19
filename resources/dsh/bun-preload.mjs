@@ -4,7 +4,10 @@
  * Patches:
  * 1. Intercept require("node-addon-require-builtin") → return stub (Bun lacks V8 context symbols)
  * 2. Provide stripTypeScriptTypes via Bun.Transpiler on node:module
- * 3. Set DSH_BUN_COMPAT_DISABLE_HMR=1 to skip Cordis HMR
+ * 3. Set DSH_BUN_COMPAT_DISABLE_HMR=1 — compat switch for DSH builds that read it. The runtime we
+ *    ship (0.2.1-rc.2) reads no such env var, so this is a no-op there: HMR's real switch is the
+ *    profile's bundle patch (dsh-base's `hmr` row: on in profile mode, watching profile config files
+ *    only — module roots are opt-in and stay unwatched).
  * 4. Shim node-pty onto Bun.spawn({ terminal }) — the N-API addon spawns but never delivers output on Bun
  * 5. Fix the stripTypeScriptTypes named import inside @deepseek-ai/dsh-ptc-runtime-node
  * 6. Disable koffi bindings in @deepseek-ai/dsh-win32-process (Bun loads koffi but its N-API binding is broken)
@@ -15,6 +18,7 @@
  *     转给主线程的 vm/v8 服务端，DevTools 面板在 Bun 下可用；全部 typeof Bun 守卫，Node 零变化
  * 15. PTC worker 继承控制通道的 Bun 兜底（fd 7 Duplex；process.js + persistent-process.js）
  * 16. inspector Client bootstrap 有界退避重试 + F7 可观测性（#68）——rc.2 已修宿主侧，客户端兜底
+ * 17. 第三方插件的 const 重赋值在 Bun 转译期整条死掉 → 加载时把该绑定放宽成 let
  *
  * 补丁落盘策略（#210）：物化后**不还原**，带 rev 指纹幂等——运行时树是被多个 dsh 进程共享的，
  * 任何进程退出时回写原文件都会把别的进程正在用的补丁抹掉（实测会把终端与 inspector 打回失败态）。
@@ -23,7 +27,7 @@ import { Module } from "node:module";
 import { Transpiler } from "bun";
 import { resolve, dirname, join, delimiter } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, realpathSync, statSync, readdirSync, watch } from "node:fs";
 
 // 信息性日志（每个补丁的「已就位/applied」）默认静默：dsh 命令行每次跑 preload 都会打出十几行
 // [bun-preload] Patch N 噪声（#62 PR 实测）；排障时设 DSH_SHELL_PRELOAD_DEBUG=1 打开。
@@ -1395,4 +1399,375 @@ function patchInspectorBootstrapRetry() {
 }
 patchInspectorBootstrapRetry();
 
-_trace(`[bun-preload] ${REV_MARK} 应用完成：stripTypeScriptTypes / node-addon-require-builtin 桩 / HMR 关闭 / Bun.Terminal PTY / xterm 同步写 / 插件展示元数据解析 / 插件说明符 baseUrl 解析 / inspector fetch 归一+spread 修复 / inspector CDP 桥 / PTC worker 控制通道 / inspector Client bootstrap 退避重试 + F7 可观测性（不还原）`);
+// ── Patch 17: 第三方插件的 const 重赋值在 Bun 转译期整条死掉 → 加载时把该绑定放宽成 let ──
+//
+// 病根：插件里写了 `const patch = {...}` 之后又 `patch = {...}`。Bun 在**转译期**就拒绝生成
+// 该模块（BuildMessage: This assignment will throw because "patch" is a constant）→ 插件入口
+// import 失败 → app-boot 记 failed → 启动日志 "1 entry did not activate"。Node 下只是潜伏 bug
+// （运行时才抛 TypeError），Bun 下整条插件直接死。
+//
+// 修法：Bun.plugin 的 onLoad 拦下插件包里的 .js/.mjs，用 Bun.Transpiler 体检；只有报上面那类
+// 错误时才把该绑定的 const 改成 let 再交回 Bun。零落盘（不碰第三方文件）、只动一个 token。
+//
+// 两条硬约束（实测得出，改之前先读）：
+//   1) Bun 的 onLoad **不能拒绝接管**：回调返回 undefined/null 会抛
+//      "onLoad() expects an object returned"。命中的文件一律由我们交回内容，而 Bun 把插件交回的
+//      内容一律按 **ESM** 处理 → 过滤器只允许命中「本来就是 ESM」的文件（插件包 package.json 里
+//      "type": "module" 的那些）；否则会把 CJS 文件悄悄读成 ESM（module.exports 丢失且不报错）。
+//   2) onLoad 的 filter 是**路径正则**，拿不到文件内容 → 只能覆盖「插件包自身」，不含它们的
+//      依赖（依赖多是 CJS，见约束 1）。
+const RELAX_CONST_ERROR = /This assignment will throw because "([^"]+)" is a constant/;
+/** 超过这个体量的文件不做转译体检（大 bundle 体检不划算，这类文件极少踩这个雷）。 */
+const RELAX_MAX_SOURCE_CHARS = 4 * 1024 * 1024;
+/** 一轮体检最多放宽几个绑定（正常一个就够）。 */
+const RELAX_MAX_ROUNDS = 8;
+
+function _escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** 路径分段里的 '/' 在正则里要同时吃 '/' 与 '\\'（Windows）。 */
+function _escapePathSegment(text) {
+  return _escapeRegExp(text).replace(/\//g, '[/\\\\]');
+}
+
+function _readJsonSafe(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 作用域：profile 里装着的插件包，且必须是 ESM 包（约束 1）。
+ * 认 profile package.json 的直接依赖——它们就是装在 profile 里的插件；清单读不到时退回
+ * 扫 node_modules 顶层（同样只收 "type": "module" 的）。
+ */
+function _relaxScopePackages(profileDir) {
+  if (!profileDir) return [];
+  const modulesDir = join(profileDir, 'node_modules');
+  const names = new Set();
+  const manifest = _readJsonSafe(join(profileDir, 'package.json'));
+  const dependencies = manifest && typeof manifest.dependencies === 'object' ? manifest.dependencies : null;
+  if (dependencies) {
+    for (const name of Object.keys(dependencies)) names.add(name);
+  } else {
+    let entries = [];
+    try {
+      entries = readdirSync(modulesDir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === '.bin') continue;
+      if (entry.name.startsWith('@')) {
+        let scoped = [];
+        try {
+          scoped = readdirSync(join(modulesDir, entry.name), { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const child of scoped) {
+          if (child.isDirectory()) names.add(`${entry.name}/${child.name}`);
+        }
+        continue;
+      }
+      names.add(entry.name);
+    }
+  }
+  const packages = [];
+  for (const name of names) {
+    const dir = join(modulesDir, name);
+    const meta = _readJsonSafe(join(dir, 'package.json'));
+    // 装到一半的包：清单里已经登记、包还没落地（pnpm 正在写）→ 先按 ESM 收进来。
+    // 否则「清单已写、包还在装」的窗口里插件的 import 会撞上 BuildMessage，
+    // 而装完后的下一轮刷新会按真实 type 再定夺（约束 3：装完即生效，不等重启）。
+    if (!meta) {
+      packages.push({ name, dir });
+      continue;
+    }
+    if (meta.type !== 'module') continue;
+    packages.push({ name, dir });
+  }
+  return packages;
+}
+
+/**
+ * 过滤器：只命中插件包自身的 .js/.mjs。
+ *  · 绝对路径变体：DSH_PROFILE_DIR 可能在 symlink 下，路径对不上就命中不到 → 再加一条
+ *    「node_modules/<包名>」尾部变体（跟住包名，不受上级 symlink 影响）。
+ *  · 负向断言：插件包自己带的 node_modules（它的依赖）不接管（约束 1/2）。
+ */
+function _relaxFilter(packages) {
+  const alternatives = [];
+  for (const { name, dir } of packages) {
+    alternatives.push(_escapeRegExp(dir));
+    alternatives.push(`node_modules${_escapePathSegment('/' + name)}`);
+  }
+  if (alternatives.length === 0) return null;
+  return new RegExp(
+    `(?:${alternatives.join('|')})(?![^]*[/\\\\]node_modules[/\\\\])[/\\\\].*\\.(?:js|mjs)$`,
+  );
+}
+
+/** 标出「代码区」字符位：字符串/注释里的位是 0（避免把字符串里的 "const x" 当声明改掉）。 */
+function _codeMask(source) {
+  const mask = new Uint8Array(source.length);
+  let index = 0;
+  while (index < source.length) {
+    const char = source[index];
+    const next = source[index + 1];
+    if (char === '/' && next === '/') {
+      while (index < source.length && source[index] !== '\n') index++;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      index += 2;
+      while (index < source.length && !(source[index] === '*' && source[index + 1] === '/')) index++;
+      index += 2;
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      index++;
+      while (index < source.length) {
+        if (source[index] === '\\') {
+          index += 2;
+          continue;
+        }
+        if (source[index] === char) {
+          index++;
+          break;
+        }
+        index++;
+      }
+      continue;
+    }
+    mask[index] = 1;
+    index++;
+  }
+  return mask;
+}
+
+/** const 声明是否站在声明位（避免把 `foo.const` 之类误判）。 */
+function _isDeclarationPosition(source, start) {
+  let index = start - 1;
+  while (index >= 0 && /\s/.test(source[index])) index--;
+  if (index < 0) return true;
+  if (';{}()[],'.includes(source[index])) return true;
+  return /export$/.test(source.slice(Math.max(0, index - 6), index + 1));
+}
+
+/**
+ * 把声明 name 的 const 放宽成 let。
+ * 只认「简单标识符声明」（const name = ...）：解构声明（const { name } = ...）转 let 不合法，跳过。
+ */
+function _relaxConstBinding(source, name) {
+  const mask = _codeMask(source);
+  const pattern = new RegExp(`\\bconst(\\s+)${_escapeRegExp(name)}\\b`, 'g');
+  let result = '';
+  let cursor = 0;
+  let relaxed = 0;
+  for (const match of source.matchAll(pattern)) {
+    const start = match.index;
+    const end = start + match[0].length;
+    let inCode = true;
+    for (let index = start; index < end; index++) {
+      if (!mask[index]) {
+        inCode = false;
+        break;
+      }
+    }
+    if (!inCode) continue;
+    if (!_isDeclarationPosition(source, start)) continue;
+    const next = /^\s*([^\s])/.exec(source.slice(end));
+    if (next && (next[1] === '{' || next[1] === '[')) continue;
+    result += source.slice(cursor, start) + 'let' + match[1] + name;
+    cursor = end;
+    relaxed++;
+  }
+  if (relaxed === 0) return null;
+  result += source.slice(cursor);
+  return result;
+}
+
+/** 转译体检：clean=能过；const=报「X 是常量」（带上绑定名）；other=别的错误（不归我们管）。 */
+function _relaxTranspileCheck(source) {
+  try {
+    new Transpiler({ loader: 'js' }).transformSync(source);
+    return { kind: 'clean' };
+  } catch (error) {
+    const message = String(error && error.message ? error.message : error);
+    const match = RELAX_CONST_ERROR.exec(message);
+    if (match) return { kind: 'const', name: match[1] };
+    return { kind: 'other', message };
+  }
+}
+
+/** 便宜的文本预筛：文件里有没有「const 声明 + 对它的赋值」。没有就别浪费转译。 */
+function _looksLikeConstReassign(source) {
+  const names = new Set();
+  for (const match of source.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)/g)) names.add(match[1]);
+  for (const match of source.matchAll(/\bconst\s*\{([^}]*)\}/g)) {
+    for (const part of match[1].split(',')) {
+      const name = part.split(':').pop().split('=')[0].replace(/^\.\.\./, '').trim();
+      if (/^[A-Za-z_$][\w$]*$/.test(name)) names.add(name);
+    }
+  }
+  for (const match of source.matchAll(/\bconst\s*\[([^\]]*)\]/g)) {
+    for (const part of match[1].split(',')) {
+      const name = part.split('=')[0].replace(/^\.\.\./, '').trim();
+      if (/^[A-Za-z_$][\w$]*$/.test(name)) names.add(name);
+    }
+  }
+  for (const name of names) {
+    const pattern = new RegExp(
+    `(^|[^.\\w$])${_escapeRegExp(name)}\\s*(?:\\+\\+|--|\\*\\*=|<<=|>>>=|>>=|[+\\-*/%&|^]=|=(?!=))`,
+    );
+    if (pattern.test(source)) return true;
+  }
+  return false;
+}
+
+/**
+ * 体检 + 放宽：只有转译器报「X 是常量」才动它，改完再体检一次确认能过。
+ * 别的错误（真语法错等）一律原样交回，行为与今天一致。
+ */
+function _relaxConstSource(source) {
+  if (source.length > RELAX_MAX_SOURCE_CHARS) return null;
+  if (!_looksLikeConstReassign(source)) return null;
+  let current = source;
+  const names = [];
+  for (let round = 0; round < RELAX_MAX_ROUNDS; round++) {
+    const check = _relaxTranspileCheck(current);
+    if (check.kind === 'clean') {
+      return current === source ? null : { contents: current, names };
+    }
+    if (check.kind !== 'const') return null;
+    const relaxed = _relaxConstBinding(current, check.name);
+    if (relaxed === null) return null;
+    names.push(check.name);
+    current = relaxed;
+  }
+  return null;
+}
+
+/**
+ * 作用域指纹：profile manifest 与 node_modules 顶层目录的 mtime/size。
+ * 装/卸插件会动它们 → 变了就说明作用域可能变了。
+ */
+function _relaxScopeStamp(profileDir) {
+  const parts = [];
+  for (const path of [join(profileDir, 'package.json'), join(profileDir, 'node_modules')]) {
+    try {
+      const stat = statSync(path);
+      parts.push(`${stat.mtimeMs}:${stat.size}`);
+    } catch {
+      parts.push('-');
+    }
+  }
+  return parts.join('|');
+}
+
+/**
+ * onLoad 处理器：命中的文件先读源码，体检确认是 const 重赋值才放宽；一律按 ESM 交回。
+ * 多个过滤器注册共用一份缓存 → 同一个文件只体检一次。
+ */
+function _relaxOnLoadHandler(cache) {
+  return (args) => {
+    const path = args.path;
+    let stamp = '';
+    try {
+      const stat = statSync(path);
+      stamp = `${stat.mtimeMs}:${stat.size}`;
+    } catch {
+      stamp = '';
+    }
+    const key = `${path}|${stamp}`;
+    const cached = cache.get(key);
+    if (cached !== undefined) {
+      return { contents: cached, loader: 'js' };
+    }
+    const source = readFileSync(path, 'utf8');
+    const relaxed = _relaxConstSource(source);
+    if (!relaxed) {
+      cache.set(key, source);
+      return { contents: source, loader: 'js' };
+    }
+    cache.set(key, relaxed.contents);
+    console.warn(
+      `[bun-preload] Patch 17: const 放宽为 let（${relaxed.names.join(', ')}）：${path}`,
+    );
+    return { contents: relaxed.contents, loader: 'js' };
+  };
+}
+
+function _installConstRelaxHook() {
+  if (process.env.DSH_SHELL_PRELOAD_RELAX_CONST === '0') {
+    _trace('[bun-preload] Patch 17: DSH_SHELL_PRELOAD_RELAX_CONST=0，跳过 const 放宽');
+    return;
+  }
+  if (typeof Bun === 'undefined' || typeof Bun.plugin !== 'function') return;
+  const profileDir = process.env.DSH_PROFILE_DIR;
+  if (!profileDir) {
+    _trace('[bun-preload] Patch 17: 没有 DSH_PROFILE_DIR（dsh 命令行等场景），不装 const 放宽钩子');
+    return;
+  }
+  const cache = new Map();
+  const handler = _relaxOnLoadHandler(cache);
+  let serial = 0;
+  const register = (packages) => {
+    const filter = _relaxFilter(packages);
+    if (!filter) return false;
+    serial += 1;
+    Bun.plugin({
+      name: `dsh-const-relax#${serial}`,
+      setup(build) {
+        build.onLoad({ filter }, handler);
+      },
+    });
+    return true;
+  };
+  let packages = _relaxScopePackages(profileDir);
+  const registered = register(packages);
+  _trace(
+    registered
+      ? `[bun-preload] Patch 17: const 放宽钩子已装（${packages.length} 个 ESM 插件包）`
+      : '[bun-preload] Patch 17: 作用域暂时为空（profile 里还没有 ESM 插件包），先不装过滤器；装上插件后会自动补上',
+  );
+  // 作用域是启动时的快照：宿主起来之后才装上的插件不在过滤器里 → 那次 import 仍会炸。
+  // （DSH 的 profile 是 startup-only：装完插件会在进程内立刻组合一次，那次 import 就撞在这儿。）
+  let names = packages.map((item) => item.name).join(',');
+  const refresh = () => {
+    const current = _relaxScopePackages(profileDir);
+    const currentNames = current.map((item) => item.name).join(',');
+    if (currentNames === names) return;
+    names = currentNames;
+    packages = current;
+    if (!register(packages)) return;
+    _trace(`[bun-preload] Patch 17: 作用域变化，重新装过滤器（${packages.length} 个 ESM 插件包）`);
+  };
+  // 装/卸插件会改 profile 的 manifest（原子写：临时文件 + rename）与 node_modules 顶层目录。
+  // 监听这两个目录，变更一到就同步重算作用域（不等轮询）—— 装完插件后那次进程内 import 才能被接管。
+  for (const dir of [profileDir, join(profileDir, 'node_modules')]) {
+    try {
+      const watcher = watch(dir, () => refresh());
+      watcher.unref?.();
+    } catch {
+      // 目录还不存在（profile 刚建）→ 交给轮询兜底。
+    }
+  }
+  // 轮询兜底：watch 可能漏事件（跨设备、网络盘）。只看两个路径的 mtime/size，没变就不重算。
+  const interval = Number(process.env.DSH_SHELL_PRELOAD_RELAX_SCOPE_MS ?? 2000);
+  let stamp = _relaxScopeStamp(profileDir);
+  const timer = setInterval(() => {
+    const next = _relaxScopeStamp(profileDir);
+    if (next === stamp) return;
+    stamp = next;
+    refresh();
+  }, interval > 0 ? interval : 2000);
+  timer.unref?.();
+}
+_installConstRelaxHook();
+
+_trace(`[bun-preload] ${REV_MARK} 应用完成：stripTypeScriptTypes / node-addon-require-builtin 桩 / HMR 兼容开关 / Bun.Terminal PTY / xterm 同步写 / 插件展示元数据解析 / 插件说明符 baseUrl 解析 / inspector fetch 归一+spread 修复 / inspector CDP 桥 / PTC worker 控制通道 / inspector Client bootstrap 退避重试 + F7 可观测性 / 第三方插件 const 放宽（不还原）`);
