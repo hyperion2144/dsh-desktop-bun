@@ -45,19 +45,25 @@ function fakeWindow() {
 }
 
 function fakeService(overrides: Partial<Record<string, unknown>> = {}): ShellService {
+  const state = {
+    status: 'running',
+    error: null,
+    blocked: null,
+    origin: 'http://127.0.0.1:65432',
+    pageUrl: 'http://127.0.0.1:65432/app',
+    lanePort: 12345,
+    hostPid: 4242,
+  }
   return {
-    state: {
-      status: 'running',
-      error: null,
-      blocked: null,
-      origin: 'http://127.0.0.1:65432',
-      pageUrl: 'http://127.0.0.1:65432/app',
-      lanePort: 12345,
-      hostPid: 4242,
-    },
+    state,
     laneForwarder: null,
     ensureRunning: async () => {},
-    stop: async () => {},
+    // 真实契约：stop() 之后服务面是终态——状态落 stopped、宿主 PID 归 0（#215）。
+    // 假服务面原先是「停了但还说自己 running」，那正是托盘说谎的原料。
+    stop: async () => {
+      state.status = 'stopped'
+      state.hostPid = 0
+    },
     ...overrides,
   } as unknown as ShellService
 }
@@ -303,6 +309,63 @@ describe('profile-session：停止与重启（#179）', () => {
     await sessions.ensureService('bad')
     await sessions.stopAllServices()
     expect(stopped.sort()).toEqual(['main', 'side'])
+  })
+
+  test('退出实例（#215）：会话落「已停」；再开窗起的是全新服务面（不复用退过的那份）', async () => {
+    let created = 0
+    const { deps } = makeDeps({
+      createService: async () => {
+        created += 1
+        return fakeService()
+      },
+    })
+    const sessions = createProfileSessions(deps)
+    await openMain(sessions)
+    const first = sessions.get('main')?.service
+    expect(created).toBe(1)
+    expect(sessions.get('main')?.state().running).toBe(true)
+
+    await sessions.stop('main')
+
+    // 退掉之后：托盘那行不能再说「运行中」（否则 profile 永久卡住）
+    expect(sessions.get('main')?.state().running).toBe(false)
+    expect(sessions.get('main')?.state().serviceStatus).toBe('stopped')
+    // 退掉的服务面是终态对象：不在「要重启的实例」清单里（用户显式退的，别给他复活）
+    expect(sessions.serviceProfiles()).toEqual([])
+
+    // 再开窗：起的是全新的一份（复用的那份拉不起 DSH——supervisor 的 stopping 粘住）
+    const again = await sessions.open('main')
+    expect(again.ok).toBe(true)
+    expect(created).toBe(2)
+    expect(sessions.get('main')?.service).not.toBe(first)
+    expect(sessions.get('main')?.state().running).toBe(true)
+  })
+
+  test('退出实例时宿主没死（服务面 stop 失败）：不算已退休，再开窗复用同一份服务面（#215）', async () => {
+    let created = 0
+    const { deps } = makeDeps({
+      createService: async () => {
+        created += 1
+        return fakeService()
+      },
+    })
+    const sessions = createProfileSessions(deps)
+    await openMain(sessions)
+    const first = sessions.get('main')?.service
+
+    // 宿主停不掉：服务面状态还停在 running（宿主 PID 还在）
+    ;(first as unknown as { stop: () => Promise<void> }).stop = async () => {}
+
+    await sessions.stop('main')
+
+    // 宿主还活着 = 这份服务面还能用，不能判死（判死会让下次开窗另起一份、跟旧宿主撞端口）
+    expect(sessions.get('main')?.state().running).toBe(true)
+    expect(sessions.serviceProfiles()).toEqual(['main'])
+
+    const again = await sessions.open('main')
+    expect(again.ok).toBe(true)
+    expect(created).toBe(1)
+    expect(sessions.get('main')?.service).toBe(first)
   })
 })
 

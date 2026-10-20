@@ -255,6 +255,13 @@ export function createHostSupervisor(deps: HostSupervisorDeps): HostSupervisor {
     const decision = ledger.decide(now())
     deps.log(`宿主 ${String(host?.pid ?? 0)} 意外退出（code = ${String(code)}）：${decision.reason}`)
     if (!decision.restart) {
+      // 放弃重启 = 宿主没了而且不会再有：跟 stop() 同一个原则，把终态发布出去（#215）。
+      // 不发的话托盘还拿着死 PID 说「运行中」，ensureRunning 又因 status==='running' 早退——
+      // 这个 profile 就再也拉不起来了。
+      host = undefined
+      status = 'failed'
+      statusError = decision.reason
+      publish()
       deps.onGiveUp(snapshot(), decision.reason, true)
       return
     }
@@ -274,6 +281,11 @@ export function createHostSupervisor(deps: HostSupervisorDeps): HostSupervisor {
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
       deps.log(`守护器重启宿主失败：${reason}`)
+      // 重启失败 = 宿主没了（旧的已死，新的没起来）：同样把终态发布出去（#215）。
+      host = undefined
+      status = 'failed'
+      statusError = reason
+      publish()
       deps.onGiveUp(snapshot(), reason, false)
       return
     }
@@ -368,8 +380,11 @@ export function createHostSupervisor(deps: HostSupervisorDeps): HostSupervisor {
     // 远程模式没有宿主可杀，直接把服务面切过去；从远程切回本地时也没有宿主，立即拉起。
     // 其余（本地→本地）杀掉宿主即可：退出会唤醒守护器，由它重启并把服务面切过去。
     remoteAddr = deps.spec().remoteAddr
-    await host?.stop()
-    if (remoteAddr !== null || host === undefined) {
+    // 判据取「动手之前有没有宿主」：退出事件那条守护器回路可能在这期间把 host 清掉
+    // （崩溃放弃重启会清，#215），那不代表本次 restart 要立刻重连。
+    const previous = host
+    await previous?.stop()
+    if (remoteAddr !== null || previous === undefined) {
       await connect()
       publish()
     }
@@ -382,10 +397,26 @@ export function createHostSupervisor(deps: HostSupervisorDeps): HostSupervisor {
       watchdogTimer = null
     }
     ledger.reset()
+    // 宿主没了就是没了：快照里的 hostPid 必须归 0、状态必须落终态。
+    // 不落这份终态，下游（服务面 state → 托盘行）会一直拿着旧 PID 说「运行中」——
+    // 托盘「退出实例」后那个 profile 就再也开不了新窗了（#215）。
+    let stopError: string | null = null
     try {
       await host?.stop()
-    } catch {}
+    } catch (error) {
+      // 停不掉就别装死：宿主可能还活着，PID 得留着（否则托盘谎报「未运行」），
+      // 状态落 failed 并带上原因——failed 不会被 ensureRunning 的 running 早退挡掉，用户还能重拉。
+      stopError = error instanceof Error ? error.message : String(error)
+      status = 'failed'
+      statusError = stopError
+    }
+    if (stopError === null) {
+      host = undefined
+      status = 'stopped'
+      statusError = null
+    }
     forgetHosts()
+    publish() // 终态事实要发布出去：服务面是状态文件的唯一写者
   }
 
   const blocked = (reason: string): void => {

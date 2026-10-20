@@ -12,6 +12,7 @@
 - dev 打包可选「只带链接」：`DSH_SHELL_BUILTIN_LINK=<runtime 目录>` 时内置运行时改成目录链接，dev build 不再每次拷几百 MB 实体树（#210）。
 - 壳侧「检查更新」：该通道还没发过版时 404 显示为「暂未发布」，其它失败给出中文原因（#216）。
 - preload 汇总行不再误报「HMR 关闭」：`DSH_BUN_COMPAT_DISABLE_HMR` 是无人读的死开关，真开关在 profile 的 bundle patch。
+- 托盘 profile 行的运行状态改读会话状态：退出实例、宿主崩溃放弃自愈后都当场显示「未运行」，被退掉的 profile 能重新开窗（#215）。
 
 - 三平台安装包，内置 dsh 运行时（0.2.1-rc.2）开箱即用，无需预装 Node/pnpm；宿主由 Bun 直跑。
 - 完整 dsh 桌面体验：会话、插件、托盘、系统通知、防休眠、手机访问、远程 dsh 接入。

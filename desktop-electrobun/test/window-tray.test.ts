@@ -203,6 +203,29 @@ describe('trayMenu', () => {
     expect(((submenu ?? [])[2] as NormalItem).label).toBe('mobile')
   })
 
+  test('#215 退过的实例不再说「运行中」：裸名 + 「在新窗口打开」，菜单里没有「退出（停止实例）」', () => {
+    const items = trayMenu(
+      baseState({
+        profile: 'web',
+        profiles: ['web', 'desktop'],
+        profileRows: [
+          { profile: 'web', open: true, running: true, port: 6393, focused: true },
+          { profile: 'desktop', open: false, running: false, port: null, focused: false },
+        ],
+      })
+    )
+    const submenu = findItem(items, 'PROFILE 窗口')?.submenu ?? []
+    const stopped = submenu[1] as NormalItem | undefined
+    expect(stopped?.label).toBe('desktop')
+    // 退过的那行不再带「运行中」字样（旧壳 tray.rs 的约定：未运行就是裸名）
+    expect(stopped?.label?.includes('运行中')).toBe(false)
+    const stoppedSub = stopped?.submenu ?? []
+    expect((stoppedSub[0] as NormalItem).label).toBe('在新窗口打开 desktop')
+    expect((stoppedSub[0] as NormalItem).action).toBe(windowAction('desktop'))
+    // 退过的实例没有「退出」可点：菜单里不能摆一条走不通的路（原来就是它把用户卡死在托盘上）
+    expect(stoppedSub.some((item) => isNormal(item) && item.label === '退出（停止实例）')).toBe(false)
+  })
+
   test('运行时与宿主状态是只读行，退出永远在最后', () => {
     const items = trayMenu(baseState({ hostRunning: false }))
     expect(findItem(items, '运行时：内置 0.2.1-alpha.2')?.enabled).toBe(false)

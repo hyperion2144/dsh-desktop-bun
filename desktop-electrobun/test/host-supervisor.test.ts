@@ -241,7 +241,31 @@ describe('host-supervisor：宿主生命周期收口（#183）', () => {
     expect(events).toContain('crash')
     expect(spawnModes).toEqual(['fresh'])
     expect(events.includes('restart')).toBe(false)
+    // #215：放弃重启也要把终态发布出去——否则托盘还拿着死 PID 说「运行中」，
+    // ensureRunning 又因 status==='running' 早退，这个 profile 再也拉不起来。
+    expect(sup.state().hostPid).toBe(0)
+    expect(sup.state().status).toBe('failed')
+    expect(events).toContain('host:failed:pid0')
     await sup.stop()
+  })
+
+  test('stop 时宿主停不掉：不装死——状态落 failed、PID 留着（#215）', async () => {
+    const { sup, events } = makeHarness({
+      startHostFn: async () => {
+        const host = makeHost()
+        return {
+          ...host.handle,
+          stop: async () => {
+            throw new Error('宿主停不掉')
+          },
+        }
+      },
+    })
+    await sup.start()
+    await sup.stop()
+    expect(sup.state().status).toBe('failed')
+    expect(sup.state().hostPid).toBe(4242)
+    expect(events).toContain('host:failed:pid4242')
   })
 
   test('守护器重启时 connect 失败：onGiveUp terminal=false，restarting 保持原状（原 supervise 行为）', async () => {
@@ -261,6 +285,10 @@ describe('host-supervisor：宿主生命周期收口（#183）', () => {
     expect(events).toContain('giveup:connect:第二次拉不起来')
     expect(sup.state().restarting).toBe(true)
     expect(events.includes('restart')).toBe(false)
+    // #215：重启失败同样要落终态（宿主没了就别让托盘继续说「运行中」）
+    expect(sup.state().hostPid).toBe(0)
+    expect(sup.state().status).toBe('failed')
+    expect(events).toContain('host:failed:pid0')
     await sup.stop()
   })
 
@@ -278,6 +306,19 @@ describe('host-supervisor：宿主生命周期收口（#183）', () => {
     await Bun.sleep(30)
     expect(events.includes('crash')).toBe(false)
     expect(spawnModes).toEqual(['fresh'])
+  })
+
+  test('stop 后发布终态快照：hostPid 归 0、状态落 stopped（#215）', async () => {
+    const { sup, events } = makeHarness()
+    await sup.start()
+    expect(sup.state().hostPid).toBe(4242)
+    await sup.stop()
+    // 宿主没了就是没了：旧 PID 不能留在快照里，否则下游（服务面 state → 托盘行）
+    // 一直拿着它说「运行中」——托盘退出实例后那个 profile 就再也开不起来了（#215）。
+    expect(sup.state().hostPid).toBe(0)
+    expect(sup.state().status).toBe('stopped')
+    // 终态事实要发布出去：服务面是状态文件的唯一写者（不发布，下游就收不到）
+    expect(events).toContain('host:stopped:pid0')
   })
 
   test('restart 本地→本地：只停旧宿主，不立即重连（交给退出事件那条守护器回路）', async () => {

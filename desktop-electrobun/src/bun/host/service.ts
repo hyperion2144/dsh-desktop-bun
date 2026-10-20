@@ -753,6 +753,12 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 底部状态条轮询的 dsh 服务状态码（旧壳 0..7：2 运行中 / 4 重启中 / 5 服务异常 / 6 服务下线）。
   // 页面重载后状态条要能立刻显示真值，所以每个阶段都得维护它。
   let dshStatusCode = 2
+  /**
+   * #215：服务面是终态对象——stop() 走一遍就把 HTTP 面/看门狗/端口认领全拆了。
+   * 第二次 stop() 不再拆一遍（会跟第一次打架），而是等同一份拆解跑完：
+   * 壳退出兜底路径并发调 stop() 时，得等真的拆完，不能提前放行。
+   */
+  let stopping: Promise<void> | null = null
 
   const state: ShellState = {
     pid: process.pid,
@@ -1210,28 +1216,37 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     },
     // 多窗口：不再就地换 profile（旧壳的「托盘切换 profile」在新壳里就是把那份 profile 的窗口开到前台）。
     stop: async () => {
-      await supervisor.stop()
-      accountWatcher.stop()
-      dshStatusCode = 6
-      server.stop()
-      notifyServer.stop()
-      forwarder?.stop()
-      keepAwake.stop()
-      arbiter.clear()
-      downloads.stop()
-      updater.stop()
-      // 插件链接要拆掉（item 9，旧壳 cleanup_desktop_plugin_links 的等价物）：
-      // 不拆的话，用户回头用旧壳/别的安装时 profile 池里会留一份悬空 symlink。
-      try {
-        cleanupStagedPlugins(staged.staged, log)
-      } catch (error) {
-        log(`[exit] 清理插件链接失败：${String(error)}`)
-      }
-      // 同样先重读：退出时只能摘掉自己那一行，别人的行要留着
-      const next = releaseClaim(parseClaims(await readClaims()), claimProfile)
-      try {
-        await Bun.write(claimsFile, `${JSON.stringify(next, null, 2)}\n`)
-      } catch {}
+      // 终态对象：第一次 stop() 拆解，之后的调用等同一份拆解跑完——
+      // 不重复拆（会跟第一次打架），也不提前放行（退出兜底路径要等真的拆完）。
+      if (stopping !== null) return await stopping
+      stopping = (async () => {
+        // 先停账号 watcher，再停 supervisor：supervisor.stop() 会发布终态快照 → applyHost →
+        // watcher.start()，watcher 停过就不会再复活（它自己的 start() 认 stopped），
+        // 免得收摊时还去连一个已经死掉的宿主。
+        accountWatcher.stop()
+        await supervisor.stop()
+        dshStatusCode = 6
+        server.stop()
+        notifyServer.stop()
+        forwarder?.stop()
+        keepAwake.stop()
+        arbiter.clear()
+        downloads.stop()
+        updater.stop()
+        // 插件链接要拆掉（item 9，旧壳 cleanup_desktop_plugin_links 的等价物）：
+        // 不拆的话，用户回头用旧壳/别的安装时 profile 池里会留一份悬空 symlink。
+        try {
+          cleanupStagedPlugins(staged.staged, log)
+        } catch (error) {
+          log(`[exit] 清理插件链接失败：${String(error)}`)
+        }
+        // 同样先重读：退出时只能摘掉自己那一行，别人的行要留着
+        const next = releaseClaim(parseClaims(await readClaims()), claimProfile)
+        try {
+          await Bun.write(claimsFile, `${JSON.stringify(next, null, 2)}\n`)
+        } catch {}
+      })()
+      return await stopping
     },
   }
   // 命令表回填：页面侧的壳插件（设置面板/通知 tab/下载 tab/本地 chrome）靠它拿到壳的能力
