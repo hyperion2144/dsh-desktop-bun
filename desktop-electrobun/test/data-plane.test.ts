@@ -27,6 +27,8 @@ function startUpstream(): Upstream {
   const counts = new Map<string, number>()
   const server = Bun.serve({
     port: 0,
+    // 与壳服务面同形（它自己就只绑 127.0.0.1）：Windows 上绑全接口时，壳回连 127.0.0.1 会偶发走不通（#220）
+    hostname: '127.0.0.1',
     async fetch(request) {
       const url = new URL(request.url)
       const key = `${request.method} ${url.pathname}${url.search}`

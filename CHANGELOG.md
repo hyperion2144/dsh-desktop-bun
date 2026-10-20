@@ -52,6 +52,7 @@
 - CI 出包：Android / iOS 矩阵（#33），鸿森 HAP 作业预留（自建 runner）。
 
 ### 工程与交付
+- Windows 兜底 CI 抖动收口：PTC 的 Node 分支等待预算放宽到 20s、shell 上游夹具钉死 127.0.0.1、systemd-inhibit 锁改轮询等待。
 
 - Windows 安装器：品牌三页（#91）、明暗双主题（#89）、中英双语 + LZMA 降 30.8% 体积（#88）、事务性安装失败回滚（#93）、进度页窗口帧覆盖层（#103）、高 DPI 适配（#103）。
 - macOS 交付：签名后重打 DMG（#95）、三层 ad-hoc 重签认领 bundle id（#115）、屏幕录制授权 designated requirement 锚定（#143）、内置树补丁构建期打上（#143）。
