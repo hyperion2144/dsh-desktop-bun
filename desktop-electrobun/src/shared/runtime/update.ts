@@ -8,7 +8,7 @@
  *
  * 本文件只有**纯逻辑**（可单测、不 import electrobun）：把 Electrobun 的状态机翻译成壳自己的
  * 视图模型（中文标签、进度、可点性），以及版本比较与清单 URL 的拼法。真正的 IO 在
- * `src/bun/updater.ts`。
+ * `src/bun/platform/updater.ts`。
  *
  * 两个刻意的边界：
  *   · **不自己实现下载与替换**——框架那套带事务、回滚与 Windows 计划任务，重写没有意义；
@@ -32,6 +32,7 @@ export type UpdatePhase =
   | 'idle'
   | 'checking'
   | 'up-to-date'
+  | 'no-release'
   | 'available'
   | 'downloading'
   | 'preparing'
@@ -43,6 +44,7 @@ export const UPDATE_PHASE_LABELS: Record<UpdatePhase, string> = {
   idle: '未检查',
   checking: '正在检查…',
   'up-to-date': '已是最新',
+  'no-release': '暂未发布',
   available: '有新版本',
   downloading: '正在下载…',
   preparing: '正在安装…',
@@ -100,6 +102,61 @@ export interface StatusLike {
     errorMessage?: string
   }
 }
+
+/** 这个更新源背后有没有已发布的 Release（404 有二义性，靠它区分）。 */
+export type ReleasePresence = 'present' | 'absent' | 'unknown'
+
+/** 失败分类：框架只给一段文本，壳侧自己认。 */
+export type UpdateFailureKind = 'not-found' | 'invalid-manifest' | 'network' | 'http' | 'unknown'
+
+export interface UpdateFailure {
+  kind: UpdateFailureKind
+  /** 框架/壳给的原始文本（可能是英文）。 */
+  raw: string
+  /** 中文说明（用户看得懂的那句）。 */
+  text: string
+}
+
+/** 取第一个非空串（`??` 遇空串会短路，后面的值就永远读不到）。 */
+export function firstNonEmpty(...values: (string | undefined)[]): string {
+  for (const value of values) {
+    if (value !== undefined && value !== '') return value
+  }
+  return ''
+}
+
+const HTTP_STATUS_RE = /HTTP\s+(\d{3})/i
+const NETWORK_RE = /network|econnreset|enotfound|eai_again|fetch failed|timeout|abort/i
+
+/**
+ * 把框架给的错误文本认成一种失败，并给出中文说明。
+ *
+ * 框架（Electrobun）**不会把错误抛出来**：它只给一段文本——
+ * `Failed to check for updates: HTTP 404`、`The network connection was lost.`、
+ * `Invalid update manifest: …`——所以判据只能壳侧定。
+ */
+export function classifyUpdateFailure(raw: string): UpdateFailure {
+  const trimmed = raw.trim()
+  if (trimmed === '') return { kind: 'unknown', raw: trimmed, text: '' }
+  if (/invalid update manifest/i.test(trimmed)) {
+    return { kind: 'invalid-manifest', raw: trimmed, text: '更新清单无效（版本号或资产名对不上）' }
+  }
+  if (NETWORK_RE.test(trimmed)) {
+    return { kind: 'network', raw: trimmed, text: '连不上更新源（网络不可用）' }
+  }
+  const status = HTTP_STATUS_RE.exec(trimmed)
+  if (status !== null) {
+    const code = status[1] ?? ''
+    if (code === '404') {
+      return { kind: 'not-found', raw: trimmed, text: '更新源里没有这个平台的清单（HTTP 404）' }
+    }
+    return { kind: 'http', raw: trimmed, text: `更新源返回 HTTP ${code}` }
+  }
+  return { kind: 'unknown', raw: trimmed, text: `更新失败：${trimmed}` }
+}
+
+/** 「这个通道还没发过版」时的说法（既不是失败，也不是「已是最新」）。 */
+export const NO_RELEASE_MESSAGE = '这个通道还没有发布过版本，暂时没有可安装的更新。'
 
 /** Electrobun 的平台前缀：`<buildEnvironment>-<os>-<arch>`（见 `shared/naming.ts:84`）。 */
 export function platformPrefixOf(input: {
@@ -258,18 +315,40 @@ export function updateView(input: {
   remote?: RemoteUpdateLike
   status?: StatusLike
   error?: string
+  /** 404 二义性判据：这个更新源背后有没有已发布的 Release。 */
+  releasePresence?: ReleasePresence
 }): UpdateView {
   const local = input.local
   const remote = input.remote ?? {}
   const status = input.status ?? {}
   const baseUrl = local.baseUrl ?? ''
   const statusName = status.status ?? ''
-  const errorText = input.error ?? status.details?.errorMessage ?? remote.error ?? ''
+  // 错误文本取**第一个非空串**：`??` 遇空串会短路，框架的错误都藏在后面那几项里
+  const rawError = firstNonEmpty(input.error, status.details?.errorMessage, remote.error)
+  const failure = rawError === '' ? null : classifyUpdateFailure(rawError)
+  const presence = input.releasePresence ?? 'unknown'
+  // 404 有二义性：没发布过 vs 有发布但这个平台没有资产（后者是发布链路故障，不能静默）
+  const failureText =
+    failure === null
+      ? ''
+      : failure.kind === 'not-found' && presence === 'present'
+        ? '这个版本里没有本平台的更新资产（发布链路可能漏传了）'
+        : failure.text
   let phase = phaseOfStatus(statusName)
-  if (!input.available) phase = 'unavailable'
-  else if (errorText !== '' && (phase === 'idle' || phase === 'up-to-date')) phase = 'error'
-  // 状态是历史遗留的 error、但此刻没有错误文本 ⇒ 当成「还没检查」，不要挂着红字
-  else if (phase === 'error' && errorText === '') phase = 'idle'
+  if (!input.available) {
+    phase = 'unavailable'
+  } else if (failure?.kind === 'not-found' && presence !== 'present') {
+    // 这个通道还没发过版 ⇒ 既不是失败，也不是「已是最新」
+    phase = 'no-release'
+  } else if (
+    failure !== null &&
+    (phase === 'idle' || phase === 'up-to-date' || phase === 'checking')
+  ) {
+    phase = 'error'
+  } else if (phase === 'error' && failure === null) {
+    // 状态是历史遗留的 error、但此刻没有错误文本 ⇒ 当成「还没检查」，不要挂着红字
+    phase = 'idle'
+  }
   const current = local.version ?? ''
   const latest = remote.version ?? ''
   const updateAvailable =
@@ -282,7 +361,12 @@ export function updateView(input: {
     phase,
     label: updatePhaseLabel(phase),
     status: statusName,
-    message: status.message ?? '',
+    message:
+      phase === 'no-release'
+        ? NO_RELEASE_MESSAGE
+        : failureText !== ''
+          ? failureText
+          : (status.message ?? ''),
     current,
     latest,
     channel: local.channel ?? '',
@@ -293,7 +377,7 @@ export function updateView(input: {
     progress: progressOf(status.details),
     bytesDownloaded: status.details?.bytesDownloaded ?? null,
     totalBytes: status.details?.totalBytes ?? null,
-    error: errorText,
+    error: phase === 'no-release' ? '' : failureText,
     at: status.timestamp ?? 0,
   }
 }
@@ -318,6 +402,7 @@ export function updateActions(view: UpdateView): UpdateActions {
   if (busy) hint = view.label
   else if (canApply) hint = '重启后由新版本接管，当前会话不受影响'
   else if (view.phase === 'up-to-date') hint = `${view.current} 已经是最新`
+  else if (view.phase === 'no-release') hint = '当前通道还没有发布过版本'
   else if (view.phase === 'available') hint = `可下载 ${view.latest}`
   else if (view.phase === 'error') hint = view.error === '' ? '上次更新失败，可重试' : view.error
   return { canCheck, canDownload, canApply, hint }

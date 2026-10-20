@@ -17,3 +17,4 @@
 | 2026-10-18 | [windows-tray-restart-launcher-unknown](2026-10-18-windows-tray-restart-launcher-unknown.md) | Windows 托盘「重启应用」第二次 launcher-unknown 诊断（#167） | 已完成（落地于 #167） |
 | 2026-10-20 | [github-actions-desktop-mobile-build-split](2026-10-20-github-actions-desktop-mobile-build-split.md) | 桌面/移动端构建流水线拆分前的 GitHub Actions 触发语义核实（#212） | 已完成（结论见笔记） |
 | 2026-10-20 | [github-releases-assets-latest-alias](2026-10-20-github-releases-assets-latest-alias.md) | 发 GitHub Release 前的 latest 指针 / 斜杠 tag / 资产上传语义核实（#213） | 已完成（落地于 #213） |
+| 2026-10-20 | [electrobun-updater-error-contract](2026-10-20-electrobun-updater-error-contract.md) | 壳侧「检查更新」失败语义：Electrobun Updater 的错误契约与 404 映射（#216） | 已完成（落地于 #216） |

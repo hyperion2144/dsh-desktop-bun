@@ -10,6 +10,7 @@ export type UpdatePhase =
   | 'idle'
   | 'checking'
   | 'up-to-date'
+  | 'no-release'
   | 'available'
   | 'downloading'
   | 'preparing'

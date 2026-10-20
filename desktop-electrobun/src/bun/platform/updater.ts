@@ -1,7 +1,7 @@
 /**
  * 应用更新的 IO 层：把 Electrobun 自带的 `Updater` 包成壳自己的小接口（#220 决策 11）。
  *
- * 分工：`src/shared/update.ts` 管纯逻辑（阶段翻译、版本比较、可点性），本文件只管
+ * 分工：`src/shared/runtime/update.ts` 管纯逻辑（阶段翻译、版本比较、可点性），本文件只管
  * 「拿框架的本地信息 / 订阅状态 / 调三个动作」，并且**在任何一种失败里都不抛**——更新是
  * 锦上添花的功能，它坏了不能连带把设置面板或启动流程拖垮。
  *
@@ -16,15 +16,19 @@ import {
   DEFAULT_UPDATE_BASE_URL,
   UPDATE_BASE_URL_ENV,
   UPDATE_DISABLE_ENV,
+  classifyUpdateFailure,
+  firstNonEmpty,
   platformPrefixOf,
   updateView,
   type LocalUpdateLike,
+  type ReleasePresence,
   type RemoteUpdateLike,
   type StatusLike,
   type UpdateView,
   updateActions,
   type UpdateActions,
 } from '../../shared/runtime/update.ts'
+import { probeReleasePresence } from './release-probe.ts'
 
 /** 我们用到的框架面（只声明用到的部分，便于测试注入假实现）。 */
 export interface UpdaterLike {
@@ -65,6 +69,8 @@ export interface UpdaterOptions {
   buildEnv?: string
   /** 测试缝：注入假的 Updater（返回 null 表示 import 失败）。 */
   importUpdater?: () => Promise<UpdaterLike | null>
+  /** 测试缝：注入假的「这个更新源背后有没有已发布的 Release」探测。 */
+  probeRelease?: (baseUrl: string) => Promise<ReleasePresence>
   now?: () => number
 }
 
@@ -105,7 +111,10 @@ export function createUpdater(options: UpdaterOptions): ShellUpdater {
   let local: LocalUpdateLike = {}
   let remote: RemoteUpdateLike = {}
   let status: StatusLike | undefined
+  /** 框架/壳给的**原始**错误文本（分类与中文说明交给 `updateView`）。 */
   let failure = ''
+  /** 404 二义性判据：这个更新源背后有没有已发布的 Release。 */
+  let releasePresence: ReleasePresence = 'unknown'
   let reason = ''
   let available = false
 
@@ -118,13 +127,14 @@ export function createUpdater(options: UpdaterOptions): ShellUpdater {
       remote,
       status,
       error: failure,
+      releasePresence,
     })
     return { available, reason, view, actions: updateActions(view) }
   }
 
-  function remember(message: string): void {
-    failure = message
-    log(`[update] ${message}`)
+  function remember(raw: string, actionLabel: string): void {
+    failure = raw
+    log(`[update] ${actionLabel}失败：${raw}`)
   }
 
   async function load(): Promise<void> {
@@ -185,6 +195,25 @@ export function createUpdater(options: UpdaterOptions): ShellUpdater {
     })
   }
 
+  /** 动作名（给日志看，中文）。 */
+  const ACTION_LABELS: Record<'check' | 'download' | 'apply', string> = {
+    check: '检查更新',
+    download: '下载更新',
+    apply: '安装更新',
+  }
+
+  /** 探「这个更新源背后有没有已发布的 Release」（404 二义性靠它）。 */
+  async function probeRelease(): Promise<ReleasePresence> {
+    const base = local.baseUrl ?? ''
+    if (base === '') return 'unknown'
+    const probe = options.probeRelease ?? probeReleasePresence
+    try {
+      return await probe(base)
+    } catch {
+      return 'unknown'
+    }
+  }
+
   async function run(
     action: 'check' | 'download' | 'apply',
     call: (target: UpdaterLike) => Promise<unknown>
@@ -192,13 +221,27 @@ export function createUpdater(options: UpdaterOptions): ShellUpdater {
     await load()
     if (!available || updater === null) return snapshot()
     ensureSubscribed()
+    const actionLabel = ACTION_LABELS[action]
     try {
       await call(updater)
-      failure = ''
       remote = updater.updateInfo() ?? {}
-      log(`[update] ${action} 完成：${remote.version ?? '?'}（available=${String(remote.updateAvailable)}, ready=${String(remote.updateReady)}）`)
+      // 框架的失败**不会抛出来**：它把错误写进 updateInfo.error 并发一条 error 状态
+      const raw = firstNonEmpty(remote.error, status?.details?.errorMessage)
+      if (raw === '') {
+        failure = ''
+        log(
+          `[update] ${actionLabel}完成：${remote.version ?? '?'}` +
+            `（available=${String(remote.updateAvailable)}, ready=${String(remote.updateReady)}）`
+        )
+      } else {
+        remember(raw, actionLabel)
+        if (action === 'check' && classifyUpdateFailure(raw).kind === 'not-found') {
+          // 404 有二义性：探一下这个更新源背后到底有没有已发布的 Release
+          releasePresence = await probeRelease()
+        }
+      }
     } catch (error) {
-      remember(`${action} 失败：${String(error)}`)
+      remember(error instanceof Error ? error.message : String(error), actionLabel)
       try {
         remote = updater.updateInfo() ?? {}
       } catch {}
