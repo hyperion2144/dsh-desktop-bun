@@ -41,6 +41,10 @@ jobs:
   build-mobile:
     name: 移动端出包（${{ matrix.target }}）
     runs-on: ${{ matrix.os }}
+    # #213：发布步骤要建 release / 传资产 ⇒ 这个 job 需要 contents: write。
+    # 只提这一个 job：workflow 级仍是 contents: read，其余作业不碰写权限。
+    permissions:
+      contents: write
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -135,6 +139,21 @@ jobs:
           path: /tmp/DeepSeek.ipa
           if-no-files-found: error
 
+      # #213：tag push 时把本平台产物传成 GitHub Release 资产（只在 mobile/v* 的 tag 上跑）。
+      # 移动端 release 是 prerelease 且不夺 latest：latest/download 恒指向桌面 stable。
+      - name: 发布 Release 资产（仅 tag）
+        if: startsWith(github.ref, 'refs/tags/mobile/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          case "${{ matrix.target }}" in
+            android) asset='mobile/expo-app/android/app/build/outputs/apk/debug/app-debug.apk' ;;
+            ios) asset='/tmp/DeepSeek.ipa' ;;
+            *) echo "未知 target，跳过发布"; exit 0 ;;
+          esac
+          node scripts/release-publish.mjs upload --kind mobile --tag "$TAG" --asset "$asset"
+
   # 鸿蒙出包（可选，默认跳过）：HAP 需要 HarmonyOS SDK（DevEco / 华为授权下载）与
   # 签名材料（.p12/.cer/.p7b，证书不能进仓库），GitHub 托管 runner 装不了。
   # 打开方式：在自建 runner（labels: self-hosted, macOS, harmony）预装 DevEco Studio
@@ -144,6 +163,9 @@ jobs:
     name: 鸿蒙出包（自建 runner，可选）
     if: vars.DSH_HARMONY_CI == 'true'
     runs-on: [self-hosted, macOS, harmony]
+    # #213：HAP 也进同一个移动端 release ⇒ 这个 job 需要 contents: write。
+    permissions:
+      contents: write
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -161,3 +183,36 @@ jobs:
           name: dsh-mobile-harmony-hap
           path: mobile/harmony/entry/build/default/outputs/**/*.hap
           if-no-files-found: error
+
+      # #213：HAP 也传成 Release 资产（与 Android / iOS 同一个 release）。
+      - name: 发布 Release 资产（仅 tag）
+        if: startsWith(github.ref, 'refs/tags/mobile/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # 自建 runner 不保证有 node / bun；没有就跳过（HAP 仍在 CI artifact 里）。
+          if command -v node >/dev/null 2>&1; then rt=node; elif command -v bun >/dev/null 2>&1; then rt=bun; else echo '自建 runner 没有 node/bun：HAP 不进 Release（仍在 CI artifact 里）'; exit 0; fi
+          hap="$(find mobile/harmony/entry/build/default/outputs -name '*.hap' | head -1)"
+          if [ -z "$hap" ]; then echo '没找到 HAP，跳过发布'; exit 0; fi
+          "$rt" scripts/release-publish.mjs upload --kind mobile --tag "$TAG" --asset "$hap"
+
+  # #213：等移动端出包（+ 可选鸿蒙）都传完，再把 draft 翻成 published。
+  # 移动端标 prerelease 且显式不夺 latest：latest/download 恒指向桌面 stable。
+  # 鸿蒙作业默认跳过（未设 DSH_HARMONY_CI），所以用 always() + 逐个看结果，不让跳过的作业卡住发布。
+  release:
+    name: 发布移动端 Release（prerelease，不夺 latest）
+    if: always() && startsWith(github.ref, 'refs/tags/mobile/v') && needs.build-mobile.result == 'success' && (needs.build-harmony.result == 'success' || needs.build-harmony.result == 'skipped')
+    needs: [build-mobile, build-harmony]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: 发布（draft → published，prerelease 且不夺 latest）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          node scripts/release-publish.mjs publish --kind mobile --tag "$TAG"
