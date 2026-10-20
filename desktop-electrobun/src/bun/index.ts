@@ -423,12 +423,17 @@ function trayState(): TrayState {
     openWindows: sessions.openProfiles(),
     profileRows: listProfiles(dshHome(), instanceProfile).map((profile) => {
       const row = sessions.get(profile)
-      const origin = row?.service?.state.origin ?? ''
-      const port = Number(origin.split(':').pop() ?? '') || null
+      // #215：运行中与否由会话状态说了算（服务面 stop() 之后状态落 stopped、宿主 PID 归 0）。
+      // 旧口径只看 hostPid：退过实例还留着旧 PID，托盘就一直说「运行中」——
+      // 那个 profile 既开不了新窗（服务面是终态对象），菜单还只剩「退出」没别的路走。
+      // 一次 state() 拿全：origin 也从会话状态取，别越过会话接口摸服务面。
+      const sessionState = row?.state()
+      const running = sessionState?.running ?? false
+      const port = running ? Number((sessionState?.origin ?? '').split(':').pop() ?? '') || null : null
       return {
         profile,
-        open: row?.state().windowOpen ?? false,
-        running: (row?.service?.state.hostPid ?? 0) > 0,
+        open: sessionState?.windowOpen ?? false,
+        running,
         port,
         focused: sessions.focused()?.profile === profile,
       }

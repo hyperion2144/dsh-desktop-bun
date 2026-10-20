@@ -53,6 +53,8 @@ export type OpenResult =
 export interface ProfileSessionState {
   windowOpen: boolean
   ready: boolean
+  /** #215：这个 profile 的 DSH 实例在不在跑（托盘行据此显示「运行中」）。 */
+  running: boolean
   serviceStatus: string
   serviceError: string | null
   origin: string
@@ -64,7 +66,7 @@ export interface ProfileSessionState {
 
 export interface ProfileSession {
   readonly profile: string
-  /** 服务面引用（可能已停；重启路径靠它复活，#117）。没有起过就是 null。 */
+  /** 服务面引用（可能已停；退过的那份是终态对象，下一次开窗会另起一份，#215）。没有起过就是 null。 */
   readonly service: ShellService | null
   readonly window: BrowserWindow | null
   state(): ProfileSessionState
@@ -82,7 +84,7 @@ export interface ProfileSessions {
   list(): ProfileSession[]
   /** 窗口开着的 profile（托盘 openWindows / restartDsh 的重开清单）。 */
   openProfiles(): string[]
-  /** 起过服务面的 profile（restartDsh 的树级重启清单）。 */
+  /** 起过服务面的 profile（restartDsh 的树级重启清单）；已退掉的实例不在其中——用户显式退的别复活（#215）。 */
   serviceProfiles(): string[]
   focused(): ProfileSession | undefined
   focusedWindow(): BrowserWindow | null
@@ -144,9 +146,15 @@ export interface ProfileSessionDeps {
 interface SessionRecord {
   profile: string
   service: ShellService | null
+  /**
+   * #215：这份服务面已终态（托盘「退出实例」停过、宿主真没了）——不能复用，下次开窗要全新拉起。
+   * 与 stopping 不是一回事：stopping 是「正在停」的过程，retired 是「停干净了」的结果。
+   */
+  retired: boolean
   window: BrowserWindow | null
   /** 该窗的 CEF 浏览器就绪（dom-ready 之前 loadURL/executeJavascript 会打到空 ref）。 */
   ready: boolean
+  /** 正在停的途中（关窗 + 停服务面）；停干净了才落 retired。 */
   stopping: boolean
   frameSaveTimer: ReturnType<typeof setTimeout> | null
   healCheckTimer: ReturnType<typeof setTimeout> | null
@@ -194,6 +202,7 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
     const record: SessionRecord = {
       profile,
       service,
+      retired: false,
       window: null,
       ready: false,
       stopping: false,
@@ -231,6 +240,9 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
     return {
       windowOpen: record.window !== null,
       ready: record.ready,
+      // 「这个 profile 的 dsh 宿主在不在跑」——口径与托盘顶层的 hostRunning 一致（宿主 PID > 0）。
+      // 服务面 stop() 之后宿主 PID 归 0（#215），托盘那行就不再谎报「运行中」。
+      running: (svc?.state.hostPid ?? 0) > 0,
       serviceStatus: svc?.state.status ?? 'stopped',
       serviceError: svc?.state.error ?? svc?.state.blocked ?? null,
       origin: svc?.state.origin ?? '',
@@ -475,6 +487,8 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
     }
     if (record.window !== null) return record.session
     record.service = svc
+    // 挂上活的服务面就不是「已退休」的了（retired 只描述上一份已终态的服务面）
+    record.retired = false
     const win = await deps.createWindow(profile, svc)
     record.window = win
     focusedProfile = profile
@@ -505,8 +519,11 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
   }
 
   async function ensureService(profile: string): Promise<ShellService> {
-    const existing = recordFor(profile)?.service
-    if (existing !== undefined && existing !== null) return existing
+    const before = recordFor(profile)
+    const existing = before?.service ?? null
+    // 退过的服务面是终态对象（HTTP 面/看门狗/端口认领都拆了）：复用它拉不起 DSH
+    // （supervisor 的 stopping 粘住）——退过的实例得重新起一份（#215）。
+    if (existing !== null && before?.retired !== true) return existing
     log(`[shell] 起服务面：profile = ${profile}`)
     const started = await deps.createService(profile)
     let record = recordFor(profile)
@@ -515,6 +532,7 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
       records.set(profile, record)
     } else {
       record.service = started
+      record.retired = false
     }
     return started
   }
@@ -524,13 +542,22 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
       log(`[shell] 退出实例：${record.profile} 没有在跑的服务面，忽略`)
       return
     }
+    if (record.retired) {
+      log(`[shell] 退出实例：${record.profile} 的实例已经退过了，忽略`)
+      return
+    }
     log(`[shell] 退出实例：停止 ${record.profile} 的 dsh 与服务面`)
+    const svc = record.service
     record.stopping = true
     try {
       record.window?.close()
-      await record.service.stop()
+      await svc.stop()
     } finally {
       record.stopping = false
+      // #215：服务面是终态对象，复用它拉不起 DSH。宿主真没了才记「已退休」——
+      // 宿主还活着（停失败）的话这份服务面还能用；判死会让下次开窗另起一份，
+      // 跟还占着上游端口的旧宿主撞车。托盘那行也不再谎报「运行中」。
+      record.retired = svc.state.status === 'stopped' && svc.state.hostPid === 0
       deps.onWindowsChanged()
     }
   }
@@ -575,7 +602,8 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
 
     openProfiles: openProfileList,
 
-    serviceProfiles: () => [...records.values()].filter((record) => record.service !== null).map((record) => record.profile),
+    serviceProfiles: () =>
+      [...records.values()].filter((record) => record.service !== null && !record.retired).map((record) => record.profile),
 
     focused: () => {
       if (focusedProfile === null) return undefined
