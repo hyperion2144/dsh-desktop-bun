@@ -2,10 +2,42 @@ import type { ElectrobunConfig } from 'electrobun'
 import { APP_NAME } from './src/shared/app/app.ts'
 import { bundleIdentifierOverride, resolveBundleIdentifier } from './src/shared/app/app-identity.ts'
 import { DEFAULT_UPDATE_BASE_URL } from './src/shared/runtime/update.ts'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 const repoDir = resolve(import.meta.dir, '..')
+
+// 开发态「只带链接」模式：DSH_SHELL_BUILTIN_LINK=<给定的 runtime 目录>
+//   · 跳过内置运行时的 copy（几百 MB 的树每次 dev build 都白拷一遍）；
+//   · 改在 dev 包的位置直接放一条指向 <目录>/node_modules 的目录链接——包内照样用那棵树，
+//     但包里不再带它。
+// 为什么不能「拷一个链接进去」：Electrobun 的 copy 不保目录链接，链接会被压成 0 字节的普通
+// 文件（实测 dev 包里 app/dsh/node_modules 就是这么变成 0 字节的），所以这条链接只能在拷贝
+// 之外、在包的位置自己建。
+// 范围：只对 macOS 的 dev 包生效（包结构是 .app 目录）；别的平台与非 dev 通道照旧拷实体树。
+// 开关没设时行为一行不变：release（stable/canary）照旧带实体树，签名语义不动。
+const builtinLinkDir = (process.env.DSH_SHELL_BUILTIN_LINK ?? '').trim()
+let builtinLinked = false
+if (builtinLinkDir !== '' && process.platform === 'darwin') {
+  const linkTarget = join(resolve(builtinLinkDir), 'node_modules')
+  const dshDir = join(
+    import.meta.dir,
+    'build',
+    `dev-macos-${process.arch}`,
+    `${APP_NAME}-dev.app`,
+    'Contents',
+    'Resources',
+    'app',
+    'dsh',
+  )
+  const linkPath = join(dshDir, 'node_modules')
+  mkdirSync(dshDir, { recursive: true })
+  rmSync(linkPath, { recursive: true, force: true })
+  symlinkSync(linkTarget, linkPath, 'dir')
+  builtinLinked = true
+  // 走 stderr：hutch 会把配置的 stdout 当 JSON 解析，println 会把它顶成 SyntaxError。
+  console.warn(`[electrobun.config] 内置运行时改用链接：${linkPath} → ${linkTarget}`)
+}
 
 /** 递归列文件（返回相对给定目录的 POSIX 相对路径；目录不存在就空数组）。 */
 function listFiles(root: string, rel = ''): string[] {
@@ -108,7 +140,9 @@ export default {
       // 内置 dsh 运行时（随包发出，item 1）：prepare:bundle 按 builtin-runtime.json 声明物化一棵可用树到
       // builtin-runtime/（声明版本下载 / 已就绪复用 / DSH_SHELL_BUILTIN_SOURCE 显式逃生口，#16）。
       // 只在真的物化成功时声明：Electrobun 的 copy 不会「源缺就跳过」，写死会 CopySourceMissing。
-      ...(existsSync(join(import.meta.dir, 'builtin-runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
+      // 链接模式下不声明这条 copy：那棵树已经在 dev 包的位置用链接接上了（见上面的链接模式分支）。
+      ...(!builtinLinked
+        && existsSync(join(import.meta.dir, 'builtin-runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
         ? { 'builtin-runtime': 'dsh' }
         : {}),
     },

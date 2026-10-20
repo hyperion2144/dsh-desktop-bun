@@ -8,6 +8,10 @@
 
 ### 桌面壳（macOS / Windows / Linux）
 
+- 第三方插件的 const 重赋值在加载时自动放宽为 let，插件入口不再因 Bun 转译期拒绝而整条失活（#205）。
+- dev 打包可选「只带链接」：`DSH_SHELL_BUILTIN_LINK=<runtime 目录>` 时内置运行时改成目录链接，dev build 不再每次拷几百 MB 实体树（#210）。
+- preload 汇总行不再误报「HMR 关闭」：`DSH_BUN_COMPAT_DISABLE_HMR` 是无人读的死开关，真开关在 profile 的 bundle patch。
+
 - 三平台安装包，内置 dsh 运行时（0.2.1-rc.2）开箱即用，无需预装 Node/pnpm；宿主由 Bun 直跑。
 - 完整 dsh 桌面体验：会话、插件、托盘、系统通知、防休眠、手机访问、远程 dsh 接入。
 - 多 profile 多窗口：每 profile 独立窗口/端口/服务进程/窗口几何；服务面先于 DSH 存在，DSH 起不来托盘也有自救入口（#117）。
@@ -50,7 +54,7 @@
 
 - Windows 安装器：品牌三页（#91）、明暗双主题（#89）、中英双语 + LZMA 降 30.8% 体积（#88）、事务性安装失败回滚（#93）、进度页窗口帧覆盖层（#103）、高 DPI 适配（#103）。
 - macOS 交付：签名后重打 DMG（#95）、三层 ad-hoc 重签认领 bundle id（#115）、屏幕录制授权 designated requirement 锚定（#143）、内置树补丁构建期打上（#143）。
-- CI 分流：push/PR 跑检查（壳+插件门禁+Windows 兑底 #18）、完整构建留 workflow_dispatch/tag/每日兑底（#7/#8）、job 超时兑底（#51）、产物断言（渲染器载荷/launcher/version.json）。
+- CI 分流：push/PR 跑检查（壳+插件门禁+Windows 兑底 #18）、完整构建留 workflow_dispatch/tag/每日兑底（#7/#8）、job 超时兑底（#51）、产物断言（渲染器载荷/launcher/version.json）；壳主进程 console 默认 tee 进 shell.log（#178）。
 - 壳架构深模块化：ProfileSession（#179）、命令契约 contracts/（#190）、共享 RPC core（#185）、面板数据 adapter（#182）、判定层 candidates（#189）、宿主监督器 HostSupervisor（#183/#195）。
 - 壳源码按运行时域分一层子目录（host/windows/commands/net/runtime/profiles/notify/platform，shared 与插件客户端同口径），组合根留根，129 文件归位（[ADR-0009](docs/adr/0009-bun-source-domain-layout.md)）。
 - 源码门禁测试随分域同步路径，加载失败不再被 pass/fail 计数掩盖（#196）。
@@ -63,5 +67,6 @@
 - macOS 托盘「重启应用」修复：改为中继进程等旧实例（含 CEF 单实例锁）退净后再拉起，不再弹出浏览器或拉起失败（#204）；安装后 bun.exe 一并写入应用显示名（任务管理器不再显示 BUN）。
 - Windows DevTools 修复：右键菜单打开的 DevTools 连接不再断开（CDP 允许跨源 WebSocket + ws 地址回环归一）；F12 行为不变（#207）。
 - 高分屏最小化恢复修复：最大化窗口在缩放屏上最小化后恢复，重新落位不再超出屏幕（#208）。
+- Windows 托盘「重启应用」修复：壳直接拉起 launcher 的可靠路径保留并补 relay 日志留痕，重启后新实例正常拉起（#211）。
 - 架构文档：[docs/adr](docs/adr/README.md) 0001–0009 带索引、[docs/research](docs/research/README.md) 11 篇调研入库、[CONTEXT.md](CONTEXT.md) 领域词汇表。
 - 插件客户端资产本地服务（#175 系）：plugin 资产本地直出，不依赖远端。
