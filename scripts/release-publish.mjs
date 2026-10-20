@@ -260,10 +260,23 @@ function repoSlug() {
 
 /** release 现状（不存在返回 null）。 */
 function releaseView(tag) {
-  const result = gh(['release', 'view', tag, '--json', 'isDraft,isPrerelease,assets,id,tagName'], { allowFailure: true })
+  // REST List releases 是唯一同时给得出 draft + 数字 id 的源：
+  //  - `gh release view --json` 的 id 是 GraphQL node id（RA_…），拿它调 /releases/assets/{id}
+  //    与 PATCH /releases/{id} 一律 404（run 39438235352 publish 步实证）；
+  //  - `releases/tags/<tag>` 这个端点不返回 draft（实测 404）。
+  const result = gh(['api', `repos/${repoSlug()}/releases?per_page=100`], { allowFailure: true })
   if (!result.ok) return null
   try {
-    return JSON.parse(result.stdout)
+    const releases = JSON.parse(result.stdout)
+    const release = (Array.isArray(releases) ? releases : []).find((item) => item.tag_name === tag)
+    if (!release) return null
+    return {
+      id: release.id,
+      tagName: release.tag_name,
+      isDraft: release.draft === true,
+      isPrerelease: release.prerelease === true,
+      assets: (release.assets ?? []).map((asset) => ({ id: asset.id, name: asset.name, size: asset.size })),
+    }
   } catch (error) {
     fail(`解析 release 信息失败：${String(error)}`)
   }
