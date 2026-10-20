@@ -46,6 +46,8 @@ function startUpstream(): Upstream {
   })
   const server = Bun.serve({
     port: 0,
+    // 与壳服务面同形（它自己就只绑 127.0.0.1）：Windows 上绑全接口时，壳回连 127.0.0.1 会偶发走不通（#220）
+    hostname: '127.0.0.1',
     async fetch(request) {
       const url = new URL(request.url)
       const key = `${request.method} ${url.pathname}${url.search}`
@@ -155,20 +157,32 @@ describe('#144-1 跟随者等待上限与取消', () => {
   })
 
   test('正常共享不该误触发上限：并发只打一次上游、零掉队、事后在飞归零', async () => {
-    const upstream = startUpstream()
-    const shell = withServer(upstream.origin, { followerWaitMs: () => 5_000 })
-    try {
-      const hits = await Promise.all(Array.from({ length: 8 }, () => fetch(`${shell.origin}/api/slow`)))
-      for (const hit of hits) expect(hit.status).toBe(200)
-      expect(upstream.count('GET /api/slow')).toBe(1)
-      const health = await readHealth(shell.origin)
-      expect(health.coalesced).toBe(7)
-      expect(health.followerDropouts).toBe(0)
-      expect(health.proxiedInFlight).toBe(0)
-    } finally {
-      shell.cleanup()
-      upstream.stop()
+    // 上游是同进程里的真 HTTP 服务：Windows 兜底 runner 上偶发「连不上上游」的传输级抖动（壳回 502 upstream unreachable）。
+    // 那是传输层的事、不是聚合逻辑的事：只对传输失败换一套夹具重来；语义断言一旦不符立即失败（不吞回归）。
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const upstream = startUpstream()
+      const shell = withServer(upstream.origin, { followerWaitMs: () => 5_000 })
+      try {
+        let hits: Response[] = []
+        try {
+          hits = await Promise.all(Array.from({ length: 8 }, () => fetch(`${shell.origin}/api/slow`)))
+        } catch {
+          continue // 连壳都连不上：同样是传输级抖动，换一套夹具重来
+        }
+        if (hits.some((hit) => hit.status === 502)) continue // 上游传输失败：换一套夹具重来
+        for (const hit of hits) expect(hit.status).toBe(200)
+        expect(upstream.count('GET /api/slow')).toBe(1)
+        const health = await readHealth(shell.origin)
+        expect(health.coalesced).toBe(7)
+        expect(health.followerDropouts).toBe(0)
+        expect(health.proxiedInFlight).toBe(0)
+        return
+      } finally {
+        shell.cleanup()
+        upstream.stop()
+      }
     }
+    throw new Error('连续 3 轮都撞上上游传输失败（502 upstream unreachable）')
   })
 
   test('full 档：等满阈值后不挂死，独立发起并正常返回；领头那条只发一次', async () => {

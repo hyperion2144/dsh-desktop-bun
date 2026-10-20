@@ -657,6 +657,24 @@ describe('keep-awake（平台断言，注入假 spawn）', () => {
     awake.stop()
   })
 
+  /** systemd 清单里有没有这个 PID（按整列匹配，不做子串撞号：3055 与 13055 分得开）。 */
+  const listsPid = (listed: string, pid: number): boolean =>
+    listed.split(/\s+/).some((token) => token === String(pid))
+
+  /**
+   * 等 inhibitor 真的出现在 systemd 清单里（或真的消失）。
+   * 登记与释放都经 D-Bus 异步落地：单次快照会读到「还没登记完」的中间态——CI 上偶发（#220）。
+   */
+  const waitInhibitor = async (pid: number, want: boolean, timeoutMs = 5_000): Promise<string> => {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      const listed = new TextDecoder().decode(Bun.spawnSync(['systemd-inhibit', '--list']).stdout)
+      if (listsPid(listed, pid) === want) return listed
+      if (Date.now() > deadline) return listed
+      await Bun.sleep(100)
+    }
+  }
+
   test('Linux 真进程：systemd-inhibit 真的拿住了锁，释放后真的没了', async () => {
     if (process.platform !== 'linux') return
     const logs: string[] = []
@@ -690,8 +708,9 @@ describe('keep-awake（平台断言，注入假 spawn）', () => {
     expect(spawnedPids).toHaveLength(1)
     const holder = spawnedPids[0] ?? 0
     if (capability.backend === 'systemd-inhibit') {
-      const listed = new TextDecoder().decode(Bun.spawnSync(['systemd-inhibit', '--list']).stdout)
-      expect(listed).toContain(String(holder))
+      // 登记是异步的：等它真的出现在清单里，而不是赌一次快照
+      const listed = await waitInhibitor(holder, true)
+      expect(listsPid(listed, holder)).toBe(true)
     } else {
       // GNOME 兜底通道没有 --list 可查：只确认持有进程活着
       expect(awake.isHolding()).toBe(true)
@@ -701,8 +720,8 @@ describe('keep-awake（平台断言，注入假 spawn）', () => {
     expect(awake.tick()).toBe(false)
     await Bun.sleep(300)
     if (capability.backend === 'systemd-inhibit') {
-      const after = new TextDecoder().decode(Bun.spawnSync(['systemd-inhibit', '--list']).stdout)
-      expect(after).not.toContain(String(holder))
+      const after = await waitInhibitor(holder, false)
+      expect(listsPid(after, holder)).toBe(false)
     }
     awake.stop()
   })

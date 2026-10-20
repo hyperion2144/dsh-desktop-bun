@@ -39,6 +39,9 @@ const defaultRealLib = join(
 const realPtcLib = process.env.DSH_PTC_SOURCE_LIB ?? defaultRealLib
 const nodeExecutable = process.env.DSH_NODE_EXECUTABLE ?? Bun.which('node')
 const win32 = process.platform === 'win32';
+// Windows 上真 spawn 一个 node 进程 + 走 bun-preload 补丁 + 等 fd 7 上的 ready 帧，
+// 实测要 2.4–5s（Linux 同一用例只要 40–60ms）⇒ Windows 给足预算，别让 CI 偶发红。
+const spawnFrameTimeoutMs = win32 ? 20000 : 5000
 
 const roots: string[] = []
 
@@ -162,7 +165,7 @@ function spawnEntry(executable: string, entry: string) {
   })
 }
 
-function readFrame(child: ReturnType<typeof spawn>, timeoutMs = 5000): Promise<string> {
+function readFrame(child: ReturnType<typeof spawn>, timeoutMs = spawnFrameTimeoutMs): Promise<string> {
   return new Promise((resolvePromise, reject) => {
     const control = (child.stdio as unknown as Array<Duplex | null>)[7]
     if (control === null || control === undefined) {
@@ -197,7 +200,7 @@ function readFrame(child: ReturnType<typeof spawn>, timeoutMs = 5000): Promise<s
   })
 }
 
-async function readReadyFrame(child: ReturnType<typeof spawn>, timeoutMs = 5000): Promise<string> {
+async function readReadyFrame(child: ReturnType<typeof spawn>, timeoutMs = spawnFrameTimeoutMs): Promise<string> {
   try {
     return await readFrame(child, timeoutMs)
   } finally {
@@ -357,9 +360,9 @@ describe('bun-preload Patch 15（PTC worker 继承控制通道，#152）', () =>
     expect(runPreload(tree).code).toBe(0)
 
     const child = spawnEntry(nodePath, join(lib, 'process.js'))
-    const frame = await readReadyFrame(child)
+    const frame = await readReadyFrame(child, spawnFrameTimeoutMs)
     expect(JSON.parse(frame)).toEqual({ type: 'ready' })
-  })
+  }, spawnFrameTimeoutMs + 5000)
 })
 
 const realProcessEntry = join(realPtcLib, 'process.js')
