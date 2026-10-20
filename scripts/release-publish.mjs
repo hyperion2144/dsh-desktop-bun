@@ -77,7 +77,7 @@ const KINDS = {
 /** 桌面各平台的「交给人的安装包」在产物目录里的形状。 */
 const INSTALLER_PATTERNS = {
   macos: ['*.dmg'],
-  windows: ['*-setup.exe'],
+  win: ['*-setup.exe'],
   linux: ['linux-*.tar.gz'],
 }
 
@@ -88,8 +88,8 @@ const MOBILE_PLATFORM_BY_EXT = {
   '.hap': 'harmony',
 }
 
-/** 桌面必须齐的三平台（build.yml 的矩阵）。 */
-const DESKTOP_PLATFORMS = ['macos', 'windows', 'linux']
+/** 桌面必须齐的三平台（build.yml 的矩阵）。os 词元用 Electrobun 的 `macos`/`win`/`linux`（同壳 src/bun/platform/updater.ts 的 osName）。 */
+const DESKTOP_PLATFORMS = ['macos', 'win', 'linux']
 
 // ---------------------------------------------------------------------------
 // 小工具
