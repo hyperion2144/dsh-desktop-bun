@@ -92,7 +92,7 @@ DSH_DESKTOP_NO_SINGLETON=1 DSH_SHELL_BUILTIN_DIR=<worktree>/desktop-electrobun/b
 2. **纯逻辑单测**（进 CI）：`src/shared/*` 与可注入 IO 层。
 3. 引擎断言（CEF/长跑）属一次性验收，不进常规 CI。
 
-CI 分两条（#7）：push/PR 走 `.github/workflows/check.yml`，#18 起覆盖壳类型检查 + 单测、插件门禁（test:client + 全量 tsc）与 Windows 兜底 job（双平台只跑测试面）；完整构建（三平台矩阵 → 出包 → 产物断言，Windows 追加 NSIS 安装器与冒烟）在 `.github/workflows/build.yml`，由手动 dispatch、tag push 与每日定时兜底（#8，UTC 18:30 = 北京 02:30）触发。
+CI 分两条（#7）：push/PR 走 `.github/workflows/check.yml`，#18 起覆盖壳类型检查 + 单测、插件门禁（test:client + 全量 tsc）与 Windows 兜底 job（双平台只跑测试面）；完整构建（三平台矩阵 → 出包 → 产物断言，Windows 追加 NSIS 安装器与冒烟）在 `.github/workflows/build.yml`，由手动 dispatch、tag push（只认 `desktop/v*`）与每日定时兜底（#8，UTC 18:30 = 北京 02:30）触发。移动端出包（Android APK / iOS IPA / 鸿蒙 HAP）自 #212 起独立在 `.github/workflows/mobile.yml`（tag 只认 `mobile/v*`，定时兜底 UTC 19:00），不再随桌面流水线白跑。
 
 ## 已知边界
 

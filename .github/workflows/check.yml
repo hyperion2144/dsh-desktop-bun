@@ -4,7 +4,8 @@ name: Check
 #
 # 触发策略（方案 A，与 build.yml 分工）：
 #   - 本文件：push(main) 与 pull_request —— 每轮迭代的快速反馈
-#   - build.yml：workflow_dispatch / tag push / 每日 schedule（#8）—— 完整构建 + 断言 + 冒烟 + 上传
+#   - build.yml：workflow_dispatch / tag push（desktop/v*）/ 每日 schedule（#8）—— 桌面完整构建 + 断言 + 冒烟 + 上传
+#   - mobile.yml：workflow_dispatch / tag push（mobile/v*）/ 每日 schedule —— 移动端出包（#212，与桌面分流）
 # main 打包链的持续验证：每日 schedule 兜底（#8，UTC 18:30）+ 手动 dispatch。
 on:
   push:
@@ -17,6 +18,7 @@ on:
       - 'mobile/**'
       - 'scripts/**'
       - '.github/workflows/build.yml'
+      - '.github/workflows/mobile.yml'
       - '.github/workflows/check.yml'
   pull_request:
     paths:
@@ -27,6 +29,7 @@ on:
       - 'mobile/**'
       - 'scripts/**'
       - '.github/workflows/build.yml'
+      - '.github/workflows/mobile.yml'
       - '.github/workflows/check.yml'
 
 permissions:
