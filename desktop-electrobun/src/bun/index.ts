@@ -4,80 +4,81 @@
 // 那一层不 import electrobun；这里只做「渲染器断言」和「窗口」两件事。
 
 import { ApplicationMenu, BrowserView, BrowserWindow, BuildConfig, ContextMenu, Screen, Utils, app } from 'electrobun/bun'
-import { acceptShimScript } from './accept-shim.ts'
-import { systemLocale } from './locale.ts'
-import { installApplicationMenu } from './menu.ts'
-import { deriveMaximized, ensureNativeMaximizeStyles, HEAL_MAX_REPLACES, healVerdict, isMaximizedPlacementDamaged, toggleWindowMaximize, windowMaxState, type WindowMaxState } from './window-max.ts'
-import { pickWorkArea } from './screen-work-area.ts'
-import { installShellConsoleTee, shellLogLine } from './shell-log.ts'
+import { acceptShimScript } from './windows/accept-shim.ts'
+import { systemLocale } from './platform/locale.ts'
+import { installApplicationMenu } from './windows/menu.ts'
+import { deriveMaximized, toggleWindowMaximize, windowMaxState, type WindowMaxState } from './windows/window-max.ts'
+import { pickWorkArea } from './windows/screen-work-area.ts'
+import { installShellConsoleTee, resolveShellLogFile, shellLogLine } from './platform/shell-log.ts'
 import { bootPreloadScript } from './preload.ts'
-import { attachShellRpc } from './rpc-bridge.ts'
-import { startService, type ServiceOptions, type ShellService } from './service.ts'
-import { createWindowFocusTracker } from './window-focus.ts'
-import { createNativeNotify } from './notify-un.ts'
-import type { RuntimeSnapshot } from './commands.ts'
-import { ensureWindowsNotifyIdentity } from './win-notify-identity.ts'
-import type { RuntimeDownloadStatus } from './runtime-install.ts'
-import { SHELL_MENU_ACTIONS, contextMenuItems, isOpenablePath } from './context-menu.ts'
-import { isExternalUrl } from './external.ts'
-import { APP_NAME } from '../shared/app.ts'
-import { appSupportDir, dshHome, resolveLauncherForRelaunch, trayImagePath } from './runtime.ts'
-import { acquireInstance, activateUrl, defaultIsAlive, releaseInstance, updateInstance } from './single-instance.ts'
-import { awaitParentExit, relaunchDesktopApp, relaunchParentPid } from './app-restart.ts'
-import { createViewRegistry } from '../shared/view-grant.ts'
-import { createGuestManager, type GuestViewLike } from './guest-manager.ts'
-import { loadNativeWebviewCore } from './native-webview.ts'
-import { GUEST_DEFAULT_URL, OFFSCREEN_GUEST_RECT } from '../shared/guest-policy.ts'
-import { resolveAppVersion } from './app-version.ts'
-import { SPLASH_HEIGHT, SPLASH_WIDTH, splashFailScript, splashHtml, splashStageScript } from './splash.ts'
-import { dialogTitlebarFrameHeight } from './dialog-titlebar.ts'
-import { readShellTheme } from './theme-source.ts'
-import { stageLabel, stagePercent, type ShellStage } from './stages.ts'
-import { createTray, type TrayHandle } from './tray.ts'
+import { attachShellRpc } from './commands/rpc-bridge.ts'
+import { startService, type ServiceOptions, type ShellService } from './host/service.ts'
+
+import { createNativeNotify } from './notify/notify-un.ts'
+import type { RuntimeSnapshot } from './commands/commands.ts'
+import { ensureWindowsNotifyIdentity } from './notify/win-notify-identity.ts'
+import type { RuntimeDownloadStatus } from './runtime/runtime-install.ts'
+import { SHELL_MENU_ACTIONS, contextMenuItems, isOpenablePath } from './windows/context-menu.ts'
+import { isExternalUrl } from './windows/external.ts'
+import { APP_NAME } from '../shared/app/app.ts'
+import { appSupportDir, dshHome, resolveLauncherForRelaunch, trayImagePath } from './runtime/runtime.ts'
+import { acquireInstance, activateUrl, defaultIsAlive, releaseInstance, updateInstance } from './platform/single-instance.ts'
+import { awaitParentExit, cefDirFromExecPath, relaunchDesktopApp, relaunchParentPid } from './platform/app-restart.ts'
+import { applyWindowsIcon, windowIconCandidates } from './platform/window-icon.ts'
+import { createViewRegistry } from '../shared/net/view-grant.ts'
+import { createGuestManager, type GuestViewLike } from './windows/guest-manager.ts'
+import { loadNativeWebviewCore } from './windows/native-webview.ts'
+import { GUEST_DEFAULT_URL, OFFSCREEN_GUEST_RECT } from '../shared/profiles/guest-policy.ts'
+import { resolveAppVersion } from './platform/app-version.ts'
+import { SPLASH_HEIGHT, SPLASH_WIDTH, splashFailScript, splashHtml, splashStageScript } from './windows/splash.ts'
+import { dialogTitlebarFrameHeight } from './windows/dialog-titlebar.ts'
+import { readShellTheme } from './platform/theme-source.ts'
+import { stageLabel, stagePercent, type ShellStage } from './platform/stages.ts'
+import { createTray, type TrayHandle } from './platform/tray.ts'
 import {
   trayMenu,
   type TrayAction,
-  type TrayCatalogItem,
   type TrayState,
   type TrayUpdateCheck,
-} from './tray-menu.ts'
-import { listProfiles } from './profiles.ts'
-import { profileDialogHtml, type ProfileOpDialogKind } from './profile-dialog.ts'
+} from './platform/tray-menu.ts'
+import { listProfiles } from './profiles/profiles.ts'
+import { profileDialogHtml, type ProfileOpDialogKind } from './windows/profile-dialog.ts'
 import {
-  createUpdateNoticeWindow,
+  createUpdateNoticePresenter,
   type NoticeWindowLike,
   type NoticeWindowOptions,
-  type UpdateNoticeWindowHandle,
-} from './update-notice-window.ts'
-import type { UpdateNoticePayload } from './update-notice-dialog.ts'
-import { attachUpdateNoticeRpc } from './update-notice-rpc.ts'
-import { attachProfileOpRpc } from './profile-op-rpc.ts'
-import type { UpdateNoticeCheckResult } from './update-notice-check.ts'
-import { confirmModalScript } from './input-modal.ts'
-import { navRulesFor } from '../shared/nav-rules.ts'
+} from './windows/update-notice-window.ts'
+import type { UpdateNoticePayload } from './windows/update-notice-dialog.ts'
+import { createProfileSessions } from './windows/profile-session.ts'
+
+import { attachProfileOpRpc } from './commands/profile-op-rpc.ts'
+import type { UpdateNoticeCheckResult } from './commands/update-notice-check.ts'
+import { confirmModalScript } from './windows/input-modal.ts'
+import { navRulesFor } from '../shared/net/nav-rules.ts'
 import {
   defaultWindowFrame,
-  frameForPersist,
   readWindowFrame,
   readWindowMaximized,
   sanitizeFrame,
   writeWindowFrame,
   type DisplayBounds,
   type WindowFrame,
-} from './window-state.ts'
-import { loadSettings } from './settings-store.ts'
-import { applyCdpDebugPort, closeDevToolsTarget, DEVTOOLS_DEFAULT_PORT, DEVTOOLS_PORT_OVERRIDE_ENV, devToolsMenuEnabled, isPortBindable, planDevToolsBoot, resolveDevToolsInspectorUrl } from './devtools.ts'
-import { resolveRenderBackend } from './render-backend.ts'
-import { activeProfile, type DesktopSettings } from '../shared/settings.ts'
-import { closeAction, offsetFrame, planWindowOpen, windowKey } from '../shared/window-targets.ts'
-import type { LaneForwarder } from './lane-forwarder.ts'
-import { createNotifier, type Notifier } from './notifications.ts'
-import { showWindowsBalloon } from './notify-win.ts'
-import { SCENARIO } from '../shared/notify-policy.ts'
+} from './windows/window-state.ts'
+import { loadSettings } from './platform/settings-store.ts'
+import { applyCdpDebugPort, closeDevToolsTarget, DEVTOOLS_DEFAULT_PORT, DEVTOOLS_PORT_OVERRIDE_ENV, devToolsMenuEnabled, isPortBindable, planDevToolsBoot, resolveDevToolsInspectorUrl } from './windows/devtools.ts'
+import { resolveRenderBackend } from './windows/render-backend.ts'
+import { activeProfile, type DesktopSettings } from '../shared/settings/settings.ts'
+import { evaluateRuntimeUpdates } from '../shared/runtime/runtime-update.ts'
+import type { CatalogEntry } from '../shared/runtime/runtime-catalog.ts'
+import { closeAction, offsetFrame, windowKey } from '../shared/app/window-targets.ts'
+
+import { createNotifier, type Notifier } from './notify/notifications.ts'
+import { showWindowsBalloon } from './notify/notify-win.ts'
+import { SCENARIO } from '../shared/notify/notify-policy.ts'
 import { dirname, join } from 'node:path'
 import { existsSync } from 'node:fs'
-import { createRegisterCli } from './register-cli.ts'
-import { registerTrayLabel } from '../shared/register-cli.ts'
+import { createRegisterCli } from './commands/register-cli.ts'
+import { registerTrayLabel } from '../shared/app/register-cli.ts'
 
 // 打包态主进程 stdout 无人接：把 console.* 同时 tee 进 shell.log（#80 取证缺口）。
 installShellConsoleTee()
@@ -125,51 +126,7 @@ if (platform === 'win32') ensureWindowsNotifyIdentity({ log: (line) => console.l
 // 系统语言：CEF 默认 en-US，页面语言跟着错；旧壳（WKWebView）是天然跟随系统的。
 const locale = await systemLocale()
 // 页面外链与右键菜单都要主进程出面：CEF 不会自己弹菜单，也不接管 window.open。
-// 回调注册在窗口之前，闭包里的 mainWindow 在窗口建好后才有值。
-/** 每个 profile 一份窗口 + 一份服务面（旧壳 `desktop/src-tauri/src/ui/multiwin.rs` 的等价物：
- *  每 profile 至多一窗；关窗只销毁 UI、实例继续跑；主窗关窗回托盘）。 */
-interface ProfileWindow {
-  profile: string
-  window: BrowserWindow
-  /** 该窗的 CEF 浏览器就绪（dom-ready 之前 loadURL/executeJavascript 会打到空 ref） */
-  ready: boolean
-}
-const windows = new Map<string, ProfileWindow>()
-const services = new Map<string, ShellService>()
-/** F8：正在「退出（停止实例）」的 profile——will-close 对它们放行真关窗 */
-const stoppingProfiles = new Set<string>()
-/** D5：首次关窗回托盘提示过一次的 profile（进程生命周期内一次） */
-const trayHintShown = new Set<string>()
-/** 最近聚焦的窗口 profile；托盘「显示/隐藏窗口」作用在它身上（旧壳 focused_window_label）。 */
-let focusedProfile: string | null = null
-/** #115：此刻真正在前台的窗口（失焦 / 隐藏 / 关窗即清空）——通知的「聚焦不打扰」看它。 */
-const windowFocus = createWindowFocusTracker()
-
-/**
- * #115：这个 profile 的窗口此刻是否真的挡在用户眼前——焦点记账 + 可见 / 最小化兜底。
- * 焦点是事件记的账；隐藏回托盘、最小化到 Dock 这类路径平台不一定补 blur，所以再兜一道：
- * 宁可多投一次通知，也不要对着眼前的窗口不响。
- */
-function windowInFront(profile: string): boolean {
-  if (!windowFocus.isFocused(profile)) return false
-  const entry = windows.get(profile)
-  if (entry === undefined) return false
-  try {
-    return entry.window.isVisible() && !entry.window.isMinimized()
-  } catch {
-    // 窗口正在销毁时原生查询可能抛：当作不在前台（宁可多投一次）
-    return false
-  }
-}
-
-/** #115：壳级通知（启动失败 / 服务健康 / 托盘提示）没有 profile 归属——最近聚焦的窗口在前台就不打扰。 */
-function anyWindowInFront(): boolean {
-  const profile = windowFocus.current()
-  return profile !== null && windowInFront(profile)
-}
-let mainWindow: BrowserWindow | null = null
-/** 主窗的 CEF 浏览器就绪（dom-ready）之前，`loadURL` 与 `executeJavascript` 都会打到空 ref 上 */
-let mainWindowReady = false
+// 回调注册在窗口之前，闭包里的主窗引用在建窗后才有值（bootSession/sessions 派生）。
 
 // ---- 托盘 + 窗口几何：关窗回托盘、Dock 再激活、位置尺寸记忆 ----
 // 旧 Tauri 壳用 tauri-plugin-window-state + tauri-plugin-single-instance；Electrobun 两样都没有。
@@ -227,8 +184,8 @@ const guests = createGuestManager({
   core: nativeCore.core,
   // guest 挂在发起调用的那个窗口上（多窗口下天然跟随宿主窗口）。
   createView: ({ partition, caller }) => {
-    const hit = windows.get(caller.profile)
-    if (hit === undefined) return null
+    const hit = sessions.get(caller.profile)
+    if (hit === undefined || hit.window === null) return null
     const view = new BrowserView({
       url: GUEST_DEFAULT_URL,
       renderer,
@@ -246,8 +203,8 @@ const guests = createGuestManager({
   },
   // 状态推送：dsh 对 <webview> 是同步拉取，所以壳把快照 eval 回宿主页面（旧壳同款）。
   pushToHost: (caller, script) => {
-    const hit = windows.get(caller.profile)
-    if (hit === undefined || !hit.ready) return
+    const hit = sessions.get(caller.profile)
+    if (hit === undefined || hit.window === null || !hit.state().ready) return
     try {
       hit.window.webview?.executeJavascript(script)
     } catch (error) {
@@ -255,11 +212,53 @@ const guests = createGuestManager({
     }
   },
 })
+// ---- C1 ProfileSession（#188 拍板 / #179 实施）----
+// 原 11 张 per-profile 散表（windows/services/stoppingProfiles/trayHintShown/
+// pendingStartMaximized/frameSaveTimers/heal 三表/焦点记账）收口进 profile-session.ts；
+// 壳侧只保留组合面：托盘/菜单/设置/启动界面/单实例/退出。此后新增一类 per-profile
+// 状态只能加在 profile-session.ts（record 字段 + dispose 顺序）。
+const sessions = createProfileSessions({
+  instanceProfile,
+  createService: (profile) => startService(serviceOptionsFor(profile)),
+  createWindow: (profile, svc) => createProfileWindow(profile, svc),
+  closePolicy: (profile, win) => performClosePolicy(win, profile),
+  isQuitting: () => quitting,
+  onQuitRequested: () => void shutdown(),
+  windowStateFile: windowStateFileOf,
+  workArea: workAreaForFrame,
+  onDomReady: () => {
+    // 主窗已出画面：拆掉启动界面（页面自己也等 __DSH_BOOT_READY__，这里只负责别让两个窗口并存）
+    try {
+      splash?.close()
+    } catch {}
+    splash = null
+    windowVisible = true
+  },
+  onWindowsChanged: () => void refreshTray(),
+  views,
+  guests,
+})
+
+/** 启动 profile 的 session：主窗/主服务面的派生口径（替代原 mainWindow/mainWindowReady）。 */
+function bootSession() {
+  return sessions.get(instanceProfile)
+}
+
+/**
+ * #115：这个 profile 的窗口此刻是否真的挡在用户眼前——焦点记账 + 可见/最小化兜底
+ * （账在 profile-session.ts；服务面回调按 profile 判「聚焦不打扰」仍从这里走）。
+ */
+function windowInFront(profile: string): boolean {
+  return sessions.inFront(profile)
+}
+
+/** #115：壳级通知（启动失败/服务健康/托盘提示）没有 profile 归属——最近聚焦的窗口在前台就不打扰。 */
+function anyWindowInFront(): boolean {
+  return sessions.anyInFront()
+}
 let windowVisible = false
 /** 隐藏回托盘前窗口是否处于最大化（ffi hide/show 往返会丢最大化，show 前补回，#50 验证反馈）。 */
 let hiddenWhileMaximized = false
-/** #73：启动要恢复最大化的窗——建窗/dom-ready 的 maximize 在 Windows 实测不稳，改在首次 focus 断言补齐。 */
-const pendingStartMaximized = new Set<string>()
 let quitting = false
 /** 关窗后是否只是隐藏：没有托盘（原生层没建成）时隐藏就叫不回来了，那时关窗等于退出。 */
 const closeToTray = (): boolean => tray !== null
@@ -323,43 +322,6 @@ function restoreWindowFrame(profile: string = instanceProfile): WindowFrame {
   return saved
 }
 
-/** 拖动/缩放会连续触发：合并 400ms 只写一次（D3：按 profile 各写各的文件） */
-const frameSaveTimers = new Map<string, ReturnType<typeof setTimeout>>()
-function scheduleFrameSave(win: BrowserWindow, profile: string): void {
-  const existing = frameSaveTimers.get(profile)
-  if (existing !== undefined) clearTimeout(existing)
-  frameSaveTimers.set(
-    profile,
-    setTimeout(() => {
-      frameSaveTimers.delete(profile)
-      try {
-        saveFrameNow(win, profile)
-      } catch (error) {
-        console.warn(`[shell] 窗口几何落盘失败：${String(error)}`)
-      }
-    }, 400),
-  )
-}
-/**
- * 几何立即落盘（scheduleFrameSave 定时器 / 关窗 flush / 退出 flush 三处共用）：
- * 最大化态 = 原生旗标 ∨ 几何推导——后者兜住旗标未落的窗口（启动期、系统贴靠
- * 等场景），只记旗标的话重启就丢最大化态。
- */
-function saveFrameNow(win: BrowserWindow, profile: string): void {
-  const frame = win.getFrame()
-  const native = win.isMaximized()
-  const maximized = native || deriveMaximized(frame, workAreaForFrame(frame), native)
-  const rounded: WindowFrame = {
-    x: Math.round(frame.x),
-    y: Math.round(frame.y),
-    width: Math.round(frame.width),
-    height: Math.round(frame.height),
-  }
-  // #73 回归：最大化帧不是还原帧——最大化收场时沿用上一次的常规帧（frameForPersist），
-  // 否则下次 SW_RESTORE 会落到工作区大小，窗口态被几何判定误读成最大化。
-  const file = windowStateFileOf(profile)
-  writeWindowFrame(file, frameForPersist(rounded, maximized, readWindowFrame(file)), maximized)
-}
 
 /**
  * 关窗策略（will-close / RPC window_close / 兑底端点三处共用，#50 验证反馈）：
@@ -368,14 +330,13 @@ function saveFrameNow(win: BrowserWindow, profile: string): void {
 function performClosePolicy(win: BrowserWindow, profile: string): 'hidden' | 'quit' | 'close' {
   if (closeAction(profile, instanceProfile) === 'hide-to-tray' && closeToTray()) {
     // D5：首次关窗回托盘时提示一次（旧壳关窗提示的等价物；用户知道了就不再弹）
-    if (!trayHintShown.has(profile)) {
-      trayHintShown.add(profile)
+    if (sessions.onceTrayHint(profile)) {
       notifier.notify(SCENARIO.WINDOW_LIFECYCLE, '窗口已最小化到托盘，点托盘图标可找回。')
     }
     hiddenWhileMaximized = win.isMaximized()
     win.hide()
     windowVisible = false
-    windowFocus.release(profile)
+    sessions.releaseFocus(profile)
     refreshTray()
     return 'hidden'
   }
@@ -392,7 +353,7 @@ const TRAY_CATALOG_TTL_MS = 10 * 60_000
  * 手动检查要绕过它强制真检，所以这里另存一份不带 TTL 的结果。
  */
 let trayUpdateCheck: TrayUpdateCheck | null = null
-let catalogCache: { at: number; entries: TrayCatalogItem[] } | null = null
+let catalogCache: { at: number; entries: CatalogEntry[] } | null = null
 let catalogPending = false
 
 function ensureCatalog(): void {
@@ -433,31 +394,43 @@ function runtimeLabelOf(snapshot: RuntimeSnapshot): string {
 
 /** 面向托盘与设置面板的那份服务面：最近聚焦窗口的；没有就退回启动 profile 的。 */
 function uiService(): ShellService {
-  const focused = focusedProfile === null ? undefined : services.get(focusedProfile)
-  return focused ?? service
+  const focused = sessions.focused()?.service
+  if (focused != null) return focused
+  const boot = bootSession()?.service
+  if (boot == null) throw new Error('启动服务面尚未就绪')
+  return boot
 }
 
 function trayState(): TrayState {
   const settings = uiService().settings()
   const snapshot = uiService().runtime()
   const download = downloadStatusSafe()
+  // 判定层候选（#186/#189）：托盘菜单只消费归一候选，不再自己并集去重；不额外拉网
+  //（目录用 10 分钟 TTL 的 catalogCache，miss 时给空——ensureCatalog 会在后台补）。
+  const runtimeReport = evaluateRuntimeUpdates({
+    running: snapshot.activeVersion,
+    builtin: snapshot.builtinVersion,
+    catalog: catalogCache?.entries ?? [],
+    installed: snapshot.installed,
+    source: settings.runtimeSource,
+  })
   return {
     // 可见性是「当前那个窗口」的：多窗口下托盘的显示/隐藏只动一个
     windowVisible: focusedWindow()?.isVisible() ?? windowVisible,
     profile: uiService().paths.profile,
     // 多 profile：菜单按 home 下的 profile 目录列，点了开/聚焦那一份窗口
     profiles: listProfiles(dshHome(), instanceProfile),
-    openWindows: [...windows.keys()],
+    openWindows: sessions.openProfiles(),
     profileRows: listProfiles(dshHome(), instanceProfile).map((profile) => {
-      const svc = services.get(profile)
-      const origin = svc?.state.origin ?? ''
+      const row = sessions.get(profile)
+      const origin = row?.service?.state.origin ?? ''
       const port = Number(origin.split(':').pop() ?? '') || null
       return {
         profile,
-        open: windows.has(profile),
-        running: (svc?.state.hostPid ?? 0) > 0,
+        open: row?.state().windowOpen ?? false,
+        running: (row?.service?.state.hostPid ?? 0) > 0,
         port,
-        focused: focusedProfile === profile,
+        focused: sessions.focused()?.profile === profile,
       }
     }),
     hostRunning: uiService().state.hostPid > 0,
@@ -470,7 +443,8 @@ function trayState(): TrayState {
     runningVersion: snapshot.activeVersion,
     selected: settings.dshRuntime ?? null,
     installed: snapshot.installed.map((entry) => entry.version),
-    catalog: catalogCache?.entries ?? [],
+    candidates: runtimeReport.candidates,
+    builtinDescriptor: runtimeReport.builtinDescriptor,
     downloading: download.active && download.version !== '' ? download.version : null,
     remoteAddr: settings.remoteAddr ?? null,
     remoteList: settings.remoteList,
@@ -486,6 +460,10 @@ function refreshTray(): void {
   tray.setState(trayState())
   // 顺带把「有哪些版本可下载」拿回来（有缓存/正在拉就跳过，不阻塞窗口操作）
   ensureCatalog()
+  // 窗口集合可能变了：重跑一次窗口图标（幂等、有缓存，覆盖后建的主窗/弹窗；#203 二轮）
+  if (!noWindow && process.platform === 'win32') {
+    applyWindowsIcon(shellLogLine, windowIconCandidates(dirname(process.execPath)))
+  }
   // 注册状态同理：TTL 内直接用缓存，绝不在菜单构建里同步 spawn 登录 shell
   void registerCli.refresh().then(() => {
     if (tray !== null) tray.setState(trayState())
@@ -493,91 +471,9 @@ function refreshTray(): void {
 }
 
 /**
- * #80：THICKFRAME 无边框窗在「最大化→最小化→恢复」往返可能被系统按隐形缩放边框
- * 外扩落位（顶部越出屏幕）。只读自检：仍处最大化但帧相对所在显示器工作区外扩超
- * 容差 → 判定落位损坏 → 纯原生 unmaximize()+maximize() 重摆（零自算坐标，落位由
- * Windows 重算，与首次最大化同一条已验证路径）。Win+方向键半屏贴靠 IsZoomed=false
- * 天然不触发。触发面：focus + resize（去抖）+ focus 后延迟复查——实机证明落位
- * 外扩在恢复动画完成后才定格，focus 当拍检查经常早于损坏成形；resize 则在最终
- * 摆位后必到。每次判定都落日志（含 workArea 取不取得到），实机排查有据可查。
- * 三轮重开（双屏 2K 越屏依旧）定位：前两轮的损坏判定错用了状态推导的
- * deriveMaximized(frame, workArea, true)——旗标为真它恒真，判定永远「落位正常」，
- * 自愈从未触发（4K 屏系统不走外扩补偿，死代码因此在前两轮实机验证中没现形）。
- * 改用专用损坏判定 isMaximizedPlacementDamaged（容差 4px：THICKFRAME 边框 96DPI
- * 就有 8px/边，8px 容差会把恰好 8px 的外扩当正常吃掉），并加同段最大化期重摆
- * 上限（HEAL_MAX_REPLACES）防「重摆→resize→再检查」循环闪窗。
+ * #80 最大化落位自检（heal）：触发面（focus/resize 去抖 + 延迟复查）、损坏判定与重摆
+ * 上限都已收口进 profile-session.ts（C1，#179）——这里不再有 per-profile 计时器表。
  */
-const healCheckTimers = new Map<string, ReturnType<typeof setTimeout>>()
-/** 延迟复查的登记版计时器：可被重摆取消顺延（裸 setTimeout 不受管，会在重摆动画
- *  中途开火——实机「恢复时抖几下」的来源）。 */
-const healRecheckTimers = new Map<string, ReturnType<typeof setTimeout>>()
-/** 同段最大化期已原生重摆次数（healVerdict 的计数存储）。只在最大化期结束（旗标
- * 落下）或窗口销毁时清零；判定 clean 不重置——若 damaged↔clean 交替刷新预算，
- * 上限就挡不住「重摆→动画中途量到好帧→再损坏」的循环。 */
-const healReplaces = new Map<string, number>()
-/** 去抖窗口：resize 连发期间只做最后一次检查，重摆引发的 resize 不叠加。 */
-const HEAL_DEBOUNCE_MS = 250
-/** 延迟复查间隔：给恢复/重摆动画留出定格时间。 */
-const HEAL_RECHECK_DELAY_MS = 350
-
-function healMaximizedPlacement(win: BrowserWindow, profile: string, reason: string): void {
-  if (process.platform !== 'win32') return
-  if (!win.isMaximized()) {
-    healReplaces.delete(profile) // 旗标落下 = 一段最大化期结束，重摆计数清零
-    return
-  }
-  const frame = win.getFrame()
-  const workArea = workAreaForFrame(frame)
-  if (workArea === null) {
-    shellLogLine(`[shell] #80 heal 检查（${reason}）：workArea 取不到（Screen 无显示器数据），跳过`)
-    return
-  }
-  const verdict = healVerdict(isMaximizedPlacementDamaged(frame, workArea), healReplaces.get(profile) ?? 0)
-  if (verdict === 'clean') {
-    shellLogLine(`[shell] #80 heal 检查（${reason}）：落位正常，不干预 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}`)
-    return
-  }
-  if (verdict === 'exhausted') {
-    shellLogLine(`[shell] #80 heal 检查（${reason}）：已重摆 ${HEAL_MAX_REPLACES} 次仍外扩，停止防循环 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}（重摆也落不好，日志留给上游 WM_NCCALCSIZE 根治）`)
-    return
-  }
-  healReplaces.set(profile, (healReplaces.get(profile) ?? 0) + 1)
-  shellLogLine(
-    `[shell] #80 heal 检查（${reason}）：落位外扩 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}，原生重摆（第 ${healReplaces.get(profile)} 次）`,
-  )
-  win.unmaximize()
-  win.maximize()
-  // 重摆会引发 resize 与动画：作废在途的去抖检查与延迟复查，重摆落定后重排一次
-  // 复查——后续判定全部锚在最近一次摆位动作之后，不在动画中途开火（实机抖动修复）。
-  const pendingDebounce = healCheckTimers.get(profile)
-  if (pendingDebounce !== undefined) {
-    clearTimeout(pendingDebounce)
-    healCheckTimers.delete(profile)
-  }
-  scheduleHealRecheck(win, profile, '重摆后复查')
-}
-
-/** resize/focus 入口的去抖包装：同窗连发只留最后一次。 */
-function scheduleHealCheck(win: BrowserWindow, profile: string, reason: string): void {
-  if (process.platform !== 'win32') return
-  const previous = healCheckTimers.get(profile)
-  if (previous !== undefined) clearTimeout(previous)
-  healCheckTimers.set(profile, setTimeout(() => {
-    healCheckTimers.delete(profile)
-    healMaximizedPlacement(win, profile, reason)
-  }, HEAL_DEBOUNCE_MS))
-}
-
-/** 延迟复查的登记版：重摆时会被取消顺延，复查永远落在最近一次摆位动作之后。 */
-function scheduleHealRecheck(win: BrowserWindow, profile: string, reason: string): void {
-  if (process.platform !== 'win32') return
-  const previous = healRecheckTimers.get(profile)
-  if (previous !== undefined) clearTimeout(previous)
-  healRecheckTimers.set(profile, setTimeout(() => {
-    healRecheckTimers.delete(profile)
-    healMaximizedPlacement(win, profile, reason)
-  }, HEAL_RECHECK_DELAY_MS))
-}
 
 function showMainWindow(): void {
   const win = focusedWindow()
@@ -600,19 +496,15 @@ function hideMainWindow(): void {
   hiddenWhileMaximized = win.isMaximized()
   win.hide()
   windowVisible = false
-  windowFocus.release(focusedProfile ?? instanceProfile)
+  sessions.releaseFocus(sessions.focused()?.profile ?? instanceProfile)
   refreshTray()
 }
 
 // ---- 多窗口：每 profile 一份服务面 + 一个窗口（旧壳 `ui/multiwin.rs` 的等价物）----
 
-/** 当前那个窗口：最近聚焦的；没焦点记录就回主窗。 */
+/** 当前那个窗口：最近聚焦的；没焦点记录就回主窗（口径收口在 profile-session.ts）。 */
 function focusedWindow(): BrowserWindow | null {
-  if (focusedProfile !== null) {
-    const hit = windows.get(focusedProfile)
-    if (hit !== undefined) return hit.window
-  }
-  return mainWindow
+  return sessions.focusedWindow()
 }
 
 /**
@@ -623,16 +515,6 @@ function focusedWindowState(): WindowMaxState {
   const win = focusedWindow()
   if (win === null) return { maximized: false }
   return windowMaxState(win, { workArea: workAreaForFrame })
-}
-
-/** 起/profile 复用一份服务面：每份服务面 = 一个 dsh 宿主 + 一个 loopback origin。 */
-async function ensureService(profile: string): Promise<ShellService> {
-  const existing = services.get(profile)
-  if (existing !== undefined) return existing
-  console.log(`[shell] 起服务面：profile = ${profile}`)
-  const started = await startService(serviceOptionsFor(profile))
-  services.set(profile, started)
-  return started
 }
 
 /** 服务面选项：除了 profile 与状态文件，其余回调全是壳侧共用的那几个。 */
@@ -693,12 +575,12 @@ function serviceOptionsFor(profile: string): ServiceOptions {
         toggleWindowMaximize(win, { workArea: workAreaForFrame })
       } else {
         // #50 验证反馈：兑底端点的关窗也走统一策略（要拿到 profile 才能判主/副窗）
-        const focusedEntry = [...windows.values()].find((entry) => entry.window === win)
-        if (focusedEntry === undefined) {
+        const focusedSession = sessions.byWindow(win)
+        if (focusedSession === undefined) {
           win.close()
           return
         }
-        const closePolicyAction = performClosePolicy(win, focusedEntry.profile)
+        const closePolicyAction = performClosePolicy(win, focusedSession.profile)
         if (closePolicyAction === 'close') win.close()
         else if (closePolicyAction === 'quit') void shutdown()
       }
@@ -752,7 +634,7 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     chooseDownloadDir: pickDownloadDirImpl,
     // 页面请求关窗（`close_current_window` / `exit_window_instance`）：关它自己那个窗口
     onCloseWindow: () => {
-      windows.get(profile)?.window.close()
+      sessions.get(profile)?.closeWindow()
     },
     // 启动确认选了别的 profile：#82 的旧行为是「用它重启」；新壳每 profile 一份服务面，所以是开它那份窗口
     onOpenProfileWindow: async (target) => {
@@ -763,7 +645,7 @@ function serviceOptionsFor(profile: string): ServiceOptions {
 }
 
 function originOf(profile: string): string {
-  return services.get(profile)?.state.origin ?? ''
+  return sessions.originOf(profile)
 }
 
 /**
@@ -796,15 +678,13 @@ async function pickSoundFileImpl(): Promise<string | null> {
 
 /** 宿主重启后把对应窗口刷回同一个页面 origin。 */
 function reloadWindow(profile: string, url: string): void {
-  const hit = windows.get(profile)
-  if (hit === undefined || !hit.ready) return
-  hit.window.webview?.loadURL(url)
+  sessions.get(profile)?.reload(url)
 }
 
-/** 建一个 profile 窗口并接上壳侧语义（关窗、聚焦、几何）；DOM 事件与旧单窗实现同一套。 */
+
+/** 建一个 profile 窗口并接上 RPC（#50）；事件接线与窗口期状态归 profile-session.ts（#179）。 */
 async function createProfileWindow(profile: string, svc: ShellService): Promise<BrowserWindow> {
-  const isBoot = profile === instanceProfile
-  const index = windows.size
+  const index = sessions.openProfiles().length
   const frame = index === 0 ? restoreWindowFrame(profile) : offsetFrame(restoreWindowFrame(profile), index)
   // 每视图授权 + 官方 RPC（#50）：token 一枚两用——preload 注给页面（HTTP 兑底用），
   // 整份 grant 闭进 defineRPC（漏斗里做每视图白名单）。
@@ -829,7 +709,7 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
   win = new BrowserWindow({
     // D1：原生层同步评估的导航守卫——白名单页面 origin，其余导航被拦（外链交给 open_external）
     navigationRules: navRulesFor({ origin: svc.state.origin }),
-    title: isBoot ? APP_NAME : `${APP_NAME} · ${profile}`,
+    title: profile === instanceProfile ? APP_NAME : `${APP_NAME} · ${profile}`,
     url: svc.state.pageUrl,
     renderer,
     preload: bootPreloadScript(locale, platform, svc.state.origin, grant.token),
@@ -838,154 +718,18 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
     titleBarStyle: 'hiddenInset',
     frame,
   })
-  // D3 反馈：上次是最大化收场的，这次直接最大化（几何记忆只当还原帧用）。
-  // Windows 实测：从未显示过的窗上 maximize() 不落 WS_MAXIMIZE 旗标（#73）。
-  // 收敛口径（收 hack 轮）：建窗时尽力而为，唯一断言点=首次 focus（届时必然可见）；
-  // dom-ready 二次补齐与定时补推两层已删——竞态由「focus 断言 + 客户端首查 window_get_state」闭环。
-  const startMaximized = readWindowMaximized(windowStateFileOf(profile))
-  if (startMaximized) {
-    ensureNativeMaximizeStyles()
-    win.maximize()
-    pendingStartMaximized.add(profile)
-  }
-  windows.set(profile, { profile, window: win, ready: false })
-  focusedProfile = profile
-  if (isBoot) mainWindow = win
   console.log(`[shell] 建窗：${windowKey(profile)}（${svc.state.pageUrl}）`)
-  win.on('dom-ready', () => {
-    const hit = windows.get(profile)
-    if (hit !== undefined) hit.ready = true
-    if (isBoot) {
-      // 主窗已出画面：拆掉启动界面（页面自己也等 __DSH_BOOT_READY__，这里只负责别让两个窗口并存）
-      try {
-        splash?.close()
-      } catch {}
-      splash = null
-      mainWindowReady = true
-    }
-    windowVisible = true
-    // 启动最大化不在 dom-ready 补齐（收 hack 轮已删）：旗标由建窗时立起、或首次 focus 断言立起；
-    // 标题栏随后主动查 window_get_state 即拿到真值（#144：状态推送整条已删，此处无补推可做）。
-    refreshTray()
-  })
-  win.on('focus', () => {
-    focusedProfile = profile
-    // #115：焦点记账——通知的「聚焦不打扰」靠它；这条日志也是实机自证（聚焦时不弹）
-    windowFocus.focus(profile)
-    console.log(`[shell] 窗口聚焦：${profile}`)
-    // lane 稳定接入点跟随焦点（旧壳 forwarder.rs：新连接落焦点实例，存量不动）。
-    // #73：启动恢复最大化断言（唯一断言点）——Windows 上从未显示的窗 maximize 可能不落
-    // 旗标（建窗时试过不稳），首次获得焦点时窗口必然已可见，再补一次；
-    // 断言成功即清 pending，之后不再干预。
-    // #144：原先断言成功后紧跟着一次 notifyWindowState（推标题栏重查图标）——推送端整条已删，
-    // 标题栏改成自己查 window_get_state，所以这里只剩「立住旗标」这一步。
-    // delete 必须留着：flag 一旦不清，用户把窗还原后每次 focus 都会被重新拉最大化。
-    if (pendingStartMaximized.has(profile)) {
-      if (!win.isMaximized()) {
-        ensureNativeMaximizeStyles()
-        win.maximize()
-      }
-      if (win.isMaximized()) pendingStartMaximized.delete(profile)
-    }
-    // #80 自检排在启动补 maximize 之后：去抖 250ms/复查 350ms 都落在补断言完成后，
-    // 不会量到启动最大化动画中途的还原帧（与 #73 收敛方向一致）。
-    scheduleHealCheck(win, profile, 'focus')
-    // 实机证据：落位外扩在恢复动画完成后才定格，focus 当拍检查常早于损坏成形，
-    // 延迟复查一次兜住。
-    scheduleHealRecheck(win, profile, 'focus+350ms')
-    // 转发器挂在先起的那份服务面上，这里找到它再指目标。
-    focusedLaneForwarder()?.setTarget(services.get(profile)?.state.lanePort ?? 0)
-    refreshTray()
-  })
-  win.on('blur', () => {
-    // #115：失焦就不再算「在前台」——通知恢复照常投递（少打扰只限窗口在眼前时）
-    windowFocus.blur(profile)
-    console.log(`[shell] 窗口失焦：${profile}`)
-  })
-  // 关窗策略三处共用 performClosePolicy；原生层会先问 `will-close`，回 response.allow=false 就不关（旧 Tauri 壳同行为）
-  win.on('will-close', (event) => {
-    if (quitting) return
-    // F8：「退出（停止实例）」主动销毁窗口时不拦截（stoppingProfiles 由 stopProfileFromTray 置位）
-    if (stoppingProfiles.has(profile)) return
-    const action = performClosePolicy(win, profile)
-    if (action === 'hidden') {
-      ;(event as { response?: unknown }).response = { allow: false }
-      console.log(`[shell] 关窗回托盘（${profile} 窗口隐藏，进程继续）`)
-      return
-    }
-    if (action === 'quit') {
-      console.log('[shell] 关窗（无托盘）：直接退出')
-      void shutdown()
-      return
-    }
-    console.log(`[shell] 关窗（${profile}）：只销毁窗口，实例继续跑`)
-  })
-  win.on('close', () => {
-    // 真销毁前把挂起的几何写盘（去抖定时器等不到了），最大化态一并记住
-    const pending = frameSaveTimers.get(profile)
-    if (pending !== undefined) {
-      clearTimeout(pending)
-      frameSaveTimers.delete(profile)
-      try {
-        saveFrameNow(win, profile)
-      } catch {}
-    }
-    windows.delete(profile)
-    // #80：heal 的挂起去抖/延迟复查定时器与重摆计数随窗口回收（迟到的定时器不再摸已销毁的窗）
-    const healTimer = healCheckTimers.get(profile)
-    if (healTimer !== undefined) clearTimeout(healTimer)
-    healCheckTimers.delete(profile)
-    const healRecheck = healRecheckTimers.get(profile)
-    if (healRecheck !== undefined) clearTimeout(healRecheck)
-    healRecheckTimers.delete(profile)
-    healReplaces.delete(profile)
-    // 窗口没了就撤销它的视图 token（旧壳的 capability 是静态文件，这里跟着窗口走）
-    views.revokeLabel(windowKey(profile))
-    // 窗口里的 guest 子 webview 跟着窗口一起回收（否则会留在窗口之外无法关闭）
-    const released = guests.releaseHost(windowKey(profile))
-    if (released > 0) console.log(`[shell] 随窗口回收 guest：${released} 个（${profile}）`)
-    // #115：窗口没了就不再算「在前台」（关闭不一定补 blur）
-    windowFocus.release(profile)
-    if (focusedProfile === profile) {
-      focusedProfile = null
-      focusedLaneForwarder()?.setTarget(0)
-    }
-    refreshTray()
-  })
-  // D3：每窗各自记几何（windowStateFileOf 按 profile 分文件；scheduleFrameSave 带目标文件）
-  // #80：resize 也纳入 heal 触发面——任务栏恢复的落位外扩在最终摆位后才定格，
-  // resize 必到且晚于损坏成形；与 focus 去抖共用一套计时器。
-  win.on('resize', () => scheduleHealCheck(win, profile, 'resize'))
-  win.on('resize', () => scheduleFrameSave(win, profile))
-  win.on('move', () => scheduleFrameSave(win, profile))
+  // 启动恢复最大化（D3/#73）、dom-ready/focus/blur/will-close/close/resize/move 的
+  // 事件接线与 per-profile 状态，全部在 profile-session.ts（C1，#179）。
   return win
 }
 
 /** 托盘「PROFILE 窗口」：已开就聚焦，没开就起一份服务面再开窗（旧壳 open_profile_window）。 */
 async function openProfileWindow(profile: string): Promise<void> {
-  const existing = windows.get(profile)
-  if (existing !== undefined && planWindowOpen(profile, [...windows.keys()]) === 'focus') {
-    existing.window.unminimize()
-    existing.window.show()
-    existing.window.activate()
-    focusedProfile = profile
-    refreshTray()
-    return
-  }
-  console.log(`[shell] 打开 profile 窗口：${profile}`)
-  try {
-    const svc = await ensureService(profile)
-    // #129：startService 只把壳的面立起来（#117），DSH 得显式拉。冷启动那条路上是
-    // ensureService 之后紧跟一句 ensureRunning()——这里以前漏了，于是新开一扇窗永远是
-    // 「页面 origin 起着、上游 127.0.0.1:端口上没人听」，页面卡在 Loading plugins。
-    await svc.ensureRunning()
-    await createProfileWindow(profile, svc)
-    refreshTray()
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    console.error(`[shell] 打开 profile 窗口失败（${profile}）：${message}`)
-    notifier.notify(SCENARIO.INSTANCE_LIFECYCLE, `打开 ${profile} 窗口失败：${message}`)
-  }
+  const result = await sessions.open(profile)
+  if (result.ok) return
+  console.error(`[shell] 打开 profile 窗口失败（${profile}）：${result.reason}`)
+  notifier.notify(SCENARIO.INSTANCE_LIFECYCLE, `打开 ${profile} 窗口失败：${result.reason}`)
 }
 
 let restartingShell = false
@@ -1002,10 +746,10 @@ async function restartDsh(): Promise<void> {
   if (restartingShell || quitting) return
   restartingShell = true
   try {
-    const restartProfiles = [...services.keys()]
+    const restartProfiles = sessions.serviceProfiles()
     const serviceCount = restartProfiles.length
     // #79：重启前开着的窗口就绪后原样重开；没开的不趁机弹窗（关窗回托盘的语义）
-    const reopenProfiles = [...windows.keys()]
+    const reopenProfiles = sessions.openProfiles()
     const showSplash = !noWindow && reopenProfiles.length > 0
     console.log(`[shell] 完整重启：DSH 树级重启 ${String(serviceCount)} 份服务面（壳与托盘保持不动）`)
     // ---- 阶段〇：关窗 → 重启界面（splash 复用冷启动通道：onStage/pushStage 写同一组模块变量）----
@@ -1029,32 +773,24 @@ async function restartDsh(): Promise<void> {
         splashReady = true
         pushStage()
       })
-      for (const profile of reopenProfiles) {
-        // 关窗绕过关窗策略（回托盘/退进程的判断是给用户手关用的；重启关窗是壳自己的动作）
-        stoppingProfiles.add(profile)
-        windows.get(profile)?.window.close()
-      }
-      // close 事件异步落账（windows Map 清理在 close 回调里），等一拍再动服务面
-      await Bun.sleep(100)
-      for (const profile of reopenProfiles) stoppingProfiles.delete(profile)
+      // 关窗绕过关窗策略（回托盘/退进程的判断是给用户手关用的；重启关窗是壳自己的动作）——
+      // 置位/关窗/等一拍/复位的时序收口在 profile-session.ts（C1，#179）
+      await sessions.closeWindowsForRestart(reopenProfiles)
       windowVisible = false
     }
     // ---- 阶段一：树级停止（host.stop 树级契约：伴生进程随宿主退场，树灭确认后才返回）----
     await Promise.all(
       restartProfiles.map(async (profile) => {
-        const svc = services.get(profile)
-        if (svc === undefined) return
         try {
-          await svc.stop()
+          await sessions.resetService(profile)
         } catch (error) {
           console.error(`[shell] 完整重启：停止服务面失败（${profile}）：${String(error)}`)
         }
-        services.delete(profile)
       }),
     )
     // ---- 阶段二：全新服务面（新宿主、新 token）；重启前开着的窗口原样重开 ----
     for (const profile of restartProfiles) {
-      const fresh = await ensureService(profile).catch(() => null)
+      const fresh = await sessions.ensureService(profile).catch(() => null)
       if (fresh === null) {
         console.error(`[shell] 完整重启：重启服务面失败（${profile}）`)
         continue
@@ -1069,15 +805,14 @@ async function restartDsh(): Promise<void> {
         continue
       }
       if (profile === instanceProfile) {
-        // 启动 profile 的服务面引用要换新（uiService/托盘/实例锁都以它为事实源）
-        service = fresh
+        // 启动 profile 的服务面引用换新（session record 持引用；实例锁回填 origin/页面）
         updateInstance(instanceFile, process.pid, { origin: fresh.state.origin, pageUrl: fresh.state.pageUrl })
       }
       if (reopenProfiles.includes(profile)) {
         // 重开（createProfileWindow：几何记忆/关窗策略/RPC 全套语义重新接上；
-        // 启动 profile 的窗口 dom-ready 会收掉重启界面并回填 mainWindowReady）
+        // 启动 profile 的窗口 dom-ready 会收掉重启界面（主窗就绪口径在 session record）
         try {
-          await createProfileWindow(profile, fresh)
+          await sessions.attachWindow(profile, fresh)
         } catch (error) {
           console.error(`[shell] 完整重启：重开窗口失败（${profile}）：${String(error)}`)
         }
@@ -1131,6 +866,12 @@ async function restartDesktopApp(): Promise<{ ok: boolean; reason?: string; mess
     isPackaged: build.isPackaged,
     launcherExe: resolution.launcherExe,
     pid: process.pid,
+    // #204/#209 口径修正：CEF 锁只在 mac（CEF 后端）存在，目录取实际安装根下的 CEF/（从 execPath
+    // 反推）；Windows 用 WebView2 无 CEF 锁；appSupportDir 拼默认安装根的旧写法废弃。
+    cefDir: build.isPackaged ? cefDirFromExecPath(process.execPath) : null,
+    // 中继全程日志落盘（stdio 全 ignore，Windows 排障全靠它，#209）：与 shell.log 同目录（dsh home，
+    // 用户实际找得到的地方）；appSupportDir 下的 Library 目录在 Windows 自定义安装时不存在。
+    logFile: join(dirname(resolveShellLogFile(process.env)), 'shell-relay.log'),
     onLog: (line) => console.log(line),
   })
   if (!plan.ok) {
@@ -1359,22 +1100,10 @@ function onTrayAction(action: TrayAction): void {
 
 /** F8：托盘「退出（停止实例）」——销毁那扇窗、停那份额服务面（旧壳 tray.rs:63-73） */
 async function stopProfileFromTray(profile: string): Promise<void> {
-  const svc = services.get(profile)
-  if (svc === undefined) {
-    console.log(`[shell] 退出实例：${profile} 没有在跑的服务面，忽略`)
-    return
-  }
-  console.log(`[shell] 退出实例：停止 ${profile} 的 dsh 与服务面`)
   // #142：服务面停了，它的提醒窗也别留着（否则会成为无主窗口）
-  updateNoticeWindows.get(profile)?.close()
-  stoppingProfiles.add(profile)
-  try {
-    windows.get(profile)?.window.close()
-    await svc.stop()
-  } finally {
-    stoppingProfiles.delete(profile)
-    void refreshTray()
-  }
+  updateNoticePresenter.close(profile)
+  // 关窗 → svc.stop → finally 复位并刷托盘：时序在 profile-session.ts 的 stop()
+  await sessions.stop(profile)
 }
 
 /** F9：托盘「新建 / 迁移 Profile…」——弹一张小表单窗，动作经官方原生桥交给服务面（#129） */
@@ -1425,73 +1154,56 @@ function openProfileOpDialog(kind: ProfileOpDialogKind): void {
  * 判定在服务面那边（#138 判定层 + 纯逻辑策略层），这里只把模型渲染出来开窗；
  * 「没什么可提醒」返回 false，服务面据此不写 lastNotified，下次还能再弹。
  */
-const updateNoticeWindows = new Map<string, UpdateNoticeWindowHandle>()
-/** 每 profile 一份的官方 RPC 实例（#139：动作走原生桥，html 文档发不出同源 fetch）。 */
-const updateNoticeRpcs = new Map<string, Promise<unknown>>()
+/**
+ * #140/#142：更新提醒窗（按 profile 一张：多 profile 各查各的，互不叠窗、互不记账）。
+ * C1（#179）把窗口表/RPC 表/组装逻辑收进 update-notice-window.ts 的 presenter；
+ * 壳侧只剩 show/close 两个动作。判定在服务面那边（#138），「没什么可提醒」返回 false，
+ * 服务面据此不写 lastNotified，下次还能再弹。
+ */
+const updateNoticePresenter = createUpdateNoticePresenter({
+  createNoticeWindow: class NoticeWindow implements NoticeWindowLike {
+    private readonly win: BrowserWindow
 
-function updateNoticeRpcFor(profile: string): Promise<unknown> {
-  const cached = updateNoticeRpcs.get(profile)
-  if (cached !== undefined) return cached
-  const created = attachUpdateNoticeRpc({
-    run: (op) => uiService().updateNoticeOp(op),
-    // 页面只读的下载进度：同一个单飞下载器的状态，壳算好百分比再递给页面。
-    downloadStatus: () => uiService().downloadStatus(),
-    // 页面量好的窗高（#130）：句柄按当前 x/y/宽度重设，只动高度；窗已关就安静跳过。
-    resize: (height) => updateNoticeWindows.get(profile)?.resize(height),
-    // 关窗（#160）：页面侧关不掉自己（html: 文档里的 window.close() 是空操作），由壳代劳。
-    // 句柄按 profile 存着，所以关的恒是发起请求的那扇窗；窗已关就安静跳过。
-    close: () => updateNoticeWindows.get(profile)?.close(),
-  })
-  updateNoticeRpcs.set(profile, created)
-  return created
-}
+    constructor(options: NoticeWindowOptions) {
+      this.win = new BrowserWindow(options)
+    }
+
+    close(): void {
+      this.win.close()
+    }
+
+    on(event: 'closed', handler: () => void): void {
+      this.win.on('closed', handler)
+    }
+
+    getFrame(): { x: number; y: number; width: number; height: number } {
+      return this.win.getFrame()
+    }
+
+    setFrame(x: number, y: number, width: number, height: number): void {
+      this.win.setFrame(x, y, width, height)
+    }
+  },
+  run: (op) => uiService().updateNoticeOp(op),
+  // 页面只读的下载进度：同一个单飞下载器的状态，壳算好百分比再递给页面。
+  downloadStatus: () => uiService().downloadStatus(),
+  refresh: () => void refreshTray(),
+  // #164：platform 决定提醒窗画不画标题带（win32/linux 画，窗高也相应加一段）。
+  renderer,
+  platform,
+})
 
 async function openUpdateNotice(profile: string, payload: UpdateNoticePayload): Promise<boolean> {
-  // rpc 实例得先挂上才有桥：它是懒的（动态 import electrobun），所以开窗这一步等它一下。
-  const rpc = await updateNoticeRpcFor(profile)
-  const existing = updateNoticeWindows.get(profile)
-  const handle =
-    existing ??
-    createUpdateNoticeWindow(
-      class NoticeWindow implements NoticeWindowLike {
-        private readonly win: BrowserWindow
-
-        constructor(options: NoticeWindowOptions) {
-          this.win = new BrowserWindow(options)
-        }
-
-        close(): void {
-          this.win.close()
-        }
-
-        on(event: 'closed', handler: () => void): void {
-          this.win.on('closed', handler)
-        }
-
-        getFrame(): { x: number; y: number; width: number; height: number } {
-          return this.win.getFrame()
-        }
-
-        setFrame(x: number, y: number, width: number, height: number): void {
-          this.win.setFrame(x, y, width, height)
-        }
-      },
-      // #164：platform 决定提醒窗画不画标题带（win32/linux 画，窗高也相应加一段）。
-      { renderer, rpc, platform },
-    )
-  updateNoticeWindows.set(profile, handle)
-  const win = handle.open(payload)
-  if (win === null) return false
-  win.on('closed', () => void refreshTray())
-  return true
+  // rpc 实例的懒挂载（动态 import electrobun）由 presenter 兜住：开窗这一步等它一下。
+  return updateNoticePresenter.show(profile, payload)
 }
 /** F12：页面内确认弹窗（旧壳 register/confirm_modal 的等价物）：注入 JS，等 POST 回填，180s 超时。 */
 let pendingInput: { flow: string; resolve: (value: string) => void } | null = null
 const INPUT_CONFIRM_TIMEOUT_MS = 180_000
 
 async function confirmModal(flow: string, title: string, body: string): Promise<boolean> {
-  const win = focusedWindow() ?? mainWindow
-  if (win === null || !mainWindowReady) {
+  const win = focusedWindow() ?? bootSession()?.window ?? null
+  if (win === null || bootSession()?.state().ready !== true) {
     console.log('[input] 主窗口不可用，确认弹窗直接按取消处理')
     return false
   }
@@ -1738,21 +1450,14 @@ const notifier: Notifier = createNotifier({
     // 连原生通道都没有的平台才退到 PowerShell 气泡（notify-win.ts）
     showWindowsBalloon({ title: options.title, body: options.body ?? '' })
   },
-  isFullscreen: () => mainWindow?.isFullScreen() ?? false,
+  isFullscreen: () => bootSession()?.window?.isFullScreen() ?? false,
   // #115：壳级通知（启动失败 / 服务健康 / 托盘提示）没有 profile 归属，任一 DSH 窗口在前台就不打扰
   isFocused: () => anyWindowInFront(),
   onLog: (line) => console.log(line),
 })
-let service: ShellService
-/** 找到持有 lane 转发器的那份服务面（多实例下只有先起的那份非 null）。 */
-const focusedLaneForwarder = (): LaneForwarder | null => {
-  for (const svc of services.values()) {
-    if (svc.laneForwarder !== null) return svc.laneForwarder
-  }
-  return null
-}
+let bootService: ShellService
 try {
-  service = await ensureService(instanceProfile)
+  bootService = await sessions.ensureService(instanceProfile)
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error)
   console.error(`[shell] 启动失败：${message}`)
@@ -1764,13 +1469,16 @@ try {
 }
 // ---- #117 冷启动编排：服务面 → 启动界面 → 托盘 → DSH → 桌面窗口 ----
 splash = startupSplash()
+// #203：第一个窗口（启动界面）一出就设窗口图标 —— 现存窗口 WM_SETICON 立即生效，
+// 窗口类默认改写让主窗/后续弹窗不再走系统白框回退；失败只记日志不拖累启动。
+if (!noWindow) applyWindowsIcon(shellLogLine, windowIconCandidates(dirname(process.execPath)))
 startupTray()
 
 // DSH。就这一步失败也**不退出**：托盘已经在了，状态行摆着原因，
 // 用户能换一个运行时版本再试，也能从托盘退出（旧行为是报错→30 秒→自己退掉，等于把自救入口没收走）。
 let dshStarted = true
 try {
-  await service.ensureRunning()
+  await bootService.ensureRunning()
 } catch (error) {
   dshStarted = false
   const message = error instanceof Error ? error.message : String(error)
@@ -1786,9 +1494,9 @@ try {
   }
 }
 if (dshStarted) {
-  console.log(`SHELL-READY ${JSON.stringify({ ...service.state, locale })}`)
+  console.log(`SHELL-READY ${JSON.stringify({ ...bootService.state, locale })}`)
   // 服务面就绪：把 origin/页面 URL 回填给实例锁，第二个壳才能激活这个窗口
-  updateInstance(instanceFile, process.pid, { origin: service.state.origin, pageUrl: service.state.pageUrl })
+  updateInstance(instanceFile, process.pid, { origin: bootService.state.origin, pageUrl: bootService.state.pageUrl })
   // P2 测试钩子（旧壳 lib.rs:744 _AUTO_QUIT）：服务面就绪后延迟自动退出，给 CI/探针一个干净的结束信号
   if ((process.env.DSH_DESKTOP_AUTO_QUIT ?? '') !== '') {
     const delayMs = Number(process.env.DSH_DESKTOP_AUTO_QUIT) > 0 ? Number(process.env.DSH_DESKTOP_AUTO_QUIT) : 3_000
@@ -1804,16 +1512,14 @@ if (dshStarted) {
 let startupBlocked = false
 if (!noWindow) {
   // 端口被陌生程序占着（service.state.blocked）或 DSH 根本没起来，都不进桌面窗口。
-  if (service.state.status !== 'running') {
+  if (bootService.state.status !== 'running') {
     // #117：失败原因已经在 ensureRunning 的 catch 里推过启动界面了，这里不重复推。
     startupBlocked = true
   }
   // 标题栏形态与旧壳对齐：macOS 保留原生红绿灯并叠在内容上（旧壳 TitleBarStyle::Overlay），
   // Windows/Linux 隐藏原生标题栏，caption 行与窗口按钮由插件 client 自绘（旧壳 decorations:false）。
-  if (!startupBlocked) await createProfileWindow(instanceProfile, service)
+  if (!startupBlocked) await sessions.attachWindow(instanceProfile, bootService)
   // 右键菜单里我们自己那几项（原生 role 由系统处理，不会回到这里）；
-  // 多窗口下作用在「最近聚焦」那个窗口上。
-let devToolsWindow: BrowserWindow | null = null
 
 /**
  * 壳托管 DevTools：用 CDP 前端 URL 建一扇普通窗口，窗口归壳所有——关闭即销毁前端页面。
@@ -1841,6 +1547,9 @@ async function openDevToolsWindow(port: number): Promise<void> {
     frame: { x: 80, y: 80, width: 1000, height: 720 },
   })
   devToolsWindow = win
+  // DevTools 窗口也是 launcher.exe 进程的顶层窗口，同样吃白框回退（#203 三轮）；
+  // 立即补图标（applyWindowsIcon 幂等带缓存，不依赖下一次 refreshTray 才覆盖）。
+  if (process.platform === 'win32') applyWindowsIcon(shellLogLine, windowIconCandidates(dirname(process.execPath)))
   win.on('close', () => {
     if (devToolsWindow !== win) return
     devToolsWindow = null
@@ -1889,7 +1598,14 @@ async function openDevToolsWindow(port: number): Promise<void> {
 // 托盘的建法已经上移到冷启动编排里（startupTray，排在 DSH 之前——见 #117）。
 
 let stopping = false
-const shutdown = async (): Promise<void> => {
+// DevTools 窗口引用：必须在顶层 await 之前初始化——ContextMenu 的 openDevTools 回调在启动期就能触发，
+// undefined !== null 为真，未初始化的 let 会误走 show() 分支（bug #201 同因）。
+let devToolsWindow: BrowserWindow | null = null
+// function 声明（非 const 箭头）：顶层 await 的启动编排把求值冻结在 ensureRunning 上，
+// 而托盘（startupTray）已在冻结前排好 —— 启动期间点「退出应用」会重入这里；
+// const 箭头此时还是未初始化绑定（bundle 里即 undefined，实测 TypeError: shutdown is not a function），
+// function 声明整体提升，冻结期内也是完整函数（bug #201）。
+async function shutdown(): Promise<void> {
   if (stopping) return
   stopping = true
   quitting = true
@@ -1897,26 +1613,14 @@ const shutdown = async (): Promise<void> => {
   tray?.destroy()
   tray = null
   // 挂起的几何定时器不丢：退出前把各窗当前态同步落盘（上次只 clear，最后 400ms 内的变动全丢）
-  for (const [timerProfile, timer] of frameSaveTimers) {
-    clearTimeout(timer)
-    frameSaveTimers.delete(timerProfile)
-    const win = windows.get(timerProfile)?.window
-    if (win === undefined) continue
-    try {
-      saveFrameNow(win, timerProfile)
-    } catch {}
-  }
+
+  sessions.flushAllFrames()
   try {
     // 先摘服务面与宿主（SIGTERM → 宽限期 → SIGKILL，并等它真退出）再让框架退出；
     // 不能像以前那样发完信号就走——壳一退，宿主就被 launchd 收养，变成占着会话的孤儿。
-    const stops = [...services.values()].map(async (svc) => {
-      try {
-        await svc.stop()
-      } catch (error) {
-        console.error(`[shell] 停止服务面失败（${svc.paths.profile}）：${String(error)}`)
-      }
-    })
-    await Promise.race([Promise.all(stops), Bun.sleep(SHELL_STOP_DEADLINE_MS)])
+    // stopAllServices 内每份 stop 自带 try/catch（失败只记日志不串台）；
+
+    await Promise.race([sessions.stopAllServices(), Bun.sleep(SHELL_STOP_DEADLINE_MS)])
   } catch (error) {
     console.error(`[shell] 停止服务面失败：${String(error)}`)
   }
@@ -1929,8 +1633,8 @@ process.on('exit', () => {
   if (!stopping) {
     stopping = true
     try {
-      for (const svc of services.values()) {
-        void svc.stop()
+      for (const session of sessions.list()) {
+        if (session.service !== null) void session.service.stop()
       }
     } catch {}
   }

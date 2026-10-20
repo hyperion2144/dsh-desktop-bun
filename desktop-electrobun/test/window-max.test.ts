@@ -11,7 +11,7 @@ import {
   isMaximizedPlacementDamaged,
   PLACEMENT_DAMAGE_TOLERANCE_PX,
   type WindowFrame,
-} from '../src/bun/window-max.ts'
+} from '../src/bun/windows/window-max.ts'
 
 // 2K 屏（2560×1440）减任务栏的典型工作区。
 const WORK: WindowFrame = { x: 0, y: 0, width: 2560, height: 1400 }

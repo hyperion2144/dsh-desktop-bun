@@ -22,7 +22,7 @@ import {
   sortRuntimeVersionsDesc,
   upsertInstalled,
   type InstalledRuntime,
-} from '../src/shared/runtime-catalog.ts'
+} from '../src/shared/runtime/runtime-catalog.ts'
 import {
   fetchRuntimeCatalog,
   installedManifestPath,
@@ -37,7 +37,7 @@ import {
   scanInstalledVersions,
   trashInstalledRuntime,
   writeInstalledManifest,
-} from '../src/bun/runtime-store.ts'
+} from '../src/bun/runtime/runtime-store.ts'
 import {
   packagedResourcesFromLauncher,
   packagedResourcesFromProcess,
@@ -46,7 +46,7 @@ import {
   resolveLauncherExecutablePath,
   resolveRuntimeSelection,
   runtimePathsOf,
-} from '../src/bun/runtime.ts'
+} from '../src/bun/runtime/runtime.ts'
 
 const tempDirs: string[] = []
 

@@ -20,7 +20,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { dshVersionFromPackageJson, readBuiltinRuntimeDeclaration } from '../src/shared/builtin-runtime.ts'
+import { dshVersionFromPackageJson, readBuiltinRuntimeDeclaration } from '../src/shared/runtime/builtin-runtime.ts'
 
 const projectRoot = resolve(import.meta.dir, '..')
 const buildRoot = join(projectRoot, 'build')
@@ -153,17 +153,40 @@ if (payloads.length === 0) {
 
 // macOS：launcher 必须是原生 Mach-O（#176 exec shim 已撤，shim 是 990B 脚本）；
 // launcher.native 是 shim 时期的备份，残留即说明撤得不干净。
+// launcher 住在 .app 包里（<产物目录>/<*.app>/Contents/MacOS/launcher）——#192 曾把
+// 路径拼成 <产物目录>/Contents/MacOS/launcher（漏了 .app 段），CI 断言恒 ENOENT。
 if (platform === 'darwin') {
-  const launcher = join(target, 'Contents/MacOS/launcher')
-  const nativeBackup = join(target, 'Contents/MacOS/launcher.native')
-  try {
-    const head = readFileSync(launcher).subarray(0, 4).toString('hex')
-    const macho = ['cffaedfe', 'feedfacf', 'cefaedfe', 'feedface']
-    if (!macho.includes(head)) problems.push(`launcher 不是原生 Mach-O（magic=${head}）——exec shim 又回来了？`)
-  } catch (error) {
-    problems.push(`读不出 launcher：${String(error)}`)
+  const findMacLaunchers = (dir, depth) => {
+    const out = []
+    if (depth > 3) return out
+    let entries = []
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return out }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const child = join(dir, entry.name)
+      if (entry.name === 'MacOS') {
+        const candidate = join(child, 'launcher')
+        if (existsSync(candidate)) out.push(candidate)
+      } else {
+        out.push(...findMacLaunchers(child, depth + 1))
+      }
+    }
+    return out
   }
-  if (existsSync(nativeBackup)) problems.push('launcher.native 仍存在：exec shim 未彻底撤销')
+  const launchers = findMacLaunchers(target, 0)
+  if (launchers.length === 0) {
+    problems.push('mac 产物里找不到 *.app/Contents/MacOS/launcher——包布局变了？')
+  }
+  for (const launcher of launchers) {
+    try {
+      const head = readFileSync(launcher).subarray(0, 4).toString('hex')
+      const macho = ['cffaedfe', 'feedfacf', 'cefaedfe', 'feedface']
+      if (!macho.includes(head)) problems.push(`launcher 不是原生 Mach-O（magic=${head}）——exec shim 又回来了？`)
+    } catch (error) {
+      problems.push(`读不出 launcher：${String(error)}`)
+    }
+    if (existsSync(`${launcher}.native`)) problems.push('launcher.native 仍存在：exec shim 未彻底撤销')
+  }
 }
 
 /** app 目录布局里也可能有一份 version.json（Windows 的 launcher：exe 旁边就是 Resources\）。 */

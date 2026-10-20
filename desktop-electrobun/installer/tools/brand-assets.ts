@@ -38,27 +38,22 @@ export const BRAND_ASSETS: readonly BrandAssetSpec[] = [
 /** 设计稿的强调色（docs/design/windows-installer-ui-prototype.html 的 --accent）。 */
 export const ACCENT: Rgb = { r: 0x4d, g: 0x6b, b: 0xfe }
 
-export type WhaleTileSpec = BrandAssetSpec & { accent: Rgb }
+export type WhaleTileSpec = BrandAssetSpec
 
 /**
- * 标题栏左上角的品牌瓦片：强调色圆角方块 + 居中的 app-icon 图案。
- * 背景烘焙成页面底色——BMP 是 24bpp 没有 alpha，方块要压在页面底上才不露角。
+ * 标题栏左上角的品牌瓦片：app-icon 图案铺满整个瓦片（#199 反馈：不再自画强调色圆角方块，
+ * 那圈蓝是图标未铺满时露出的底——官方图标自带圆角与底色，直接铺满即可）。
+ * 背景烘焙成页面底色——BMP 是 24bpp 没有 alpha，图标圆角外的四角经 alpha 混合落在页面底上。
  */
 export const WHALE_TILES: readonly WhaleTileSpec[] = [
-  { name: 'whale.bmp', width: 44, height: 44, background: LIGHT_BACKGROUND, logo: 28, accent: ACCENT },
-  { name: 'whale-2x.bmp', width: 88, height: 88, background: LIGHT_BACKGROUND, logo: 56, accent: ACCENT },
-  { name: 'whale-dark.bmp', width: 44, height: 44, background: DARK_BACKGROUND, logo: 28, accent: ACCENT },
-  { name: 'whale-dark-2x.bmp', width: 88, height: 88, background: DARK_BACKGROUND, logo: 56, accent: ACCENT },
+  { name: 'whale.bmp', width: 44, height: 44, background: LIGHT_BACKGROUND, logo: 44 },
+  { name: 'whale-2x.bmp', width: 88, height: 88, background: LIGHT_BACKGROUND, logo: 88 },
+  { name: 'whale-dark.bmp', width: 44, height: 44, background: DARK_BACKGROUND, logo: 44 },
+  { name: 'whale-dark-2x.bmp', width: 88, height: 88, background: DARK_BACKGROUND, logo: 88 },
 ]
-
-/** 瓦片圆角直径：设计稿是 44 见方配 12（2x 版等比放大）。 */
-export function whaleTileRadius(spec: WhaleTileSpec): number {
-  return Math.round((spec.width * 12) / 44)
-}
 
 export function renderWhaleTile(spec: WhaleTileSpec, logo: Raster): Raster {
   const canvas = createRaster(spec.width, spec.height, spec.background)
-  fillRoundedRect(canvas, { x: 0, y: 0, width: spec.width, height: spec.height }, whaleTileRadius(spec), spec.accent)
   drawScaled(logo, canvas, logoBox(spec))
   return canvas
 }

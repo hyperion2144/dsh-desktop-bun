@@ -8,11 +8,11 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { startShellServer } from '../src/bun/shell-server.ts'
-import { createCommandTable, type CommandDeps } from '../src/bun/commands.ts'
-import { createRpcRouter, dispatchRpc } from '../src/bun/rpc.ts'
-import { contextMenuItems, parseContextMenuRequest, type ContextMenuRequest } from '../src/bun/context-menu.ts'
-import { defaultSettings } from '../src/shared/settings.ts'
+import { startShellServer } from '../src/bun/net/shell-server.ts'
+import { createCommandTable, type CommandDeps } from '../src/bun/commands/commands.ts'
+import { createRpcRouter, dispatchRpc } from '../src/bun/commands/rpc.ts'
+import { contextMenuItems, parseContextMenuRequest, type ContextMenuRequest } from '../src/bun/windows/context-menu.ts'
+import { defaultSettings } from '../src/shared/settings/settings.ts'
 
 const EMPTY: ContextMenuRequest = {
   linkUrl: null,

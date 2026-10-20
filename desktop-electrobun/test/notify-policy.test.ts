@@ -14,7 +14,7 @@ import {
   createNotifier,
   shellNotificationCommand,
   type ShowNotificationOptions,
-} from '../src/bun/notifications.ts'
+} from '../src/bun/notify/notifications.ts'
 import {
   decide,
   defaultScenarioConfig,
@@ -30,8 +30,8 @@ import {
   SOUND_EXTENSIONS,
   soundChoice,
   soundsDir,
-} from '../src/shared/notify-policy.ts'
-import { defaultNotifications, type NotificationsConfig } from '../src/shared/settings.ts'
+} from '../src/shared/notify/notify-policy.ts'
+import { defaultNotifications, type NotificationsConfig } from '../src/shared/settings/settings.ts'
 
 const NOON = { hour: 12, minute: 0 }
 const config = (patch: Partial<NotificationsConfig> = {}): NotificationsConfig => ({

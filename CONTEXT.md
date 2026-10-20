@@ -50,6 +50,13 @@ _Avoid_: 忽略、屏蔽、拉黑
 用户明确表示某个提醒目标以后不要再提，面板里可以单条恢复或全部清空。
 _Avoid_: 忽略、屏蔽、记账、已读
 
+**服务面**：
+壳自己的常驻面（托盘、设置、profile 管理、退出），先于 DSH 存在、不依赖 DSH
+就绪；DSH 起不来时服务面仍在，`state.status` 是它的状态事实源。
+_Avoid_: 主进程、后台服务、shell 服务
+
 ## 相关决定
 
-- ADR-0003：内置运行时是一等候选（`docs/adr/0003-builtin-runtime-as-first-class-candidate.md`）。
+- [ADR-0006](docs/adr/0006-builtin-runtime-as-first-class-candidate.md)：内置运行时是一等候选，参与更新比较。
+- [ADR-0005](docs/adr/0005-shell-page-transport-boundary.md)：壳↔页面通道以官方 Electrobun Typed RPC 为主路。
+- 索引见 [docs/adr/README.md](docs/adr/README.md)。

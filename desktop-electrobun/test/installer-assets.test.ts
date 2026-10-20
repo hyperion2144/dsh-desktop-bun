@@ -173,10 +173,11 @@ describe('品牌资源生成器（#92）', () => {
   })
 })
 
-// 安装界面贴图（#103）：标题栏的鲸鱼瓦片——强调色圆角方块 + 居中的 app-icon。
-// 24bpp 没有 alpha，所以四个角烘焙成页面底色：瓦片压在页面上不能露出方块角。
-describe('安装界面品牌瓦片（#103）', () => {
-  test('四张瓦片：1x/2x × 明暗；2x 是 1x 的严格两倍', () => {
+// 安装界面贴图（#103/#199）：标题栏的品牌瓦片——app-icon 图案铺满整瓦（不再自画强调色方块，
+// 那圈蓝是图标未铺满时露出的底）。
+// 24bpp 没有 alpha，图标圆角外的四角烘焙成页面底色：瓦片压在页面上不能露出角。
+describe('安装界面品牌瓦片（#103/#199）', () => {
+  test('四张瓦片：1x/2x × 明暗；2x 是 1x 的严格两倍；logo 铺满整瓦', () => {
     expect(WHALE_TILES.map((spec) => `${spec.name} ${String(spec.width)}x${String(spec.height)}`)).toEqual([
       'whale.bmp 44x44',
       'whale-2x.bmp 88x88',
@@ -188,24 +189,25 @@ describe('安装界面品牌瓦片（#103）', () => {
     expect(byName.get('whale-dark.bmp')?.background).toEqual(DARK_BACKGROUND)
     expect(byName.get('whale-2x.bmp')?.width).toBe((byName.get('whale.bmp')?.width ?? 0) * 2)
     expect(byName.get('whale-2x.bmp')?.logo).toBe((byName.get('whale.bmp')?.logo ?? 0) * 2)
-    expect(byName.get('whale.bmp')?.accent).toEqual(ACCENT)
+    for (const spec of WHALE_TILES) {
+      expect(spec.logo).toBe(spec.width) // 铺满：不再留强调色底
+    }
   })
 
-  test('瓦片＝底色 + 强调色圆角方块 + 居中图标；四角留给页面底色', () => {
+  test('瓦片＝图标铺满；四角是图标圆角外的页面底色，边缘/中心落在图标内部', () => {
     const tile = WHALE_TILES[0]
     expect(tile).toBeDefined()
     if (tile === undefined) return
     const bytes = encodeBmp24(renderWhaleTile(tile, decodePng(largestIcoEntry(iconFile).png)))
     expect(bytes.byteLength).toBe(bmpFileSize(tile.width, tile.height))
+    // 四角在官方图标的圆角外：alpha 混合落到页面底色
     expect(bmpPixel(bytes, tile.width, tile.height, 0, 0)).toEqual(tile.background)
     expect(bmpPixel(bytes, tile.width, tile.height, tile.width - 1, tile.height - 1)).toEqual(tile.background)
-    // 左中/上中落在圆角方块内部：强调色满覆盖（取 1 而不是 0，避开羽化边）
+    // 边缘中点与中心都落在图标内部：非页面底色（不再是强调色方块的语义，不钉具体色）
     const middle = Math.floor(tile.height / 2)
-    expect(bmpPixel(bytes, tile.width, tile.height, 1, middle)).toEqual(ACCENT)
-    expect(bmpPixel(bytes, tile.width, tile.height, Math.floor(tile.width / 2), 1)).toEqual(ACCENT)
-    // 中心是图标（既不等于底色也不等于强调色）
+    expect(bmpPixel(bytes, tile.width, tile.height, 1, middle)).not.toEqual(tile.background)
+    expect(bmpPixel(bytes, tile.width, tile.height, Math.floor(tile.width / 2), 1)).not.toEqual(tile.background)
     const center = bmpPixel(bytes, tile.width, tile.height, middle, middle)
     expect(center).not.toEqual(tile.background)
-    expect(center).not.toEqual(ACCENT)
   })
 })

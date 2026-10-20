@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { normalizeRemoteUrl, remoteDisplay, remoteHostPort, remoteOrigin } from '../src/shared/remote.ts'
+import { normalizeRemoteUrl, remoteDisplay, remoteHostPort, remoteOrigin } from '../src/shared/net/remote.ts'
 
 describe('normalizeRemoteUrl（旧壳 normalize_remote_url）', () => {
   test('补 http:// scheme', () => {

@@ -10,9 +10,9 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { startShellServer } from '../src/bun/shell-server.ts'
-import { AGGREGATION_POLICIES, FOLLOWER_WAIT_MS, GetCoalescer, aggregationPolicy } from '../src/bun/coalescing.ts'
-import { LOOPBACK_AGGREGATION_MODES, type LoopbackAggregation } from '../src/shared/settings.ts'
+import { startShellServer } from '../src/bun/net/shell-server.ts'
+import { AGGREGATION_POLICIES, FOLLOWER_WAIT_MS, GetCoalescer, aggregationPolicy } from '../src/bun/net/coalescing.ts'
+import { LOOPBACK_AGGREGATION_MODES, type LoopbackAggregation } from '../src/shared/settings/settings.ts'
 
 interface Health {
   proxiedInFlight: number

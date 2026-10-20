@@ -12,7 +12,7 @@ import {
   readBuiltinRuntimeDeclaration,
   verifyBuiltinTree,
   type BuiltinIo,
-} from '../src/shared/builtin-runtime.ts'
+} from '../src/shared/runtime/builtin-runtime.ts'
 
 const DECLARED = { dsh: '0.2.1-alpha.2', pnpm: '11.16.0' }
 

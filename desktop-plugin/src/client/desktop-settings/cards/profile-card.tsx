@@ -2,7 +2,7 @@
 import React from 'react'
 import { SectionBox } from '../chrome.tsx'
 import { NOTE_STYLE } from '../styles.ts'
-import { ThemeSelect } from '../../theme-select.tsx'
+import { ThemeSelect } from '../../ui/theme-select.tsx'
 import { invoke, nsSave } from '../rpc.ts'
 import type { DesktopData, Notify } from '../types.ts'
 

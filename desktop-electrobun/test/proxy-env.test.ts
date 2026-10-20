@@ -2,7 +2,7 @@
 // 这里补 proxyEnvRecord——ProxyEnv → pnpm 安装子进程 env 记录的映射。
 
 import { describe, expect, test } from 'bun:test'
-import { proxyEnvRecord, PROXY_LOOPBACK_ENTRIES } from '../src/shared/proxy-env.ts'
+import { proxyEnvRecord, PROXY_LOOPBACK_ENTRIES } from '../src/shared/net/proxy-env.ts'
 
 describe('proxyEnvRecord', () => {
   test('manual http 代理：HTTP(S)_PROXY 大小写都写，NO_PROXY 带回环保底', () => {

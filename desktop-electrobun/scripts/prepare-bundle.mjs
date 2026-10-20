@@ -9,9 +9,9 @@
 import { spawnSync } from 'node:child_process'
 import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { DECLARATION_FILE, defaultBuiltinIo, planBuiltinSource, readBuiltinRuntimeDeclaration, verifyBuiltinTree } from '../src/shared/builtin-runtime.ts'
-import { runtimeNpmrc, runtimeWorkspaceYaml } from '../src/shared/profile-template.ts'
-import { NPM_PACKAGE } from '../src/shared/runtime-catalog.ts'
+import { DECLARATION_FILE, defaultBuiltinIo, planBuiltinSource, readBuiltinRuntimeDeclaration, verifyBuiltinTree } from '../src/shared/runtime/builtin-runtime.ts'
+import { runtimeNpmrc, runtimeWorkspaceYaml } from '../src/shared/profiles/profile-template.ts'
+import { NPM_PACKAGE } from '../src/shared/runtime/runtime-catalog.ts'
 import { createHash } from 'node:crypto'
 
 const projectRoot = resolve(import.meta.dir, '..')
@@ -62,8 +62,10 @@ if (existsSync(traySource)) {
 } else {
   console.warn(`[prepare-bundle] 找不到托盘图标：${traySource}，本次构建不建托盘`)
 }
-// Windows 托盘：win32 原生用 .ico（HICON 加载 png 在部分壳层不渲染），拷一份 icon.ico 备用
-const trayIcoSource = resolve(repoRoot, 'resources', 'icons', 'icon.ico')
+// Windows 托盘：官方 tray-windows.ico 原字节直拷。官方由 scripts/render-tray-icon.ts 从
+// icon-windows.svg 逐尺寸光栅化（16..64 七帧）并提交产物，托盘尺寸下每档都锐利；
+// 不从应用图标 ico 借帧——那些小帧是为桌面尺寸画的，托盘下偏糊。
+const trayIcoSource = resolve(repoRoot, 'resources', 'icons', 'tray.ico')
 const trayIcoTarget = join(projectRoot, 'resources', 'tray.ico')
 if (existsSync(trayIcoSource)) {
   mkdirSync(dirname(trayIcoTarget), { recursive: true })
@@ -72,7 +74,8 @@ if (existsSync(trayIcoSource)) {
   console.log(`            → ${trayIcoTarget}`)
 }
 // A2：Windows 安装程序/提取器外壳 + 快捷方式 + 任务栏的应用图标（Electrobun win.icon）。
-// resources/app-icon.ico 是仓内提交的多尺寸源（16..256，由 icon.png 生成）；缺失时退回旧壳单尺寸 icon.ico。
+// resources/app-icon.ico 是仓内提交的多尺寸源（16..256，scripts/render-app-icon.mjs 从
+// icon-windows.svg 逐尺寸光栅化生成，与官方托盘同一转换方式）；缺失时退回托盘 ico。
 const appIconSource = resolve(repoRoot, 'resources', 'icons', 'icon.ico')
 const appIconTarget = join(projectRoot, 'resources', 'app-icon.ico')
 if (existsSync(appIconTarget)) {

@@ -10,7 +10,7 @@
 //   3. 空串/纯空白视同未设——覆盖口径由 bundleIdentifierOverride 统一给出。
 
 import { describe, expect, test } from 'bun:test'
-import { bundleIdentifierOverride, DEFAULT_BUNDLE_IDENTIFIER, resolveBundleIdentifier } from '../src/shared/app-identity.ts'
+import { bundleIdentifierOverride, DEFAULT_BUNDLE_IDENTIFIER, resolveBundleIdentifier } from '../src/shared/app/app-identity.ts'
 
 describe('resolveBundleIdentifier（构建期 bundle id 解析）', () => {
   test('未设 DSH_SHELL_DEV_IDENTIFIER：回落默认 id，与既有产物一致', () => {

@@ -14,7 +14,7 @@ import {
   resolveNotifyLib,
   createNativeNotify,
   NOTIFY_LIB_NAME,
-} from '../src/bun/notify-un.ts'
+} from '../src/bun/notify/notify-un.ts'
 import {
   MACOS_NOTIFICATION_SETTINGS_URL,
   permissionFromCode,
@@ -22,7 +22,7 @@ import {
   permissionLabel,
   isPermissionGranted,
   type NotifyPermission,
-} from '../src/shared/notify-permission.ts'
+} from '../src/shared/notify/notify-permission.ts'
 
 const APP_EXEC = '/Applications/DeepSeek Harness Desktop.app/Contents/MacOS/bun'
 const BARE_EXEC = '/Users/x/.hutch/toolchains/bun/1.4.0/macos-arm64/bun'

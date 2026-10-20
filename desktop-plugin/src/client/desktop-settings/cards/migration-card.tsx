@@ -7,9 +7,9 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { PfBtn, SectionBox, showToast } from '../chrome.tsx'
 import { LABEL_STYLE, NOTE_STYLE, ROW_STYLE } from '../styles.ts'
-import { ThemeSelect } from '../../theme-select.tsx'
+import { ThemeSelect } from '../../ui/theme-select.tsx'
 import { invoke } from '../rpc.ts'
-import type { InitialData } from '../use-initial-data.ts'
+import type { PanelSnapshot } from '../panel-data.ts'
 import type { MigrationStatus, Notify } from '../types.ts'
 
 export function MigrationCard({
@@ -18,7 +18,7 @@ export function MigrationCard({
   notify,
 }: {
   profiles: Array<{ name: string; active: boolean; selectable: boolean }>
-  loaded: InitialData | null
+  loaded: PanelSnapshot | null
   notify: Notify
 }): React.ReactElement {
   const [migrationSource, setMigrationSource] = useState('')

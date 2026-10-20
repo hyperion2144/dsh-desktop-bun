@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { confirmModalScript, INPUT_CONFIRM_METHOD } from '../src/bun/input-modal.ts'
+import { confirmModalScript, INPUT_CONFIRM_METHOD } from '../src/bun/windows/input-modal.ts'
 
 describe('confirmModalScript（F12）', () => {
   test('方法名与 flow 都进了脚本，flow 经 JSON 转义（#128 改走官方 RPC）', () => {

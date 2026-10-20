@@ -19,14 +19,14 @@ import {
   watchdogScript,
   type AwakeChild,
   type KeepAwake,
-} from '../src/bun/keep-awake.ts'
+} from '../src/bun/notify/keep-awake.ts'
 import {
   bearerToken,
   classifyNotify,
   MAX_NOTIFY_BYTES,
   startNotifyServer,
-} from '../src/bun/notify-server.ts'
-import { buildChildEnv } from '../src/shared/child-env.ts'
+} from '../src/bun/net/notify-server.ts'
+import { buildChildEnv } from '../src/shared/app/child-env.ts'
 import {
   type Arbiter,
   BUSY_HEARTBEAT_MS,
@@ -35,7 +35,7 @@ import {
   normalizeProfileName,
   parseBusyReport,
   UNKNOWN_PROFILE,
-} from '../src/shared/power-arbiter.ts'
+} from '../src/shared/app/power-arbiter.ts'
 
 describe('power-arbiter（纯裁决）', () => {
   test('缺省开关为开；没有忙实例就不持有', () => {

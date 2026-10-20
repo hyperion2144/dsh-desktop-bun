@@ -9,8 +9,8 @@
 // 只解析运行时选中、不起壳也不起宿主（探针 / CI 用）：
 //   DSH_SHELL_RESOLVE_ONLY=1 DSH_HOME=/tmp/x bun run src/bun/serve.ts
 
-import { startService } from './service.ts'
-import { layout } from './runtime.ts'
+import { startService } from './host/service.ts'
+import { layout } from './runtime/runtime.ts'
 
 const clientVersion = process.env.DSH_SHELL_CLIENT_VERSION ?? '0.1.0'
 

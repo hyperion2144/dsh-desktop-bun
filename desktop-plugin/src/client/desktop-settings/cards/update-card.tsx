@@ -12,7 +12,7 @@ import {
   parseUpdateNoticeState,
   updateNoticeEnabledHint,
   type UpdateNoticeStateLike,
-} from '../../update-notice-settings.ts'
+} from '../../features/update-notice-settings.ts'
 
 export function UpdateCard(): React.ReactElement {
   const [updateState, setUpdateState] = useState<UpdateSnapshotLike | null>(null)

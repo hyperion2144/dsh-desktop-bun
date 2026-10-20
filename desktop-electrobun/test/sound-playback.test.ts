@@ -10,7 +10,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createNotifier } from '../src/bun/notifications.ts'
+import { createNotifier } from '../src/bun/notify/notifications.ts'
 import {
   createSoundProbe,
   resolveSoundBackend,
@@ -21,9 +21,9 @@ import {
   whichCommand,
   type SoundProbe,
   type SoundProbeDeps,
-} from '../src/bun/sound-playback.ts'
-import { MAX_SOUND_SECONDS, SCENARIO } from '../src/shared/notify-policy.ts'
-import { defaultSettings, type NotificationsConfig } from '../src/shared/settings.ts'
+} from '../src/bun/notify/sound-playback.ts'
+import { MAX_SOUND_SECONDS, SCENARIO } from '../src/shared/notify/notify-policy.ts'
+import { defaultSettings, type NotificationsConfig } from '../src/shared/settings/settings.ts'
 
 const WAV = '/tmp/tone.wav'
 const MP3 = '/tmp/tone.mp3'

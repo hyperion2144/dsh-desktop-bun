@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { navRulesFor } from '../src/shared/nav-rules.ts'
+import { navRulesFor } from '../src/shared/net/nav-rules.ts'
 
 describe('navRulesFor（D1，Electrobun navigationRules）', () => {
   test('阻断在前、白名单在后（最后命中赢 ⇒ 白名单放行、站外被拦）', () => {

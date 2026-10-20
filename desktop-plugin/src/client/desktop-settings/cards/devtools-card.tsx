@@ -14,7 +14,7 @@ import {
   ROW_STYLE,
 } from '../styles.ts'
 import { invoke, nsSave } from '../rpc.ts'
-import { devToolsSavedNote, planDevToolsUi, type DevToolsRestartOutcome } from '../../devtools-toggle.ts'
+import { devToolsSavedNote, planDevToolsUi, type DevToolsRestartOutcome } from '../../shell/devtools-toggle.ts'
 import type { DesktopData } from '../types.ts'
 
 export function DevToolsCard({ desktop }: { desktop: DesktopData }): React.ReactElement {

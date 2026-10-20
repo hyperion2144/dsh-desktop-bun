@@ -9,7 +9,7 @@ import {
   releaseClaim,
   upsertClaim,
   type PortClaim,
-} from '../src/shared/ports.ts'
+} from '../src/shared/net/ports.ts'
 
 const free = (taken: number[]) => (port: number) => !taken.includes(port)
 

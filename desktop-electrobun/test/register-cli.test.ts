@@ -25,8 +25,8 @@ import {
   shimScript,
   stripAnsi,
   type RegisterState,
-} from '../src/shared/register-cli.ts'
-import { createRegisterCli, type RunResult } from '../src/bun/register-cli.ts'
+} from '../src/shared/app/register-cli.ts'
+import { createRegisterCli, type RunResult } from '../src/bun/commands/register-cli.ts'
 
 describe('shim：位置 / 内容 / 判词', () => {
   test('文件名与路径按平台', () => {

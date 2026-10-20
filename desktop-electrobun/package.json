@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "DSH 桌面壳（Electrobun + CEF + Bun 运行时）——迁移自 desktop/src-tauri（Rust + Tauri 2）",
+  "description": "DSH 桌面壳（Electrobun + CEF + Bun 运行时）",
   "scripts": {
     "test": "bun test",
     "pretest": "bun run scripts/verify-toolchain.mjs && bun run scripts/verify-builtin-runtime.mjs",

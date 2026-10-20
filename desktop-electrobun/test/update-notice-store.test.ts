@@ -12,7 +12,7 @@ import {
   updateNoticePath,
   UPDATE_NOTICE_FILE,
   writeUpdateNoticeState,
-} from '../src/bun/update-notice-store.ts'
+} from '../src/bun/commands/update-notice-store.ts'
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'dsh-update-notice-'))

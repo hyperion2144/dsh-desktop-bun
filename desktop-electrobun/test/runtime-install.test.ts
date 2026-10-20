@@ -7,7 +7,7 @@ import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpath
 import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join } from 'node:path'
 import { afterEach, describe, expect, test } from 'bun:test'
-import { STAGING_PREFIX, purgeStagingDirs } from '../src/bun/runtime-store.ts'
+import { STAGING_PREFIX, purgeStagingDirs } from '../src/bun/runtime/runtime-store.ts'
 import {
   OUTPUT_TAIL_LINES,
   createRuntimeDownloader,
@@ -24,8 +24,8 @@ import {
   shimCmdScript,
   tailLines,
   withRuntimeDownloadNotify,
-} from '../src/bun/runtime-install.ts'
-import { runtimeDirOf } from '../src/bun/runtime-store.ts'
+} from '../src/bun/runtime/runtime-install.ts'
+import { runtimeDirOf } from '../src/bun/runtime/runtime-store.ts'
 
 const tempDirs: string[] = []
 

@@ -10,7 +10,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
-import { startHost } from '../src/bun/host.ts'
+import { startHost } from '../src/bun/host/host.ts'
 import {
   parseHostRecords,
   removeHostRecords,
@@ -18,9 +18,9 @@ import {
   sweepStaleHosts,
   upsertHostRecord,
   type HostRecord,
-} from '../src/bun/host-registry.ts'
-import { createRestartLedger, nextRestart, SUPERVISOR_POLICY } from '../src/bun/supervisor.ts'
-import { buildChildEnv } from '../src/shared/child-env.ts'
+} from '../src/bun/host/host-registry.ts'
+import { createRestartLedger, nextRestart, SUPERVISOR_POLICY } from '../src/bun/host/supervisor.ts'
+import { buildChildEnv } from '../src/shared/app/child-env.ts'
 
 const bunBin = process.execPath
 

@@ -10,8 +10,8 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSy
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-import { createDirLink } from '../src/shared/dir-link.ts'
-import { dirLinksEqual, pruneLegacyPoolLinks, reconcileProfileRuntimeTree, reconcileProfileTree, runtimePackageNames } from '../src/bun/profile-tree.ts'
+import { createDirLink } from '../src/shared/profiles/dir-link.ts'
+import { dirLinksEqual, pruneLegacyPoolLinks, reconcileProfileRuntimeTree, reconcileProfileTree, runtimePackageNames } from '../src/bun/profiles/profile-tree.ts'
 
 const tempDir = (): string => mkdtempSync(join(tmpdir(), 'dsh-profile-tree-'))
 

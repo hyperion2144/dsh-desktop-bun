@@ -8,7 +8,7 @@ import {
   dialogTitlebarFrameHeight,
   dialogTitlebarHeight,
   dialogTitlebarStyle,
-} from '../src/bun/dialog-titlebar.ts'
+} from '../src/bun/windows/dialog-titlebar.ts'
 
 const WIN: Array<'win32' | 'linux' | 'darwin'> = ['win32', 'linux', 'darwin']
 

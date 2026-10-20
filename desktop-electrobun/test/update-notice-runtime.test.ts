@@ -12,8 +12,8 @@ import {
   UPDATE_NOTICE_STATUS_METHOD,
   updateNoticeHtml,
   type UpdateNoticePayload,
-} from '../src/bun/update-notice-dialog.ts'
-import { evaluateRuntimeUpdates } from '../src/shared/runtime-update.ts'
+} from '../src/bun/windows/update-notice-dialog.ts'
+import { evaluateRuntimeUpdates } from '../src/shared/runtime/runtime-update.ts'
 
 class StubNode {
   readonly attributes = new Map<string, string>()

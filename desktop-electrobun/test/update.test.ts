@@ -23,9 +23,9 @@ import {
   progressOf,
   updateActions,
   updateView,
-} from '../src/shared/update.ts'
-import type { StatusLike } from '../src/shared/update.ts'
-import { createUpdater, isFlagOn, type UpdaterLike } from '../src/bun/updater.ts'
+} from '../src/shared/runtime/update.ts'
+import type { StatusLike } from '../src/shared/runtime/update.ts'
+import { createUpdater, isFlagOn, type UpdaterLike } from '../src/bun/platform/updater.ts'
 
 describe('平台前缀与清单 URL', () => {
   test('前缀是 <buildEnvironment>-<os>-<arch>', () => {

@@ -6,10 +6,10 @@ import React, { useEffect, useRef, useState } from 'react'
 import { PfBtn, PortCell, SectionBox } from '../chrome.tsx'
 import { DANGER_NOTE_STYLE, INPUT_BASE_STYLE, LABEL_STYLE, NOTE_STYLE, ROW_STYLE } from '../styles.ts'
 import { invoke, nsSave } from '../rpc.ts'
-import type { InitialData } from '../use-initial-data.ts'
+import type { PanelSnapshot } from '../panel-data.ts'
 import type { ProfilePortRow } from '../types.ts'
 
-export function ProfilePortsCard({ loaded }: { loaded: InitialData | null }): React.ReactElement {
+export function ProfilePortsCard({ loaded }: { loaded: PanelSnapshot | null }): React.ReactElement {
   const [profilePorts, setProfilePorts] = useState<ProfilePortRow[]>([])
   const [profilePortsStatus, setProfilePortsStatus] = useState<{
     state: 'loading' | 'ok' | 'error'

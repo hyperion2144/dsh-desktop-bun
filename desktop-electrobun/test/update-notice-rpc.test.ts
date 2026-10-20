@@ -10,14 +10,14 @@ import {
   UPDATE_NOTICE_RESIZE_METHOD,
   UPDATE_NOTICE_STATUS_METHOD,
   type UpdateNoticeOp,
-} from '../src/bun/update-notice-dialog.ts'
+} from '../src/bun/windows/update-notice-dialog.ts'
 import {
   UPDATE_NOTICE_RPC_MAX_REQUEST_TIME,
   UPDATE_NOTICE_CLOSE_DELAY_MS,
   UPDATE_NOTICE_STATUS_METHOD as STATUS_METHOD,
   updateNoticeRpcRequests,
   type UpdateNoticeRpcDeps,
-} from '../src/bun/update-notice-rpc.ts'
+} from '../src/bun/windows/update-notice-rpc.ts'
 
 function deps(over: Partial<UpdateNoticeRpcDeps> = {}): UpdateNoticeRpcDeps {
   return {

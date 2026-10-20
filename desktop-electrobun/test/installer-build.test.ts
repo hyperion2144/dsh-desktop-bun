@@ -73,6 +73,16 @@ function makeHarness(prefix = 'dsh-installer-build-'): Harness {
   writeFileSync(join(binDir, 'makensis'), fakeMakensisSource)
   chmodSync(join(binDir, 'makensis'), 0o755)
   writeFileSync(join(binDir, 'makensis.cmd'), '@bun "%~dp0makensis" %*\r\n')
+/** 假 rcedit：把参数记到 fake-rcedit.log，模拟补丁成功（接线验证）。 */
+const fakeRceditSource = `import { writeFileSync } from 'node:fs'
+writeFileSync('fake-rcedit.log', process.argv.slice(2).join(' ') + '\\n')
+console.log('fake rcedit: 补丁完成（假工具）')
+`
+  // 假 rcedit：真 rcedit 对占位 launcher.exe（非 PE）会拒载，集成测试用它验证 rcedit 段接线；
+  // 真 rcedit 链由快验 CI 的「安装器构建」step（notepad.exe 真替身）负责验证。
+  writeFileSync(join(binDir, 'fake-rcedit.mjs'), fakeRceditSource)
+  chmodSync(join(binDir, 'fake-rcedit.mjs'), 0o755)
+  writeFileSync(join(binDir, 'fake-rcedit.cmd'), '@bun "%~dp0fake-rcedit.mjs" %*\r\n')
 
   return {
     root,
@@ -83,6 +93,7 @@ function makeHarness(prefix = 'dsh-installer-build-'): Harness {
     env: {
       ...process.env,
       PATH: `${binDir}${delimiter}${process.env.PATH ?? ''}`,
+      DSH_INSTALLER_RCEDIT: join(binDir, process.platform === 'win32' ? 'fake-rcedit.cmd' : 'fake-rcedit.mjs'),
     },
   }
 }

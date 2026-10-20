@@ -11,23 +11,18 @@
 // #128：boot / 标题栏带 / 外链 / 右键菜单 / 输入确认五段注入脚本全部收敛到官方 Typed RPC，
 // 接收面是本文件最早期装上的全局唯一分发器。
 
-import { carrierScript, type CarrierPlatform } from './carrier.ts'
-import { acceptShimScript } from './accept-shim.ts'
-import { contextMenuScript } from './context-menu.ts'
-import { externalLinksScript } from './external.ts'
-import { titlebarScript } from './titlebar.ts'
+import { carrierScript, type CarrierPlatform } from './windows/carrier.ts'
+import { acceptShimScript } from './windows/accept-shim.ts'
+import { contextMenuScript } from './windows/context-menu.ts'
+import { externalLinksScript } from './windows/external.ts'
+import { titlebarScript } from './windows/titlebar.ts'
+import { SHELL_RPC_CORE_SOURCE } from '../../../shared/rpc/core.ts'
 /** boot 的 HTTP 端点（壳侧路由保留，见 shell-server.ts）；#128 起注入脚本改走 `get_boot_payload` 命令。 */
 export const BOOT_ENDPOINT = '/__shell__/boot'
 
 
 /** 官方 RPC 分发器的全局名（全仓唯一：preload 最早期装，插件侧 shell-rpc.ts 复用同一个）。 */
 export const SHELL_RPC_GLOBAL = '__DSH_SHELL_RPC__'
-
-/** 默认单请求超时（与插件侧 shell-rpc.ts 同口径；官方 createRPC 的 1000ms 对文件选择器太紧）。 */
-const DEFAULT_TIMEOUT_MS = 15_000
-
-/** 请求 id 上限（对齐官方 MAX_ID，溢出归零）。 */
-const MAX_ID = 1e10
 
 /**
  * 官方 Electrobun Typed RPC 的**单一接收面**（#128）。
@@ -44,34 +39,28 @@ const MAX_ID = 1e10
  *   - 默认 15s 超时，`noTimeout` 可关（长任务靠状态快照收尾，不靠客户端超时砍它）。
  */
 export function shellRpcDispatcherScript(): string {
+  // 协议实现统一来自 shared/rpc/core.ts（#185）：这里只剩环境胶水——桥探测、
+  // 接收面包装（保框架 handler）与全局安装。默认 15s 超时/noTimeout/不重试都在 core 里。
   return [
     ';(() => {',
     '  if (globalThis.__DSH_SHELL_RPC__) return',
-    '  var pending = new Map()',
-    '  var nextId = 0',
-    '  var MAX_ID = ' + String(MAX_ID),
-    '  var DEFAULT_TIMEOUT_MS = ' + String(DEFAULT_TIMEOUT_MS),
+    '  const createRpcCore = (' + SHELL_RPC_CORE_SOURCE + ')',
+    '  const core = createRpcCore({',
+    '    post: (message) => {',
+    '      const bridge = globalThis.__electrobunHostBridge',
+    '      const send = bridge && typeof bridge.postMessage === "function" ? bridge.postMessage.bind(bridge) : null',
+    '      if (send === null) throw new Error("official bridge unavailable")',
+    '      send(message)',
+    '    },',
+    '  })',
     '  var wrapper = null',
-    '  const post = () => {',
-    '    const bridge = globalThis.__electrobunHostBridge',
-    '    return bridge && typeof bridge.postMessage === "function" ? bridge.postMessage.bind(bridge) : null',
-    '  }',
-    '  const dispatch = (packet) => {',
-    '    if (!packet || typeof packet !== "object" || packet.type !== "response") return',
-    '    const waiter = pending.get(packet.id)',
-    '    if (waiter === undefined) return',
-    '    pending.delete(packet.id)',
-    '    if (waiter.timer !== undefined) clearTimeout(waiter.timer)',
-    '    if (packet.success === true) waiter.resolve(packet.payload)',
-    '    else waiter.reject(new Error(typeof packet.error === "string" ? packet.error : "shell rpc failed"))',
-    '  }',
     '  // 框架把早到的包 push 进 __electrobunPendingHostMessages；本仓页面没有 Electroview 来排空',
     '  // 那个数组，所以取完立刻清空——继续调框架 handler 却不排空就是无界增长。',
     '  const flush = () => {',
     '    const queued = globalThis.__electrobunPendingHostMessages',
     '    if (!Array.isArray(queued) || queued.length === 0) return',
     '    globalThis.__electrobunPendingHostMessages = []',
-    '    for (const packet of queued) dispatch(packet)',
+    '    for (const packet of queued) core.receive(packet)',
     '  }',
     '  // 幂等：已经是本 wrapper 就直接返回（重入不会套娃）；框架 preload 若在我们之后又覆盖了',
     '  // 这个槽，下一次 attach 会把当下那个重新包进去。',
@@ -83,31 +72,17 @@ export function shellRpcDispatcherScript(): string {
     '    wrapper = function (packet) {',
     '      if (prev !== null) { try { prev(packet) } catch (error) {} }',
     '      flush()',
-    '      dispatch(packet)',
+    '      core.receive(packet)',
     '    }',
     '    eb.receiveMessageFromHost = wrapper',
     '    flush()',
     '    return true',
     '  }',
     '  const invoke = (method, params, options) => {',
-    '    const send = post()',
-    '    if (send === null) return Promise.reject(new Error("official bridge unavailable"))',
+    '    const bridge = globalThis.__electrobunHostBridge',
+    '    if (!bridge || typeof bridge.postMessage !== "function") return Promise.reject(new Error("official bridge unavailable"))',
     '    if (!attach()) return Promise.reject(new Error("official receive unavailable"))',
-    '    nextId = nextId < MAX_ID ? nextId + 1 : 1',
-    '    const id = nextId',
-    '    return new Promise((resolve, reject) => {',
-    '      const timer = options && options.noTimeout === true',
-    '        ? undefined',
-    '        : setTimeout(() => { pending.delete(id); reject(new Error("RPC request timed out.")) }, (options && options.timeoutMs) || DEFAULT_TIMEOUT_MS)',
-    '      pending.set(id, { resolve, reject, timer })',
-    '      try {',
-    '        send(JSON.stringify({ type: "request", id, method, params }))',
-    '      } catch (error) {',
-    '        pending.delete(id)',
-    '        if (timer !== undefined) clearTimeout(timer)',
-    '        reject(error instanceof Error ? error : new Error(String(error)))',
-    '      }',
-    '    })',
+    '    return core.invoke(method, params, options)',
     '  }',
     '  globalThis.__DSH_SHELL_RPC__ = {',
     '    invoke,',

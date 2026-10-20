@@ -1,7 +1,7 @@
 import type { ElectrobunConfig } from 'electrobun'
-import { APP_NAME } from './src/shared/app.ts'
-import { bundleIdentifierOverride, resolveBundleIdentifier } from './src/shared/app-identity.ts'
-import { DEFAULT_UPDATE_BASE_URL } from './src/shared/update.ts'
+import { APP_NAME } from './src/shared/app/app.ts'
+import { bundleIdentifierOverride, resolveBundleIdentifier } from './src/shared/app/app-identity.ts'
+import { DEFAULT_UPDATE_BASE_URL } from './src/shared/runtime/update.ts'
 import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 

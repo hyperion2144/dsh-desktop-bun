@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createAccountWatcher, REMOTE_MUX_PATH, type WebSocketLike } from '../src/bun/account-watcher.ts'
+import { createAccountWatcher, REMOTE_MUX_PATH, type WebSocketLike } from '../src/bun/host/account-watcher.ts'
 
 interface FakeSocket extends WebSocketLike {
   url: string

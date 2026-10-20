@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { isOpenableLoginUrl, loginUrlToOpen, platformLoginUrl, readSignInAttempt } from '../src/shared/account-login.ts'
+import { isOpenableLoginUrl, loginUrlToOpen, platformLoginUrl, readSignInAttempt } from '../src/shared/app/account-login.ts'
 
 const WAITING = {
   status: 'signed-out',

@@ -15,7 +15,7 @@ import {
   defaultWindowFrame,
   frameForPersist,
   type WindowFrame,
-} from '../src/bun/window-state.ts'
+} from '../src/bun/windows/window-state.ts'
 
 const FRAME: WindowFrame = { x: 12, y: 34, width: 1280, height: 860 }
 

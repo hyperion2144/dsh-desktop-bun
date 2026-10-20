@@ -14,18 +14,18 @@ import {
   normalizeNoProxyEntries,
   resolveProxyEnv,
   systemProxyFromEnv,
-} from '../src/shared/proxy-env.ts'
+} from '../src/shared/net/proxy-env.ts'
 import {
   parseScutilProxy,
   parseWindowsProxyRegistry,
   parseWindowsProxyServer,
-} from '../src/shared/system-proxy.ts'
-import { detectSystemProxy } from '../src/bun/system-proxy.ts'
-import { buildChildEnv } from '../src/shared/child-env.ts'
-import { dependencyMismatch, pnpmFromModulesYaml, pnpmMajor } from '../src/shared/profile-ops.ts'
-import { builtinPnpmVersion, profileDependencyRows, readRecordedPnpm } from '../src/bun/profile-manager.ts'
-import { KEYBINDINGS_FILE, MAX_KEYBINDINGS_BYTES, readKeybindings, writeKeybindings } from '../src/bun/keybindings.ts'
-import { defaultSettings, type DesktopSettings } from '../src/shared/settings.ts'
+} from '../src/shared/net/system-proxy.ts'
+import { detectSystemProxy } from '../src/bun/platform/system-proxy.ts'
+import { buildChildEnv } from '../src/shared/app/child-env.ts'
+import { dependencyMismatch, pnpmFromModulesYaml, pnpmMajor } from '../src/shared/profiles/profile-ops.ts'
+import { builtinPnpmVersion, profileDependencyRows, readRecordedPnpm } from '../src/bun/profiles/profile-manager.ts'
+import { KEYBINDINGS_FILE, MAX_KEYBINDINGS_BYTES, readKeybindings, writeKeybindings } from '../src/bun/platform/keybindings.ts'
+import { defaultSettings, type DesktopSettings } from '../src/shared/settings/settings.ts'
 
 function tempDir(tag: string): string {
   return mkdtempSync(join(tmpdir(), `dsh-${tag}-`))

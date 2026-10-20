@@ -5,10 +5,10 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createCommandTable, type CommandDeps } from '../src/bun/commands.ts'
-import { createUpdateNoticeStore, type UpdateNoticeStore } from '../src/bun/update-notice-store.ts'
-import { defaultSettings, type DesktopSettings } from '../src/shared/settings.ts'
-import { loadSettings, saveSettings, updateSettings } from '../src/bun/settings-store.ts'
+import { createCommandTable, type CommandDeps } from '../src/bun/commands/commands.ts'
+import { createUpdateNoticeStore, type UpdateNoticeStore } from '../src/bun/commands/update-notice-store.ts'
+import { defaultSettings, type DesktopSettings } from '../src/shared/settings/settings.ts'
+import { loadSettings, saveSettings, updateSettings } from '../src/bun/platform/settings-store.ts'
 
 function harness(overrides: Partial<CommandDeps> = {}): {
   deps: CommandDeps

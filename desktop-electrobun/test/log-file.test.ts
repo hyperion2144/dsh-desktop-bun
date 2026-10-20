@@ -20,8 +20,8 @@ import {
   rotatePlan,
   rotatedName,
   shouldRotate,
-} from '../src/shared/log-file.ts'
-import { createLogSink, describeLogFile } from '../src/bun/log-sink.ts'
+} from '../src/shared/app/log-file.ts'
+import { createLogSink, describeLogFile } from '../src/bun/platform/log-sink.ts'
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'dsh-log-'))

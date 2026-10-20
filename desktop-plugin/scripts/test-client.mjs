@@ -17,7 +17,7 @@ rmSync(tmp, { recursive: true, force: true })
 mkdirSync(tmp, { recursive: true })
 
 await build({
-  entryPoints: [join(root, 'src/client/download-intercept.ts')],
+  entryPoints: [join(root, 'src/client/bridge/download-intercept.ts')],
   outfile: join(tmp, 'download-intercept.mjs'),
   format: 'esm',
   platform: 'node',
@@ -56,7 +56,7 @@ assert.equal(filenameFromAnchor('报告 v1.2.pdf', 'blob:x'), '报告 v1.2.pdf',
 
 // ── platform-keyboard（#187）：桌面档快捷键桥的纯函数 ──
 await build({
-  entryPoints: [join(root, 'src/client/platform-keyboard.ts')],
+  entryPoints: [join(root, 'src/client/bridge/platform-keyboard.ts')],
   outfile: join(tmp, 'platform-keyboard.mjs'),
   format: 'esm',
   platform: 'node',
@@ -191,7 +191,7 @@ assert.equal(kb.applyShortcutEdit(edited.document, { type: 'nope' }, 'desktop:ma
 
 // ── console-batch（#54）：页面 console 攒批上报 ──
 await build({
-  entryPoints: [join(root, 'src/client/console-batch.ts')],
+  entryPoints: [join(root, 'src/client/shell/console-batch.ts')],
   outfile: join(tmp, 'console-batch.mjs'),
   format: 'esm',
   platform: 'node',
@@ -257,11 +257,11 @@ const { createConsoleBatch } = await import(pathToFileURL(join(tmp, 'console-bat
   assert.deepEqual(sent[0].map((item) => item.msg), ['好的', '也好'], 'send 抛错只丢该批')
 }
 
-// ── 壳 preload 注入的 dshDesktop 载体脚本（desktop-electrobun/src/bun/carrier.ts，
+// ── 壳 preload 注入的 dshDesktop 载体脚本（desktop-electrobun/src/bun/windows/carrier.ts，
 // 旧壳 Rust 版 DESKTOP_CARRIER_INIT_SCRIPT 的等价物）：esbuild 转译后在最小 DOM 桩里
 // 真跑一遍，锁住对外形状（幂等安装 / 惰性转发 / 轮询等待 / 平台标记）。
 await build({
-  entryPoints: [join(root, '../desktop-electrobun/src/bun/carrier.ts')],
+  entryPoints: [join(root, '../desktop-electrobun/src/bun/windows/carrier.ts')],
   outfile: join(tmp, 'carrier.mjs'),
   format: 'esm',
   platform: 'node',
@@ -367,7 +367,7 @@ assert.ok(lateSeen.includes('KeyK'), '晚到的实现同样能把输入送进监
 
 // ── composer-input-guard（#188）：控制字符判定与取证串 ──
 await build({
-  entryPoints: [join(root, 'src/client/composer-input-guard.ts')],
+  entryPoints: [join(root, 'src/client/ui/composer-input-guard.ts')],
   outfile: join(tmp, 'composer-input-guard.mjs'),
   format: 'esm',
   platform: 'node',
@@ -490,7 +490,7 @@ assert.equal(area.value, 'xy', '输入框 value 里的控制字符也被擦掉')
 
 // ── shell-rpc（#50）：统一传输层，三通道选择 / wire 协议 / 超时 ──
 await build({
-  entryPoints: [join(root, 'src/client/shell-rpc.ts')],
+  entryPoints: [join(root, 'src/client/shell/shell-rpc.ts')],
   outfile: join(tmp, 'shell-rpc.mjs'),
   format: 'esm',
   platform: 'node',
@@ -663,7 +663,7 @@ const withPreloadDispatcher = () => {
 
 // ── devtools-toggle（#69）：开发者工具开关的状态机与安全面文案 ──
 await build({
-  entryPoints: [join(root, 'src/client/devtools-toggle.ts')],
+  entryPoints: [join(root, 'src/client/shell/devtools-toggle.ts')],
   outfile: join(tmp, 'devtools-toggle.mjs'),
   format: 'esm',
   platform: 'node',
@@ -716,7 +716,7 @@ assert.ok(
 
 // ── runtime-download-ui（#97）：下载终态判定 / 取消 / 「当前使用」归一 ──
 await build({
-  entryPoints: [join(root, 'src/client/runtime-download-ui.ts')],
+  entryPoints: [join(root, 'src/client/features/runtime-download-ui.ts')],
   outfile: join(tmp, 'runtime-download-ui.mjs'),
   format: 'esm',
   platform: 'node',
@@ -816,7 +816,7 @@ const rdu = await import(pathToFileURL(join(tmp, 'runtime-download-ui.mjs')).hre
 
 // ── notification-sound-ui（#74）：自定义音效可用性判定 / 试听失败不静默 ──
 await build({
-  entryPoints: [join(root, 'src/client/notification-sound-ui.ts')],
+  entryPoints: [join(root, 'src/client/features/notification-sound-ui.ts')],
   outfile: join(tmp, 'notification-sound-ui.mjs'),
   format: 'esm',
   platform: 'node',
@@ -935,7 +935,7 @@ for (const plat of ['darwin', undefined, null, '', 0, {}, [], 'freebsd', 'win32 
 }
 
 // 面板接线（源码级门禁）：判定绿了但没画到 DOM 上 = #74 复发——史上面板还出过「整片空白」事故。
-const tabSource = readFileSync(join(root, 'src/client/notifications-tab.tsx'), 'utf8')
+const tabSource = readFileSync(join(root, 'src/client/features/notifications-tab.tsx'), 'utf8')
 assert.ok(tabSource.includes('data.capability ?? null'), 'capability 缺失时走容错读法')
 assert.ok(tabSource.includes('customSoundOptions(data.sounds, capability)'), '下拉项经可用性判定')
 assert.ok(tabSource.includes('disabled={opt.disabled}'), '没后端的格式真的落到 option[disabled] 上')
@@ -950,7 +950,7 @@ assert.ok(tabSource.includes('{permissionUnavailable.text}'), '平台化文案�
 
 // ── keep-awake-note（#75）：防休眠能力提示——缺位 / 拿不到通道 / 按 backend 分平台口径 ──
 await build({
-  entryPoints: [join(root, 'src/client/keep-awake-note.ts')],
+  entryPoints: [join(root, 'src/client/features/keep-awake-note.ts')],
   outfile: join(tmp, 'keep-awake-note.mjs'),
   format: 'esm',
   platform: 'node',
@@ -1026,7 +1026,7 @@ for (const token of ['macOS', 'Windows', 'Linux']) {
 
 // ── notification-focus-hint（#115）：窗口在前台聚焦时不投递通知的说明文案 ──
 await build({
-  entryPoints: [join(root, 'src/client/notification-focus-hint.ts')],
+  entryPoints: [join(root, 'src/client/features/notification-focus-hint.ts')],
   outfile: join(tmp, 'notification-focus-hint.mjs'),
   format: 'esm',
   platform: 'node',
@@ -1052,7 +1052,7 @@ assert.ok(focusText.length <= 60, '一句话粒度（≤60 字）')
 assert.equal(focusHint.focusSuppressHint(), focusText, '纯函数：同输入同输出')
 
 // 源码级接线门禁：文案必须真的画进通知页（#115）
-const focusTabSource = readFileSync(join(root, 'src/client/notifications-tab.tsx'), 'utf8')
+const focusTabSource = readFileSync(join(root, 'src/client/features/notifications-tab.tsx'), 'utf8')
 assert.ok(focusTabSource.includes('{focusSuppressHint()}'), '说明文案画进通知页（#115 接线）')
 
 // ── 桌面设置面板（#128）：结构性断言，不是快照 ──
@@ -1096,10 +1096,10 @@ for (const mode of ['full', 'stream', 'none']) {
 }
 // 默认档：面板不跨包 import 壳代码（lib/client.js 是随插件单独发布的产物），所以「壳的默认值」
 // 在面板这边有三份手写字面量要跟着改：档位表的标签、loopbackAggregationMode 的回退值、
-// use-initial-data 的占位值。漏改任何一份，用户看到的 radio 会与壳实际跑的路子不一致。
+// panel-data.ts 的占位值。漏改任何一份，用户看到的 radio 会与壳实际跑的路子不一致。
 {
   const shellDefault = readFileSync(
-    join(dirname(root), 'desktop-electrobun/src/shared/settings.ts'),
+    join(dirname(root), 'desktop-electrobun/src/shared/settings/settings.ts'),
     'utf8',
   ).match(/DEFAULT_LOOPBACK_AGGREGATION: LoopbackAggregation = '([a-z]+)'/)[1]
   assert.strictEqual(shellDefault, 'stream', `壳的默认档是 stream（当前 ${shellDefault}）`)
@@ -1159,7 +1159,7 @@ for (const f of panelModules) {
   )
 }
 for (const f of ['notifications-tab.tsx', 'downloads-tab.tsx']) {
-  const src = readFileSync(join(root, 'src/client', f), 'utf8')
+  const src = readFileSync(join(root, 'src/client/features', f), 'utf8')
   assert.ok(
     !src.includes('--dsw-alias-border-l,'),
     `${f}：不再用宿主未定义的 --dsw-alias-border-l（会永远回退白色，浅色主题看不见边框）`,
@@ -1237,7 +1237,7 @@ for (const f of ['notifications-tab.tsx', 'downloads-tab.tsx']) {
 
 // ── update-notice-settings（#136）：启动更新提醒的开关与已忽略版本列表 ──
 await build({
-  entryPoints: [join(root, 'src/client/update-notice-settings.ts')],
+  entryPoints: [join(root, 'src/client/features/update-notice-settings.ts')],
   outfile: join(tmp, 'update-notice-settings.mjs'),
   format: 'esm',
   platform: 'node',
@@ -1297,13 +1297,10 @@ assert.ok(hintOff.includes('不受这个开关约束'), '关掉后仍说清手�
 assert.ok(!hintOff.includes('不会再检查'), '不说成「连检查都不做了」——托盘那次照做')
 assert.equal(notice.ignoredEmptyHint(), '没有被忽略的版本。', '空列表灰字')
 
-// 源码级接线门禁：这一段必须真的画进设置面板
-// #144 之后面板拆成 src/client/desktop-settings/ 下的卡片模块，开关与列表都住在
-// cards/update-card.tsx；红线断言必须扫模块集合，否则新模块天然逃过检查。
+// 命令名接线改由编译期保证（#190）：invokeCommand 的 cmd 锚在 contracts/ 的 Commands 上，
+// 拼错名字 typecheck 直接炸；「契约包含关系」由壳侧 test/contracts.test.ts 对
+// COMMAND_NAMES 与命令表键做集合比对，不再读源码文本。
 const settingsSource = panelSource
-for (const cmd of ['get_update_notice_state', 'set_update_notice_enabled', 'restore_update_notice', 'clear_update_notice_ignored']) {
-  assert.ok(settingsSource.includes(`'${cmd}'`), `面板调了 ${cmd}`)
-}
 assert.ok(settingsSource.includes('{updateNoticeEnabledHint(updateNotice.enabled)}'), '说明文案画进面板')
 assert.ok(settingsSource.includes('清空全部'), '「清空全部」画进面板')
 assert.ok(settingsSource.includes('恢复'), '「恢复」画进面板')
@@ -1311,5 +1308,207 @@ assert.ok(
   !/desktop\.[a-z_]*update_notice[a-z_]*/.test(settingsSource),
   '不把提醒开关当普通设置键写进 desktop-settings.json（键名是契约红线）',
 )
+
+// ── 面板数据 adapter + 启动检查流程（#182）：跨 interface 行为测试 ──
+// 合并规则/轮询过滤/弹窗裁决不再靠 includes 文本：esbuild 转译后直接跑行为，
+// 消费面就是契约类型（buildSnapshot 吃 ProxySettings/DesktopData，startupDialogModel 吃 StartupNeeded）。
+await build({
+  entryPoints: [join(root, 'src/client/desktop-settings/panel-data.ts')],
+  outfile: join(tmp, 'panel-data.mjs'),
+  format: 'esm', platform: 'node', bundle: true, target: 'node20', logLevel: 'silent',
+})
+const pd = await import(pathToFileURL(join(tmp, 'panel-data.mjs')).href)
+
+// buildSnapshot：合并规则的唯一实现（ns 优先、壳兜底、完整对象基底）
+{
+  const ns = {
+    proxy_mode: '',                      // 空值 → 回壳回吐的 proxy_mode
+    proxy_url: 'http://ns:7890',
+    remote_addr: 'http://10.0.0.9:3000',
+    remote_list: ['http://a:1'],
+    port: 4000,
+    lane_forwarder_port: 7900,
+    profile_ports: { main: 9001, ghost: 0 },   // 非正数不回填
+    profile_lane_ports: { main: 9101 },
+    profile_page_ports: {},
+    loopback_aggregation: 'weird',       // 坏档位回默认
+  }
+  const p = { proxy_mode: 'manual', proxy_url: 'http://shell:1', no_proxy: 'localhost', proxy_user: 'u', proxy_pass: 'pw', effective: { picked: 'sys' } }
+  const d = {
+    remote_addr: 'http://shell-d', remote_list: ['x'], port: 3000,
+    profiles: [{ name: 'main', active: true, selectable: true }, { name: 'second', active: false, selectable: true }],
+    mux_heartbeat_ms: 15000,
+    origin: 'http://extra',              // 壳完整对象基底：契约外字段也不许丢（#147）
+  }
+  const snap = pd.buildSnapshot(ns, p, d)
+  assert.equal(snap.proxy.proxy_mode, 'manual', 'ns 空值回壳的 proxy_mode')
+  assert.equal(snap.proxy.proxy_url, 'http://ns:7890', 'ns 段优先于壳回吐')
+  assert.equal(snap.proxy.no_proxy, 'localhost', '壳回吐兑底 no_proxy')
+  assert.equal(snap.proxyEffective, p.effective, 'effective 原样透传')
+  assert.equal(snap.desktop.remote_addr, 'http://10.0.0.9:3000', 'ns 覆盖 remote_addr')
+  assert.deepEqual(snap.desktop.remote_list, ['http://a:1'], 'ns 覆盖 remote_list')
+  assert.equal(snap.desktop.port, 4000, 'ns 覆盖 port')
+  assert.equal(snap.desktop.mux_heartbeat_ms, 15000, '非 ns 展示字段原样保留')
+  assert.equal(snap.desktop.origin, 'http://extra', '额外字段不丢（#147 回归）')
+  assert.equal(snap.loopbackAggregation, 'stream', '坏档位回默认 stream（与壳 DEFAULT 同值）')
+  assert.equal(snap.forwarderInput, '7900', '转发口正数才回填')
+  assert.deepEqual(snap.profilePortInputs, { main: '9001' }, '端口回填剔除非正数')
+  assert.deepEqual(snap.profileLaneInputs, { main: '9101' })
+  assert.equal(snap.migrationSource, 'main', '迁移源取第一个')
+  assert.equal(snap.migrationDest, 'second', '迁移目标取另一个')
+  // 空列表：迁移 select 双空
+  const empty = pd.buildSnapshot({}, p, { ...d, profiles: [] })
+  assert.equal(empty.migrationSource, '')
+  assert.equal(empty.migrationDest, '')
+}
+
+// createPanelData：首拉/刷新/落盘/轮询的行为（传输与计时器全部注入）
+{
+  const flush = () => new Promise((r) => setImmediate(r))
+  const calls = []
+  let desktopReads = 0
+  let taskReply = { running: false, finished: false, kind: '', title: '', stage: '', done: 0, total: 0, error: '', result: '' }
+  const timers = []
+  const panel = pd.createPanelData({
+    nsGet: async () => { calls.push('ns'); return { remote_addr: 'http://ns:1', port: 4000, lane_forwarder_port: 7900 } },
+    getProxySettings: async () => ({ proxy_mode: 'off', proxy_url: '', no_proxy: '', proxy_user: '', proxy_pass: '' }),
+    getDesktopData: async () => { desktopReads += 1; return { remote_addr: 'http://d:2', remote_list: [], port: 3080, profiles: [] } },
+    taskStatus: async () => taskReply,
+    save: async (patch) => { calls.push(['save', patch]) },
+    pollMs: 5,
+    setIntervalImpl: (fn, ms) => { timers.push({ fn, ms }); return timers.length },
+    clearIntervalImpl: (h) => { timers[h - 1] = null },
+  })
+  const seen = []
+  const unsub = panel.subscribe(() => seen.push(panel.getState()))
+  assert.equal(panel.getState().loaded, null, '首拉前 loaded 为 null')
+  assert.equal(panel.getState().snapshot, pd.PLACEHOLDER, '首拉前渲染占位快照')
+  await panel.loadAll((t) => { throw new Error('不该报错: ' + t) })
+  assert.equal(desktopReads, 1, '首拉三路并发各读一次')
+  const st1 = panel.getState()
+  assert.equal(st1.loaded, st1.snapshot, 'loaded 与 snapshot 同引用（回填稳定初值的依据）')
+  assert.equal(st1.snapshot.desktop.port, 4000, '首拉走合并规则')
+  assert.equal(seen.length, 1, '首拉通知一次')
+  await panel.refreshDesktop()
+  const st2 = panel.getState()
+  assert.equal(desktopReads, 2, 'refreshDesktop 重读 desktop 段')
+  assert.equal(st2.loaded, st1.loaded, 'loaded 引用不动')
+  assert.equal(st2.snapshot.desktop.remote_addr, 'http://d:2', 'desktop 换成壳回吐的新值')
+  assert.equal(st2.snapshot.proxy, st1.snapshot.proxy, 'ns/代理合并不重跑（旧 refreshData 语义）')
+  await panel.save({ active_profile: 'main' })
+  assert.deepEqual(calls.find((c) => Array.isArray(c)), ['save', { active_profile: 'main' }], 'save 透传落盘通道')
+  // 任务轮询：静默轮次不更新；running 才更新；结束后保留末态
+  panel.startTaskPolling()
+  panel.startTaskPolling()
+  assert.equal(timers.length, 1, '轮询只挂一个表（重复 start 幂等）')
+  timers[0].fn()
+  await flush()
+  assert.equal(panel.getState().task, null, '静默轮次不更新任务卡')
+  taskReply = { running: true, finished: false, kind: 'migrate', title: '迁移', stage: '复制', done: 1, total: 2, error: '', result: '' }
+  timers[0].fn()
+  await flush()
+  assert.equal(panel.getState().task.title, '迁移', 'running 轮次更新任务卡')
+  taskReply = { ...taskReply, running: false, finished: true }
+  timers[0].fn()
+  await flush()
+  assert.equal(panel.getState().task.finished, true, '结束后保留末态')
+  taskReply = { running: false, finished: false, kind: '', title: '', stage: '', done: 0, total: 0, error: '', result: '' }
+  timers[0].fn()
+  await flush()
+  assert.equal(panel.getState().task.finished, true, '静默轮次不覆盖末态')
+  panel.stopTaskPolling()
+  assert.equal(timers[0], null, '停表真的清掉表')
+  unsub()
+  panel.dispose()
+  // dispose 后在途结果丢弃，也不走横幅
+  let resolveDesktop
+  const gate = new Promise((r) => { resolveDesktop = r })
+  const p2 = pd.createPanelData({
+    nsGet: async () => ({})
+    , getProxySettings: async () => ({ proxy_mode: 'off', proxy_url: '', no_proxy: '', proxy_user: '', proxy_pass: '' }),
+    getDesktopData: () => gate,
+  })
+  const errTexts = []
+  const done = p2.loadAll((t) => errTexts.push(t))
+  p2.dispose()
+  resolveDesktop({ remote_addr: null, remote_list: [], port: 3080, profiles: [] })
+  await done
+  assert.equal(p2.getState().loaded, null, 'dispose 后到货的结果丢弃')
+  assert.equal(errTexts.length, 0, 'dispose 后不报错')
+  // 首拉失败走 onLoadError（面板顶部横幅），状态不动
+  const errs = []
+  const p3 = pd.createPanelData({
+    nsGet: async () => { throw new Error('boom') },
+    getProxySettings: async () => ({ proxy_mode: 'off', proxy_url: '', no_proxy: '', proxy_user: '', proxy_pass: '' }),
+    getDesktopData: async () => ({ remote_addr: null, remote_list: [], port: 3080, profiles: [] }),
+  })
+  await p3.loadAll((t) => errs.push(t))
+  assert.equal(errs.length, 1, '失败恰好报一次')
+  assert.ok(errs[0].includes('读取设置失败') && errs[0].includes('boom'), '横幅文案带原因')
+  assert.equal(p3.getState().loaded, null, '失败后 loaded 仍为 null')
+}
+
+// startup-flow：契约裁决 → 弹窗模型 → 薄 DOM（桩 document 下点按钮只触发注入的 hook）
+await build({
+  entryPoints: [join(root, 'src/client/desktop-settings/startup-flow.ts')],
+  outfile: join(tmp, 'startup-flow.mjs'),
+  format: 'esm', platform: 'node', bundle: true, target: 'node20', logLevel: 'silent',
+})
+const sf = await import(pathToFileURL(join(tmp, 'startup-flow.mjs')).href)
+{
+  assert.deepEqual(sf.startupDialogModel(null), { kind: 'none' })
+  assert.deepEqual(sf.startupDialogModel({ action: 'none' }), { kind: 'none' })
+  assert.deepEqual(sf.startupDialogModel({ action: 'profile-selection', profiles: ['a', 'b'] }), { kind: 'select', profiles: ['a', 'b'] })
+  const inc = sf.startupDialogModel({ action: 'profile-incomplete', profile: 'main', details: { dir_exists: true, missing_files: ['config.json'], node_modules_exists: false } })
+  assert.equal(inc.kind, 'incomplete')
+  assert.equal(inc.profile, 'main')
+  assert.equal(inc.missingDesc, 'config.json, node_modules', '缺失明细拼接口径与拆分前逐字一致')
+  assert.deepEqual(sf.startupDialogModel({ action: 'profile-incomplete', profile: '' }), { kind: 'none' }, '没名的不完整裁决不弹')
+
+  class FakeEl {
+    constructor() { this.style = {}; this.children = []; this.textContent = ''; this.removed = false }
+    appendChild(c) { this.children.push(c); return c }
+    remove() { this.removed = true }
+  }
+  globalThis.document = {
+    createElement: () => new FakeEl(),
+    body: new FakeEl(),
+  }
+  try {
+    const hooks = { calls: [] }
+    const h = {
+      onSelectProfile: (p) => hooks.calls.push(['select', p]),
+      onCreateProfile: (n) => hooks.calls.push(['create', n]),
+      onStartProfile: (p) => hooks.calls.push(['start', p]),
+      onRepairProfile: (p) => hooks.calls.push(['repair', p]),
+    }
+    sf.mountStartupDialog({ kind: 'select', profiles: ['alpha', 'beta'] }, h)
+    const overlay = globalThis.document.body.children[0]
+    const card = overlay.children[0]
+    const list = card.children[1]   // [0]=标题 [1]=列表 [2]=输入 [3]=新建锉
+    assert.equal(list.children.length, 2, '每个 profile 一个按钮')
+    list.children[1].onclick()
+    assert.ok(overlay.removed, '点击后弹窗自拆')
+    assert.deepEqual(hooks.calls, [['select', 'beta']], '点击哪个 profile 就选哪个')
+    const input = card.children[2]
+    input.value = '  gamma  '
+    card.children[3].onclick()
+    assert.deepEqual(hooks.calls[1], ['create', 'gamma'], '名字 trim 后交给 onCreateProfile')
+    input.value = '   '
+    card.children[3].onclick()
+    assert.equal(hooks.calls.length, 2, '空名不发（防手滑建空 profile）')
+    hooks.calls.length = 0
+    sf.mountStartupDialog({ kind: 'incomplete', profile: 'main', missingDesc: 'x' }, h)
+    const card2 = globalThis.document.body.children[1].children[0]
+    card2.children[2].children[0].onclick()
+    card2.children[2].children[1].onclick()
+    assert.deepEqual(hooks.calls, [['start', 'main'], ['repair', 'main']], '直接启动/修复启动各走各的 hook')
+    const before = globalThis.document.body.children.length
+    sf.mountStartupDialog({ kind: 'none' }, h)
+    assert.equal(globalThis.document.body.children.length, before, 'none 不挂窗')
+  } finally {
+    delete globalThis.document
+  }
+}
 rmSync(tmp, { recursive: true, force: true })
 console.log('client 纯函数测试：全部通过 ✓')
