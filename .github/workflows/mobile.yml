@@ -1,0 +1,163 @@
+name: Mobile Build
+
+# dsh-desktop-bun 的移动端出包流水线（#212：从 build.yml 拆出）。
+#
+# 为什么要拆：原先桌面三平台矩阵与移动端出包（Android / iOS / 鸿蒙）挤在同一条工作流里，
+# 任一触发面（手动 dispatch / tag push / 每日定时兜底）都会 fan-out 出全套作业——手机端
+# 代码一行没改也照打一遍 apk/ipa（约 13–14 runner-分钟，占整条流水线三分之一）。拆开后
+# 两端各有自己的触发面与 tag 命名空间：
+#   - 桌面：build.yml，tag 只认 desktop/v*
+#   - 移动端：本文件，tag 只认 mobile/v*
+#
+# 版本号彼此独立：桌面与移动端本来就是两套版本号（桌面 0.0.0 / 移动端 0.1.0）。Actions
+# 没有「版本」概念，独立版本只能靠 tag 命名空间 + 各自的包版本号承载（发布链路另见 #213）。
+#
+# 产物在 Actions run 的 Artifacts 里：
+#   - Android = debug 签名 APK（可直接安装）
+#   - iOS = 未签名 IPA（AltStore 等侧载）
+#   - 鸿蒙 = HAP（需自建 runner，默认跳过）
+on:
+  workflow_dispatch:
+  # pull_request/push 分支不触发任何构建（#200）：构建不跟提交走，只在手动 dispatch、
+  # tag push 与每日定时兜底时跑。
+  push:
+    tags:
+      # 只认移动端命名空间的 tag（#212）：桌面用 desktop/v*，移动端用 mobile/v*。
+      # tag push 不评估 paths 过滤，命名空间是唯一的分流手段——两端互不误吃。
+      - 'mobile/v*'
+  schedule:
+    # 每日全量兜底（#8）：UTC 19:00 = 北京 03:00，与桌面那条（UTC 18:30）错峰，
+    # 保住对 expo / Xcode / pod 漂移的兜底，同时避免两条流水线同一分钟抢 runner。
+    # schedule 事件只在默认分支触发（官方语义），无需 ref 守卫。
+    - cron: '0 19 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  # 移动端出包（#33）：与桌面同一条构建路径（tag push / dispatch / schedule，不跟提交走 #200）。
+  # 产物在 Actions run 的 Artifacts 里。
+  # Android = debug 签名 APK（可直接安装）；iOS = 未签名 IPA（AltStore 等侧载）。
+  build-mobile:
+    name: 移动端出包（${{ matrix.target }}）
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: android
+          # macos-14 的 Xcode 15 不够：RN 0.86 的 pod 脚本直接报
+          # [!] Invalid `Podfile` file: Please upgrade XCode.（run 39131509877 实测）。
+          # macos-15 的 Xcode 16.4 仍不够：Expo 的 SwiftPM 包要 Swift tools 6.2.0，
+          # 16.4 自带 6.1.0 → "Could not resolve package dependencies"（run 39131878771 实测）。
+          # macos-26 镜像带 Xcode 26（Swift 6.2+），与本机 Xcode 27 一致。
+          - os: macos-26
+            target: ios
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 与桌面 job 对齐带 submodules（expo 出包只吃入库的 assets/dsh-frontend.tgz，
+          # 但显式 recursive 防后续步骤引用 mobile/dsh-mobile-nav 时静默失败）。
+          submodules: recursive
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # expo-app 是 npm 项目；pnpm 缓存会找 pnpm-lock.yaml 不存在而报
+          # "Path Validation Error ... no cache is being saved"（旧仓实测）。
+          cache: npm
+          cache-dependency-path: mobile/expo-app/package-lock.json
+
+      - name: Setup Java 17 (Android)
+        if: matrix.target == 'android'
+        uses: actions/setup-java@v4
+        with:
+          # RN/Expo 原生链只支持 17-21；更高 JDK 触发
+          # "A restricted method in java.lang.System has been called"（本机 JDK 25 实测）。
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK (Android)
+        if: matrix.target == 'android'
+        uses: android-actions/setup-android@v3
+        with:
+          # 不显式指定会装已下架的 legacy 'tools' 包（sdkmanager: Failed to find package 'tools'）。
+          packages: 'platform-tools'
+
+      - name: Install expo dependencies
+        working-directory: mobile/expo-app
+        run: npm ci
+
+      - name: Expo prebuild (${{ matrix.target }})
+        working-directory: mobile/expo-app
+        run: npx expo prebuild -p ${{ matrix.target }} --no-install
+
+      - name: Build Android APK
+        if: matrix.target == 'android'
+        working-directory: mobile/expo-app/android
+        run: ./gradlew assembleDebug
+
+      - name: Build iOS IPA (unsigned)
+        if: matrix.target == 'ios'
+        working-directory: mobile/expo-app/ios
+        run: |
+          pod --version
+          pod install
+          xcodebuild -workspace DeepSeek.xcworkspace \
+            -scheme DeepSeek \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build-device \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+          mkdir -p /tmp/Payload
+          cp -R build-device/Build/Products/Release-iphoneos/DeepSeek.app /tmp/Payload/
+          cd /tmp && zip -qry DeepSeek.ipa Payload
+
+      - name: Upload Android APK
+        if: matrix.target == 'android'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-mobile-android-apk
+          path: mobile/expo-app/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload iOS IPA
+        if: matrix.target == 'ios'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-mobile-ios-ipa
+          path: /tmp/DeepSeek.ipa
+          if-no-files-found: error
+
+  # 鸿蒙出包（可选，默认跳过）：HAP 需要 HarmonyOS SDK（DevEco / 华为授权下载）与
+  # 签名材料（.p12/.cer/.p7b，证书不能进仓库），GitHub 托管 runner 装不了。
+  # 打开方式：在自建 runner（labels: self-hosted, macOS, harmony）预装 DevEco Studio
+  # 与调试证书、配好 local.properties，然后仓库 Variables 设 DSH_HARMONY_CI=true。
+  # 未设置时整个作业跳过（不会排队等 runner）。
+  build-harmony:
+    name: 鸿蒙出包（自建 runner，可选）
+    if: vars.DSH_HARMONY_CI == 'true'
+    runs-on: [self-hosted, macOS, harmony]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 构建 HAP
+        working-directory: mobile/harmony
+        run: ./scripts/build.sh
+
+      - name: 上传 HAP
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-mobile-harmony-hap
+          path: mobile/harmony/entry/build/default/outputs/**/*.hap
+          if-no-files-found: error

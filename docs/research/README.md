@@ -15,3 +15,4 @@
 | 2026-10-18 | [plugin-client-assets-local-serving](2026-10-18-plugin-client-assets-local-serving.md) | 插件 client 资产为何走 Host、本地直出的可行边界 | 现状调研（结论仍有效） |
 | 2026-10-18 | [shell-sse-idle-timeout](2026-10-18-shell-sse-idle-timeout.md) | 壳反代 SSE 每 ~10s 被切断的 idleTimeout 定位 | 已完成（落地于 #159） |
 | 2026-10-18 | [windows-tray-restart-launcher-unknown](2026-10-18-windows-tray-restart-launcher-unknown.md) | Windows 托盘「重启应用」第二次 launcher-unknown 诊断（#167） | 已完成（落地于 #167） |
+| 2026-10-20 | [github-actions-desktop-mobile-build-split](2026-10-20-github-actions-desktop-mobile-build-split.md) | 桌面/移动端构建流水线拆分前的 GitHub Actions 触发语义核实（#212） | 已完成（结论见笔记） |
