@@ -20,6 +20,7 @@ import {
   type AwakeChild,
   type KeepAwake,
 } from '../src/bun/notify/keep-awake.ts'
+import { collectingLogger } from './helpers/test-logger.ts'
 import {
   bearerToken,
   classifyNotify,
@@ -350,7 +351,7 @@ describe('keep-awake（平台断言，注入假 spawn）', () => {
       arbiter,
       platform: 'darwin',
       pid: 9_999,
-      log: (line) => logs.push(line),
+        log: collectingLogger(logs),
       spawnCommand: fake.spawnCommand,
     })
 
@@ -442,7 +443,7 @@ describe('keep-awake（平台断言，注入假 spawn）', () => {
       pid: 9_999,
       which: (command) => (command === 'systemd-inhibit' ? '/usr/bin/systemd-inhibit' : null),
       env: {},
-      log: (line) => logs.push(line),
+        log: collectingLogger(logs),
       spawnCommand: fake.spawnCommand,
     })
 
@@ -518,7 +519,7 @@ describe('keep-awake（平台断言，注入假 spawn）', () => {
       pid: 8_888,
       which,
       env: { XDG_CURRENT_DESKTOP: 'ubuntu:GNOME' },
-      log: (line) => logs.push(line),
+        log: collectingLogger(logs),
       spawnCommand: fake.spawnCommand,
     })
     arbiter.setBusy('desktop', true, Date.now())
@@ -548,7 +549,7 @@ describe('keep-awake（平台断言，注入假 spawn）', () => {
       platform: 'linux',
       env: {},
       which: () => null,
-      log: (line) => logs.push(line),
+        log: collectingLogger(logs),
       spawnCommand: fake.spawnCommand,
     })
     arbiter.setBusy('desktop', true, Date.now())
@@ -575,7 +576,7 @@ describe('keep-awake（平台断言，注入假 spawn）', () => {
       pid: 1_234,
       which: (command) => (command === 'systemd-inhibit' ? '/usr/bin/systemd-inhibit' : null),
       env: {},
-      log: (line) => logs.push(line),
+        log: collectingLogger(logs),
       spawnCommand: fake.spawnCommand,
     })
     arbiter.setBusy('desktop', true, Date.now())
@@ -590,7 +591,7 @@ describe('keep-awake（平台断言，注入假 spawn）', () => {
     expect(capability.backend).toBeNull()
     expect(capability.reason).toBe('systemd-inhibit 启动后立即退出（exit=1）')
     expect(logs).toContain(
-      '[keepawake] Linux 拿不到防休眠通道：systemd-inhibit 启动后立即退出（exit=1）',
+        'Linux 拿不到防休眠通道：systemd-inhibit 启动后立即退出（exit=1）',
     )
 
     // 候选只减不增：不许每秒重生进程，原因也只落一条
@@ -684,7 +685,7 @@ describe('keep-awake（平台断言，注入假 spawn）', () => {
     // 真 spawn（与 defaultSpawn 同形）：记下 pid，好对着 systemd-inhibit --list 断言
     const awake = createKeepAwake({
       arbiter,
-      log: (line) => logs.push(line),
+        log: collectingLogger(logs),
       spawnCommand: (command) => {
         const child = Bun.spawn(command, { stdout: 'ignore', stderr: 'ignore' })
         spawnedPids.push(child.pid)

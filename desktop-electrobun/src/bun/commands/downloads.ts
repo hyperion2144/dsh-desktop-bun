@@ -27,6 +27,7 @@ import {
   writeSync,
 } from 'node:fs'
 import { join } from 'node:path'
+import type { Logger } from '../../shared/logging/levels.ts'
 import {
   CONCURRENCY_MAX,
   CONCURRENCY_MIN,
@@ -54,7 +55,7 @@ export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>
 export interface DownloadManagerOptions {
   /** `$DSH_HOME`（任务表落在 `<home>/storages/downloads/tasks.json`）。 */
   home: string
-  log: (line: string) => void
+    log: Logger
   /** 完成时投递通知（旧壳 `SCENARIO.DOWNLOAD_COMPLETE`）。 */
   notify?: (filename: string) => void
   /** 让用户选目标目录（返回 null = 取消）。壳里接 Electrobun 的目录选择器。 */
@@ -142,7 +143,7 @@ export function createDownloadManager(options: DownloadManagerOptions): Download
       renameSync(tmp, tasksFile)
     } catch (error) {
       // 下载管理不阻塞主流程：写不进去只记日志，下次状态变化再试
-      log(`[downloads] 任务表落盘失败：${message(error)}`)
+        log.warn(`任务表落盘失败：${message(error)}`)
     }
   }
 
@@ -159,7 +160,7 @@ export function createDownloadManager(options: DownloadManagerOptions): Download
     if (pruned.dropped.length === 0) return
     for (const task of pruned.dropped) removePart(task)
     tasks = pruned.tasks
-    log(`[downloads] 历史裁剪：移除 ${String(pruned.dropped.length)} 条终态任务`)
+      log.debug(`历史裁剪：移除 ${String(pruned.dropped.length)} 条终态任务`)
   }
 
   // ── 任务表操作 ──────────────────────────────────────────
@@ -202,7 +203,7 @@ export function createDownloadManager(options: DownloadManagerOptions): Download
   }
 
   function fail(id: number, reason: string): void {
-    log(`[downloads] 任务 ${String(id)} 失败：${reason}`)
+      log.error(`任务 ${String(id)} 失败：${reason}`)
     update(id, (task) => ({ ...task, status: 'failed', error: reason }))
   }
 
@@ -317,7 +318,7 @@ export function createDownloadManager(options: DownloadManagerOptions): Download
       return
     }
     update(id, (current) => ({ ...current, status: 'completed', error: null }))
-    log(`[downloads] 完成：${task.filename} → ${task.targetPath}`)
+      log.info(`完成：${task.filename} → ${task.targetPath}`)
     options.notify?.(task.filename)
   }
 
@@ -330,7 +331,7 @@ export function createDownloadManager(options: DownloadManagerOptions): Download
     try {
       dir = await options.chooseDirectory(downloadDir)
     } catch (error) {
-      log(`[downloads] 目录选择失败：${message(error)}`)
+        log.warn(`目录选择失败：${message(error)}`)
       dir = null
     }
     if (dir === null) return null
@@ -361,11 +362,15 @@ export function createDownloadManager(options: DownloadManagerOptions): Download
     const maxId = tasks.reduce((max, task) => Math.max(max, task.id), 0)
     nextId = maxId + 1
     if (recovered.changed) persist()
-    log(`[downloads] 恢复任务表：${String(tasks.length)} 条（含 ${String(recovered.dropped.length)} 条清理）`)
-  } catch {
+      log.debug(`恢复任务表：${String(tasks.length)} 条（含 ${String(recovered.dropped.length)} 条清理）`)
+  } catch (error) {
     // 文件不存在 / 坏 JSON：从空表开始（旧壳同语义）
     tasks = []
     nextId = 1
+    // 首次启动（文件还不存在）是常态，不记；只有坏 JSON 这类真问题才 warn。
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        log.warn(`下载任务表损坏，已按空表继续：${message(error)}`)
+    }
   }
 
   return {
@@ -376,7 +381,7 @@ export function createDownloadManager(options: DownloadManagerOptions): Download
     setConcurrency: (value) => {
       concurrency = clampConcurrency(value)
       options.saveConcurrency?.(concurrency)
-      log(`[downloads] 并发上限 = ${String(concurrency)}`)
+        log.debug(`并发上限 = ${String(concurrency)}`)
       persist()
       pump()
       return concurrency
@@ -389,7 +394,7 @@ export function createDownloadManager(options: DownloadManagerOptions): Download
       const target = await chooseTarget(name)
       if (target === null) {
         update(task.id, (current) => ({ ...current, status: 'cancelled', error: '用户取消了保存位置' }))
-        log(`[downloads] 取消（未选位置）：${name}`)
+          log.info(`取消（未选位置）：${name}`)
         return task.id
       }
       update(task.id, (current) => ({ ...current, targetPath: target, status: 'queued' }))
@@ -463,7 +468,7 @@ export function createDownloadManager(options: DownloadManagerOptions): Download
         return false
       }
       update(id, (current) => ({ ...current, status: 'completed', error: null }))
-      log(`[downloads] 完成：${task.filename} → ${task.targetPath}`)
+        log.info(`完成：${task.filename} → ${task.targetPath}`)
       options.notify?.(task.filename)
       return true
     },
@@ -475,7 +480,7 @@ export function createDownloadManager(options: DownloadManagerOptions): Download
       if (controller !== undefined) controller.abort()
       if (task.kind === 'blob') closeBlob(id)
       update(id, (current) => ({ ...current, status: 'paused' }))
-      log(`[downloads] 暂停：${task.filename}`)
+        log.info(`暂停：${task.filename}`)
     },
 
     resume: (id) => {
@@ -483,7 +488,7 @@ export function createDownloadManager(options: DownloadManagerOptions): Download
       if (task === undefined) return
       if (task.kind === 'blob') {
         // blob 的源在页面内存里，暂停后无法续（旧壳同语义，客户端也标了「恢复(不可用)」）
-        log(`[downloads] blob 任务无法续传：${task.filename}`)
+          log.warn(`blob 任务无法续传：${task.filename}`)
         return
       }
       if (task.status !== 'paused' && task.status !== 'failed') return
@@ -499,7 +504,7 @@ export function createDownloadManager(options: DownloadManagerOptions): Download
       closeBlob(id)
       removePart(task)
       update(id, (current) => ({ ...current, status: 'cancelled', error: null }))
-      log(`[downloads] 取消：${task.filename}`)
+        log.info(`取消：${task.filename}`)
     },
 
     clearFinished: () => {
@@ -537,7 +542,7 @@ export function createDownloadManager(options: DownloadManagerOptions): Download
 }
 
 /** 在系统文件管理器里显示（macOS Finder / Windows 资源管理器 / Linux 目录）。 */
-export function revealPath(path: string, log: (line: string) => void): boolean {
+export function revealPath(path: string, log: Logger): boolean {
   const platform = process.platform
   const command =
     platform === 'darwin'
@@ -547,12 +552,12 @@ export function revealPath(path: string, log: (line: string) => void): boolean {
         : ['xdg-open', dirOf(path)]
   try {
     const child = Bun.spawn(command, { stdio: ['ignore', 'ignore', 'ignore'] })
-    log(`[downloads] 定位文件：${command.join(' ')}`)
+      log.debug(`定位文件：${command.join(' ')}`)
     // 不等它退出（文件管理器是长驻进程），但也不留僵尸
     void child.exited.catch(() => 0)
     return true
   } catch (error) {
-    log(`[downloads] 定位失败：${message(error)}`)
+      log.warn(`定位失败：${message(error)}`)
     return false
   }
 }

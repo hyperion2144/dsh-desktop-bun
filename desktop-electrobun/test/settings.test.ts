@@ -21,6 +21,7 @@ import {
   defaultLanePortForProfile,
   defaultPortForProfile,
 } from '../src/shared/settings/settings.ts'
+import { collectingLogger } from './helpers/test-logger.ts'
 import {
   loadSettings,
   migrateFromLegacyYaml,
@@ -259,7 +260,7 @@ describe('loadSettings / saveSettings', () => {
   test('首次启动：没有私有文件也没有旧 yaml ⇒ 落一份默认值', () => {
     const home = tempHome()
     const lines: string[] = []
-    const loaded = loadSettings({ home, log: (line) => lines.push(line) })
+      const loaded = loadSettings({ home, log: collectingLogger(lines) })
     expect(loaded.created).toBe(true)
     expect(loaded.migrated).toBe(false)
     expect(existsSync(settingsPath(home))).toBe(true)
@@ -286,7 +287,7 @@ describe('loadSettings / saveSettings', () => {
     const home = tempHome()
     writeFileSync(settingsPath(home), '{ 这不是 json')
     const lines: string[] = []
-    const loaded = loadSettings({ home, log: (line) => lines.push(line) })
+      const loaded = loadSettings({ home, log: collectingLogger(lines) })
     expect(loaded.recovered).toBe(true)
     expect(loaded.settings.activeProfile).toBe(DEFAULT_PROFILE)
     expect(existsSync(`${settingsPath(home)}.corrupt`)).toBe(true)

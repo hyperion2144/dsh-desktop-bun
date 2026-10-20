@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startShellServer } from '../src/bun/net/shell-server.ts'
+import { silentLogger } from './helpers/test-logger.ts'
 import { createCommandTable, type CommandDeps } from '../src/bun/commands/commands.ts'
 import { createRpcRouter, dispatchRpc } from '../src/bun/commands/rpc.ts'
 import { contextMenuItems, parseContextMenuRequest, type ContextMenuRequest } from '../src/bun/windows/context-menu.ts'
@@ -38,7 +39,7 @@ function harness(): Harness {
     home: tmpdir(),
     profile: 'desktop',
     platform: 'darwin',
-    log: () => {},
+      log: silentLogger,
     settings: () => settings,
     save: () => settings,
     showContextMenu: (request) => seen.push(request),

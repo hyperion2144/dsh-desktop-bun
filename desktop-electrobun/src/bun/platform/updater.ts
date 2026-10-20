@@ -29,6 +29,7 @@ import {
   type UpdateActions,
 } from '../../shared/runtime/update.ts'
 import { probeReleasePresence } from './release-probe.ts'
+import { type Logger } from '../../shared/logging/levels.ts'
 
 /** 我们用到的框架面（只声明用到的部分，便于测试注入假实现）。 */
 export interface UpdaterLike {
@@ -62,7 +63,7 @@ export interface ShellUpdater {
 }
 
 export interface UpdaterOptions {
-  log: (message: string) => void
+  log: Logger
   env?: Record<string, string | undefined>
   os?: string
   arch?: string
@@ -134,7 +135,7 @@ export function createUpdater(options: UpdaterOptions): ShellUpdater {
 
   function remember(raw: string, actionLabel: string): void {
     failure = raw
-    log(`[update] ${actionLabel}失败：${raw}`)
+    log.warn(`${actionLabel}失败：${raw}`)
   }
 
   async function load(): Promise<void> {
@@ -142,7 +143,7 @@ export function createUpdater(options: UpdaterOptions): ShellUpdater {
     ready = true
     if (isFlagOn(env[UPDATE_DISABLE_ENV])) {
       reason = `更新被 ${UPDATE_DISABLE_ENV} 关掉了`
-      log(`[update] ${reason}`)
+      log.debug(reason)
       return
     }
     const importer = options.importUpdater ?? defaultImport
@@ -150,19 +151,19 @@ export function createUpdater(options: UpdaterOptions): ShellUpdater {
       updater = await importer()
     } catch (error) {
       reason = `加载框架更新器失败：${String(error)}`
-      log(`[update] ${reason}`)
+      log.warn(reason)
       return
     }
     if (updater === null) {
       reason = '这个构建里没有框架更新器（不是打包运行？）'
-      log(`[update] ${reason}`)
+      log.debug(reason)
       return
     }
     try {
       local = await updater.getLocalInfo()
     } catch (error) {
       reason = `读不到本地版本信息：${String(error)}`
-      log(`[update] ${reason}`)
+      log.warn(reason)
       return
     }
     if (buildEnv === '' && (local.channel ?? '') !== '') {
@@ -177,13 +178,13 @@ export function createUpdater(options: UpdaterOptions): ShellUpdater {
     local = { ...local, baseUrl }
     if (baseUrl === '') {
       reason = `当前构建没有更新源（release.baseUrl 未配置；默认源是 ${DEFAULT_UPDATE_BASE_URL}）`
-      log(`[update] ${reason}`)
+      log.debug(reason)
       return
     }
     available = true
-    log(
-      `[update] 更新源就绪：${local.version ?? '?'}（channel=${local.channel ?? '?'}）→ ${baseUrl}` +
-        (override !== undefined && override !== '' ? `（由 ${UPDATE_BASE_URL_ENV} 覆盖）` : '')
+    log.info(
+      `更新源就绪：${local.version ?? '?'}（channel=${local.channel ?? '?'}）→ ${baseUrl}` +
+      (override !== undefined && override !== '' ? `（由 ${UPDATE_BASE_URL_ENV} 覆盖）` : ''),
     )
   }
 
@@ -229,9 +230,9 @@ export function createUpdater(options: UpdaterOptions): ShellUpdater {
       const raw = firstNonEmpty(remote.error, status?.details?.errorMessage)
       if (raw === '') {
         failure = ''
-        log(
-          `[update] ${actionLabel}完成：${remote.version ?? '?'}` +
-            `（available=${String(remote.updateAvailable)}, ready=${String(remote.updateReady)}）`
+        log.info(
+          `${actionLabel}完成：${remote.version ?? '?'}` +
+          `（available=${String(remote.updateAvailable)}, ready=${String(remote.updateReady)}）`,
         )
       } else {
         remember(raw, actionLabel)
@@ -244,7 +245,9 @@ export function createUpdater(options: UpdaterOptions): ShellUpdater {
       remember(error instanceof Error ? error.message : String(error), actionLabel)
       try {
         remote = updater.updateInfo() ?? {}
-      } catch {}
+      } catch (error) {
+        log.warn(`更新检查失败：${String(error)}`)
+      }
     }
     return snapshot()
   }
@@ -264,7 +267,7 @@ export function createUpdater(options: UpdaterOptions): ShellUpdater {
       void load().then(() => {
         ensureSubscribed()
         const current = snapshot()
-        log(`[update] 状态：${current.view.label}（${current.view.current || '版本未知'}）`)
+        log.info(`状态：${current.view.label}（${current.view.current || '版本未知'}）`)
       })
     },
     stop: () => {

@@ -3,6 +3,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { applyWindowsIcon, imageMatchesHints, WINDOW_HOST_IMAGE_HINTS } from '../src/bun/platform/window-icon.ts'
+import { collectingLogger, silentLogger } from './helpers/test-logger.ts'
 
 describe('窗口图标（#203）', () => {
 
@@ -23,7 +24,7 @@ describe('imageMatchesHints（#203 二轮：跨进程窗口宿主判定）', () 
   test('非 Windows 平台空转：不炸、返回原因、零窗口', () => {
     if (process.platform === 'win32') return
     const lines: string[] = []
-    const result = applyWindowsIcon((line) => lines.push(line), ['/nonexistent/app-icon.ico'])
+      const result = applyWindowsIcon(collectingLogger(lines), ['/nonexistent/app-icon.ico'])
     expect(result.ok).toBe(false)
     expect(result.windows).toBe(0)
     expect(result.reason).toBe('非 Windows 平台')
@@ -32,7 +33,7 @@ describe('imageMatchesHints（#203 二轮：跨进程窗口宿主判定）', () 
 
   test('函数签名收口：log 回调只在真实路径调用', () => {
     // 平台守卫在最前：这条守卫保证 mac/linux 的壳启动不会碰任何 FFI
-    const result = applyWindowsIcon(() => {}, ['any'])
+      const result = applyWindowsIcon(silentLogger, ['any'])
     if (process.platform !== 'win32') expect(result.reason).toBe('非 Windows 平台')
   })
 })

@@ -15,6 +15,7 @@ import {
   createNativeNotify,
   NOTIFY_LIB_NAME,
 } from '../src/bun/notify/notify-un.ts'
+import { collectingLogger } from './helpers/test-logger.ts'
 import {
   MACOS_NOTIFICATION_SETTINGS_URL,
   permissionFromCode,
@@ -95,7 +96,7 @@ describe('进程身份门（裸进程里碰 UN 会让 Bun 崩）', () => {
     const bridge = createNativeNotify({
       platform: 'darwin',
       execPath: BARE_EXEC,
-      log: (line) => logs.push(line),
+        log: collectingLogger(logs),
     })
     expect(bridge.available).toBe(false)
     expect(bridge.status()).toBe('unavailable')
@@ -106,7 +107,7 @@ describe('进程身份门（裸进程里碰 UN 会让 Bun 崩）', () => {
 
   test('非 macOS 不找库，直接不可用', () => {
     const logs: string[] = []
-    const bridge = createNativeNotify({ platform: 'win32', execPath: APP_EXEC, log: (l) => logs.push(l) })
+      const bridge = createNativeNotify({ platform: 'win32', execPath: APP_EXEC, log: collectingLogger(logs) })
     expect(bridge.available).toBe(false)
     expect(logs.some((line) => line.includes('没有 UN 桥'))).toBe(true)
   })
@@ -184,7 +185,7 @@ describe('库定位顺序（环境变量 > 包内 runtime > 可执行体同级 >
 
   test.skipIf(!dylibBuilt)('本仓的 dylib 就位：dev .app 身份下桥可用（只 dlopen，不调 UN）', () => {
     const logs: string[] = []
-    const bridge = createNativeNotify({ platform: 'darwin', execPath: APP_EXEC, log: (l) => logs.push(l) })
+      const bridge = createNativeNotify({ platform: 'darwin', execPath: APP_EXEC, log: collectingLogger(logs) })
     expect(bridge.available).toBe(true)
     expect(bridge.libPath?.endsWith(NOTIFY_LIB_NAME)).toBe(true)
     expect(logs).toEqual([])

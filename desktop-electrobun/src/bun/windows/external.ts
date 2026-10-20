@@ -86,7 +86,7 @@ export function externalLinksScript(selfOrigin: string): string {
     '  const call = (method, params) => (globalThis.__DSH_SHELL_RPC__ ?? {}).request?.(method, params) ?? Promise.reject(new Error("shell rpc unavailable"))',
     `  const SELF_ORIGIN = ${JSON.stringify(selfOrigin)}`,
     `  const PROTOCOLS = ${JSON.stringify([...EXTERNAL_PROTOCOLS])}`,
-    '  const log = (msg) => console.info("[external] " + msg)',
+    '  const log = (msg) => console.debug("[external] " + msg)',
     '  const isExternal = (raw) => {',
     '    let url',
     '    try { url = new URL(raw, location.href) } catch { return false }',

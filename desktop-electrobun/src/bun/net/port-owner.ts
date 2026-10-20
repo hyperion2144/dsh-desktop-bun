@@ -10,6 +10,7 @@
 // - 杀进程打日志（旧壳的 stop_port_owner 完全静默，只有失败方打 error）。
 
 import { createConnection } from 'node:net'
+import type { Logger } from '../../shared/logging/levels.ts'
 
 export interface RunResultLike {
   status: number
@@ -101,7 +102,7 @@ export interface StopPortOwnerInput {
   /** 额外豁免的 pid（调用方把自己的子进程树带进来）。 */
   excludePids?: readonly number[]
   platform?: NodeJS.Platform
-  log?: (message: string) => void
+  log?: Logger
 }
 
 /**
@@ -112,7 +113,7 @@ export async function stopPortOwner(input: StopPortOwnerInput): Promise<boolean>
   const isOpen = input.portOpenFn ?? portOpen
   const kill = input.kill ?? defaultKill
   const sleep = input.sleep ?? ((ms: number) => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, ms)))
-  const log = input.log ?? ((): void => {})
+  const log: Logger | undefined = input.log
   const exempt = new Set<number>([process.pid, process.ppid].filter((pid): pid is number => typeof pid === 'number'))
   for (const pid of input.excludePids ?? []) exempt.add(pid)
   const seen: number[] = []
@@ -122,14 +123,14 @@ export async function stopPortOwner(input: StopPortOwnerInput): Promise<boolean>
     if (fresh.length === 0) {
       if (error !== null && seen.length === 0) {
         // 枚举不出占用者：不谎报成功，只按端口是否关闭下结论（旧壳降级语义）。
-        log(`[port] 无法枚举端口 ${input.port} 的占用者（${error}），按端口是否释放判定`)
+        log?.warn(`无法枚举端口 ${input.port} 的占用者（${error}），按端口是否释放判定`)
         break
       }
       if (pids.length === 0) break
       break
     }
     for (const pid of fresh) {
-      log(`[port] 端口 ${input.port} 占用者 pid = ${pid}，SIGTERM`)
+      log?.debug(`端口 ${input.port} 占用者 pid = ${pid}，SIGTERM`)
       kill(pid, 'TERM')
       seen.push(pid)
     }
@@ -140,7 +141,7 @@ export async function stopPortOwner(input: StopPortOwnerInput): Promise<boolean>
   }
   if (seen.length > 0) {
     for (const pid of seen) {
-      log(`[port] 端口 ${input.port} 占用者 pid = ${pid} 未退出，SIGKILL`)
+      log?.warn(`端口 ${input.port} 占用者 pid = ${pid} 未退出，SIGKILL`)
       kill(pid, 'KILL')
     }
     for (let check = 0; check < 20; check += 1) {

@@ -2,6 +2,15 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；本文件只记**桌面端**（移动端见 [CHANGELOG-mobile.md](CHANGELOG-mobile.md)）。
 
+## Unreleased
+
+### 统一日志管理（map #221）
+
+- 统一日志内核：壳主进程 / 页面 webview / 宿主输出 / relay 中继四路日志单写者纳管，写盘分级，按跨天与大小双阈值轮转，gzip 归档进 logs/archive/。
+- 日志级别 debug/info/warn/error 四档，桌面设置「日志与诊断」卡切换即时生效；保留天数与总大小可配置，超限自动清理最旧归档。
+- 日志导出：预设（今天/近 7 天/近 30 天/全部）与自定义时间范围导出 tar.gz 单包；一键清理带二次确认；IO 写失败不再静默，诊断快照可见。
+- 全仓日志调用点整改：删重复/噪声日志、关键路径补日志、调用点对齐分级。
+
 ## [0.1.0] - 2026-10-20
 
 首个版本：DeepSeek Harness 的完整桌面形态——把 dsh 装进系统托盘，开箱即用。

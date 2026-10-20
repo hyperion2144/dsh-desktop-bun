@@ -24,6 +24,7 @@ import {
   updateActions,
   updateView,
 } from '../src/shared/runtime/update.ts'
+import { collectingLogger, silentLogger } from './helpers/test-logger.ts'
 import type { StatusLike } from '../src/shared/runtime/update.ts'
 import { createUpdater, isFlagOn, type UpdaterLike } from '../src/bun/platform/updater.ts'
 
@@ -315,9 +316,7 @@ function fakeUpdater(input: {
 
 describe('createUpdater（IO 外壳）', () => {
   const logLines: string[] = []
-  const log = (line: string): void => {
-    logLines.push(line)
-  }
+    const log = collectingLogger(logLines)
 
   test('被开关关掉 ⇒ 不可用且写明是哪个环境变量', async () => {
     const updater = createUpdater({
@@ -450,7 +449,7 @@ describe('createUpdater（IO 外壳）', () => {
 })
 
 describe('失败语义：404 ⇒ 无更新（#216）', () => {
-  const log = (): void => {}
+    const log = silentLogger
   const base = {
     available: true,
     reason: '',

@@ -9,6 +9,8 @@
 //   2. 数值一律夹取到有意义区间（并发 1..32、心跳 1s..600s），而不是原样接受；
 //   3. 枚举只认白名单（代理模式、dsh 来源、运行时下载源、loopback 聚合档位），其余回落到"没设置"。
 
+import { DEFAULT_LOG_LEVEL, LOG_LEVELS, type LogLevel } from '../logging/levels.ts'
+
 /** 下载管理器并发上限（旧壳 `configured_download_concurrency`：默认 3，夹在 1..=32）。 */
 export const DEFAULT_DOWNLOAD_CONCURRENCY = 3
 export const DOWNLOAD_CONCURRENCY_MIN = 1
@@ -23,6 +25,14 @@ export const MUX_HEARTBEAT_MAX = 600_000
 export const DEFAULT_MOBILE_GUARD_BACKOFF_MS = 10_000
 export const MOBILE_GUARD_BACKOFF_MIN = 1_000
 export const MOBILE_GUARD_BACKOFF_MAX = 600_000
+
+/** #221 统一日志：级别四档（debug/info/warn/error）+ 保留策略（天数只作用归档份；总量=归档合计+三个活跃文件）。 */
+export const LOG_RETENTION_DAYS_DEFAULT = 14
+export const LOG_RETENTION_DAYS_MIN = 1
+export const LOG_RETENTION_DAYS_MAX = 365
+export const LOG_MAX_TOTAL_MB_DEFAULT = 200
+export const LOG_MAX_TOTAL_MB_MIN = 50
+export const LOG_MAX_TOTAL_MB_MAX = 2000
 
 export const PROXY_MODES = ['off', 'system', 'manual'] as const
 export type ProxyMode = (typeof PROXY_MODES)[number]
@@ -108,6 +118,12 @@ export interface DesktopSettings {
   devTools?: boolean
   /** #128：loopback 数据面 GET 单飞合并的档位（可选 ⇒ 旧设置文件没这个键时回 DEFAULT_LOOPBACK_AGGREGATION）。切换即时生效，不重启。 */
   loopbackAggregation?: LoopbackAggregation
+  /** #221：全局日志级别（debug/info/warn/error）；设置卡切换即时生效，只控写盘、不影响 stdout 镜像。 */
+  logLevel?: LogLevel
+  /** #221：日志保留天数（归档份；1–365，缺省 14）。 */
+  logRetentionDays?: number
+  /** #221：日志总量上限 MB（归档合计+三个活跃文件；50–2000，缺省 200）。 */
+  logMaxTotalMb?: number
   profilePorts?: Record<string, number>
   profileLanePorts?: Record<string, number>
   /** 页面口（loopback origin）偏好：语义对齐 env DSH_SHELL_PAGE_PORT——请求值，被占顺延（改口=换本地存储隔离空间）。 */
@@ -154,6 +170,9 @@ export function serializeSettings(settings: DesktopSettings): Record<string, unk
   put('prevent_sleep', settings.preventSleep)
   put('dev_tools', settings.devTools)
   put('loopback_aggregation', settings.loopbackAggregation)
+  put('log_level', settings.logLevel)
+  put('log_retention_days', settings.logRetentionDays)
+  put('log_max_total_mb', settings.logMaxTotalMb)
   put('profile_ports', settings.profilePorts)
   put('profile_lane_ports', settings.profileLanePorts)
   put('profile_page_ports', settings.profilePagePorts)
@@ -239,6 +258,9 @@ export function defaultSettings(): DesktopSettings {
     preventSleep: true,
     devTools: false,
     loopbackAggregation: DEFAULT_LOOPBACK_AGGREGATION,
+    logLevel: DEFAULT_LOG_LEVEL,
+    logRetentionDays: LOG_RETENTION_DAYS_DEFAULT,
+    logMaxTotalMb: LOG_MAX_TOTAL_MB_DEFAULT,
     dshMode: 'builtin',
     runtimeSource: 'github',
     proxyMode: 'off',
@@ -355,6 +377,9 @@ export function normalizeSettings(raw: unknown): DesktopSettings {
     preventSleep: bool(pick('preventSleep', 'prevent_sleep')) ?? base.preventSleep,
     devTools: bool(pick('devTools', 'dev_tools')) ?? base.devTools,
     loopbackAggregation: oneOf(pick('loopbackAggregation', 'loopback_aggregation'), LOOPBACK_AGGREGATION_MODES) ?? base.loopbackAggregation,
+    logLevel: oneOf(pick('logLevel', 'log_level'), LOG_LEVELS) ?? base.logLevel,
+    logRetentionDays: int(pick('logRetentionDays', 'log_retention_days'), LOG_RETENTION_DAYS_MIN, LOG_RETENTION_DAYS_MAX) ?? base.logRetentionDays,
+    logMaxTotalMb: int(pick('logMaxTotalMb', 'log_max_total_mb'), LOG_MAX_TOTAL_MB_MIN, LOG_MAX_TOTAL_MB_MAX) ?? base.logMaxTotalMb,
     dshMode: oneOf(pick('dshMode', 'dsh_mode'), DSH_MODES) ?? base.dshMode,
     runtimeSource: oneOf(pick('runtimeSource', 'runtime_source'), RUNTIME_SOURCES) ?? base.runtimeSource,
     proxyMode: oneOf(pick('proxyMode', 'proxy_mode'), PROXY_MODES) ?? base.proxyMode,
@@ -560,6 +585,9 @@ function port(value: unknown): number | undefined {
   if (settings.profilePorts !== undefined) parts.push(`profilePorts=${JSON.stringify(settings.profilePorts)}`)
   if (settings.profilePagePorts !== undefined) parts.push(`profilePagePorts=${JSON.stringify(settings.profilePagePorts)}`)
   if (!settings.notifications.enabled) parts.push('notifications=off')
+  push('logLevel', settings.logLevel, base.logLevel)
+  push('logRetentionDays', settings.logRetentionDays, base.logRetentionDays)
+  push('logMaxTotalMb', settings.logMaxTotalMb, base.logMaxTotalMb)
   const offScenarios = NOTIFICATION_SCENARIOS.filter(
     (meta) => (settings.notifications.scenarios[meta.id]?.enabled ?? meta.defaultOn) !== meta.defaultOn,
   )

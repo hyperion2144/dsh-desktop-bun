@@ -4,6 +4,8 @@
 
 import { systemProxyFromEnv, type ProxyEnv } from '../../shared/net/proxy-env.ts'
 import { parseScutilProxy, parseWindowsProxyRegistry } from '../../shared/net/system-proxy.ts'
+import type { Logger } from '../../shared/logging/levels.ts'
+import { NOOP_LOGGER } from '../../shared/app/noop-log.ts'
 
 export interface SystemProxyRunResult {
   status: number
@@ -15,18 +17,18 @@ export interface SystemProxyInput {
   env: Record<string, string | undefined>
   /** 注入点：单测用它替掉真进程（默认 `Bun.spawnSync`）。 */
   run?: (cmd: string[]) => SystemProxyRunResult
-  log?: (line: string) => void
+  log?: Logger
 }
 
 export function detectSystemProxy(input: SystemProxyInput): ProxyEnv | null {
-  const log = input.log ?? ((): void => {})
+  const log: Logger = input.log ?? NOOP_LOGGER
   const run = input.run ?? defaultRun
   if (input.platform === 'darwin') {
     const result = safeRun(run, ['scutil', '--proxy'])
     if (result !== null && result.status === 0) {
       const parsed = parseScutilProxy(result.stdout)
       if (parsed !== null) {
-        log(`[proxy] 继承系统代理（scutil）：${describe(parsed)}`)
+        log.debug(`继承系统代理（scutil）：${describe(parsed)}`)
         return parsed
       }
     }
@@ -38,7 +40,7 @@ export function detectSystemProxy(input: SystemProxyInput): ProxyEnv | null {
     if (result !== null && result.status === 0) {
       const parsed = parseWindowsProxyRegistry(result.stdout)
       if (parsed !== null) {
-        log(`[proxy] 继承系统代理（注册表）：${describe(parsed)}`)
+        log.debug(`继承系统代理（注册表）：${describe(parsed)}`)
         return parsed
       }
     }

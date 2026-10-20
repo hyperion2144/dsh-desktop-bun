@@ -27,6 +27,7 @@ export function PfBtn({
   children,
   style,
   title,
+  testId,
 }: {
   variant?: 'primary' | 'ghost' | 'danger'
   disabled?: boolean
@@ -34,6 +35,8 @@ export function PfBtn({
   children: React.ReactNode
   style?: React.CSSProperties
   title?: string
+  /** 测试 id → data-desktop-settings（同 PortCell 的 testId 惯例，#221 新控件都要带 id）。 */
+  testId?: string
 }): React.ReactElement {
   const baseStyle =
     variant === 'primary' ? BTN_PRIMARY_STYLE : variant === 'ghost' ? BTN_GHOST_STYLE : BTN_DANGER_STYLE
@@ -45,6 +48,7 @@ export function PfBtn({
       disabled={disabled}
       title={title}
       onClick={onClick}
+      data-desktop-settings={testId}
       style={{ ...baseStyle, ...(style ?? {}) }}
     >
       {children}

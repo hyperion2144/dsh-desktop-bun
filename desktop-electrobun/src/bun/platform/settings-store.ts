@@ -13,6 +13,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname, join } from 'node:path'
 
 import { type DesktopSettings, defaultSettings, normalizeSettings, serializeSettings } from '../../shared/settings/settings.ts'
+import { type Logger } from '../../shared/logging/levels.ts'
+import { NOOP_LOGGER } from '../../shared/app/noop-log.ts'
 
 export const SETTINGS_FILE = 'desktop-settings.json'
 export const LEGACY_SETTINGS_FILE = 'settings.yaml'
@@ -25,9 +27,8 @@ export function legacySettingsPath(home: string): string {
   return join(home, LEGACY_SETTINGS_FILE)
 }
 
-export interface SettingsLogger {
-  (line: string): void
-}
+/** 设置域的日志通道（分级 Logger；注入方给模块身份，消息里不再造前缀）。 */
+export type SettingsLogger = Logger
 
 /**
  * 极简 YAML 读取：只认「映射 + 标量叶子」，够读旧壳块。
@@ -93,7 +94,7 @@ export interface LoadSettingsInput {
 }
 
 export function loadSettings(input: LoadSettingsInput): LoadedSettings {
-  const log = input.log ?? ((): void => {})
+  const log: SettingsLogger = input.log ?? NOOP_LOGGER
   const path = settingsPath(input.home)
   if (existsSync(path)) {
     try {
@@ -103,9 +104,9 @@ export function loadSettings(input: LoadSettingsInput): LoadedSettings {
       const backup = `${path}.corrupt`
       try {
         renameSync(path, backup)
-        log(`[settings] 设置文件损坏，已备份到 ${backup}，本次用默认值重建`)
+        log.warn(`设置文件损坏，已备份到 ${backup}，本次用默认值重建`)
       } catch (error) {
-        log(`[settings] 设置文件损坏且备份失败：${String(error)}`)
+        log.error(`设置文件损坏且备份失败：${String(error)}`)
       }
       const settings = legacyOrDefaults(input.home, log)
       saveSettings(input.home, settings.settings)
@@ -114,7 +115,7 @@ export function loadSettings(input: LoadSettingsInput): LoadedSettings {
   }
   const migrated = legacyOrDefaults(input.home, log)
   saveSettings(input.home, migrated.settings)
-  log(migrated.migrated ? '[settings] 已从旧 settings.yaml 迁移到 desktop-settings.json' : `[settings] 新建 ${path}`)
+  log.debug(migrated.migrated ? '已从旧 settings.yaml 迁移到 desktop-settings.json' : `新建 ${path}`)
   return { settings: migrated.settings, path, created: true, migrated: migrated.migrated, recovered: false }
 }
 
@@ -123,10 +124,10 @@ function legacyOrDefaults(home: string, log: SettingsLogger): { settings: Deskto
   if (!existsSync(legacy)) return { settings: defaultSettings(), migrated: false }
   try {
     const migrated = migrateFromLegacyYaml(readFileSync(legacy, 'utf8'))
-    log(`[settings] 读到旧 ${legacy}（只读迁移，不改动它）`)
+    log.debug(`读到旧 ${legacy}（只读迁移，不改动它）`)
     return { settings: migrated, migrated: true }
   } catch (error) {
-    log(`[settings] 旧 settings.yaml 读取失败：${String(error)}`)
+    log.warn(`旧 settings.yaml 读取失败：${String(error)}`)
     return { settings: defaultSettings(), migrated: false }
   }
 }

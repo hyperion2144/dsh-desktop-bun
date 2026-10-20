@@ -13,5 +13,9 @@
 | [0007](0007-oauth-callback-admission-exemption.md) | OAuth 回调的准入窄豁免：只放跨站 GET 顶层文档导航 | Accepted（2026-10-18） |
 | [0008](0008-shell-rpc-core-shared.md) | 壳 RPC 客户端收进 `shared/rpc/core.ts`：一处实现，preload / 两弹窗 / 插件四入口共用（supersede 0005 §3） | Accepted（2026-10-19） |
 | [0009](0009-bun-source-domain-layout.md) | 壳源码按运行时域分一层子目录（host/windows/commands/net/runtime/profiles/notify/platform），组合根留根 | Accepted（2026-10-19） |
+| [0010](0010-export-targz-not-zip.md) | 日志导出用 tar.gz 单包而非 zip（Bun 无 ZIP 容器写入器，不自造归档格式） | Accepted（2026-10-20） |
+| [0011](0011-unified-log-sink-dual-rotation.md) | shell.log 单写者合并（进程级 sink+级别持有者）与按天/大小双触发轮转归档 | Accepted（2026-10-20） |
+| [0012](0012-logging-commands-not-in-grant-lists.md) | 日志管理命令不进远程/访客白名单（负例测试钉住） | Accepted（2026-10-20） |
+| [0013](0013-relay-log-in-kernel-no-level-filter.md) | relay 日志纳入统一内核，但级别过滤不作用（Windows 排障唯一入口） | Accepted（2026-10-20） |
 
 词表见根目录 [CONTEXT.md](../../CONTEXT.md)；调研笔记见 [docs/research/](../research/)。

@@ -23,6 +23,7 @@ import {
   uniqueTargetPath,
   type DownloadTask,
 } from '../src/shared/app/downloads.ts'
+import { silentLogger } from './helpers/test-logger.ts'
 import { createDownloadManager, downloadsDir, tasksFileOf } from '../src/bun/commands/downloads.ts'
 
 function tempDir(prefix: string): string {
@@ -140,7 +141,7 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
     const manager = createDownloadManager({
       home,
       downloadDir: dir,
-      log: () => {},
+        log: silentLogger,
       notify: (name) => notified.push(name),
       chooseDirectory: async () => dir,
       fetchImpl: async () => new Response('hello world', { status: 200, headers: { 'content-length': '11' } }),
@@ -167,7 +168,7 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
     const manager = createDownloadManager({
       home,
       downloadDir: nested,
-      log: () => {},
+        log: silentLogger,
       chooseDirectory: async () => nested,
       fetchImpl: async () => new Response('made it', { status: 200, headers: { 'content-length': '7' } }),
     })
@@ -192,7 +193,7 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
     const manager = createDownloadManager({
       home,
       downloadDir: dir,
-      log: () => {},
+        log: silentLogger,
       chooseDirectory: async () => dir,
       fetchImpl: async (_url, init) => {
         const headers = new Headers(init?.headers)
@@ -224,7 +225,7 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
     const manager = createDownloadManager({
       home,
       downloadDir: dir,
-      log: () => {},
+        log: silentLogger,
       chooseDirectory: async () => dir,
       fetchImpl: async () => {
         calls += 1
@@ -245,7 +246,7 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
     const manager = createDownloadManager({
       home,
       downloadDir: dir,
-      log: () => {},
+        log: silentLogger,
       chooseDirectory: async () => dir,
       fetchImpl: async () => new Response('nope', { status: 404 }),
     })
@@ -260,7 +261,7 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
     const manager = createDownloadManager({
       home,
       downloadDir: tempDir('dsh-dl-target-'),
-      log: () => {},
+        log: silentLogger,
       chooseDirectory: async () => null,
       fetchImpl: async () => {
         calls += 1
@@ -281,7 +282,7 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
       home,
       downloadDir: dir,
       concurrency: 1,
-      log: () => {},
+        log: silentLogger,
       chooseDirectory: async () => dir,
       fetchImpl: async () => {
         active += 1
@@ -309,7 +310,7 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
     const manager = createDownloadManager({
       home,
       downloadDir: dir,
-      log: () => {},
+        log: silentLogger,
       chooseDirectory: async () => dir,
       fetchImpl: async () => {
         // 先落一段再等闸门：暂停时 .part 已有内容
@@ -344,7 +345,7 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
     const manager = createDownloadManager({
       home,
       downloadDir: dir,
-      log: () => {},
+        log: silentLogger,
       chooseDirectory: async () => dir,
       fetchImpl: async () => new Response('', { status: 200 }),
     })
@@ -375,7 +376,7 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
         taskOf({ id: 9, kind: 'blob', status: 'queued', targetPath: join(dir, 'b.bin'), filename: 'b.bin' }),
       ])
     )
-    const manager = createDownloadManager({ home, downloadDir: dir, log: () => {}, fetchImpl: async () => new Response('') })
+      const manager = createDownloadManager({ home, downloadDir: dir, log: silentLogger, fetchImpl: async () => new Response('') })
     const list = manager.list()
     expect(list.find((task) => task.id === 7)?.status).toBe('paused')
     expect(list.find((task) => task.id === 9)?.status).toBe('cancelled')
@@ -391,7 +392,7 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
     const manager = createDownloadManager({
       home,
       downloadDir: dir,
-      log: () => {},
+        log: silentLogger,
       saveConcurrency: (value) => saved.push(value),
       chooseDirectory: async () => dir,
       fetchImpl: async () => new Response('ok', { status: 200 }),
@@ -420,7 +421,7 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
     const manager = createDownloadManager({
       home,
       downloadDir: dir,
-      log: () => {},
+        log: silentLogger,
       chooseDirectory: async () => dir,
       fetchImpl: async () => {
         const stream = new ReadableStream<Uint8Array>({
@@ -446,7 +447,7 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
     const manager = createDownloadManager({
       home,
       downloadDir: dir,
-      log: () => {},
+        log: silentLogger,
       chooseDirectory: async () => dir,
       cookieFor: (url) => (url.startsWith('http://127.0.0.1:3081/') ? 'dsh-auth-x=v1.sig' : null),
       fetchImpl: async (_url, init) => {

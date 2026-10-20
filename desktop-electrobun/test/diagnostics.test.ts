@@ -14,6 +14,7 @@ import {
   diagnosticsSummary,
   type DiagnosticsInput,
 } from '../src/shared/app/diagnostics.ts'
+import { collectingLogger } from './helpers/test-logger.ts'
 import { exportDiagnostics, diagnosticsDir } from '../src/bun/commands/diagnostics.ts'
 import { appVersionCandidates, resolveAppVersion } from '../src/bun/platform/app-version.ts'
 
@@ -46,7 +47,11 @@ function sampleInput(overrides: Partial<DiagnosticsInput> = {}): DiagnosticsInpu
     notify: { available: true, permission: 'granted', port: 5000 },
     logs: {
       shell: { path: '/home/.dsh/shell.log', bytes: 120, rotated: 1 },
-      webview: { path: '/home/.dsh/dsh-desktop-webview.log', bytes: 30, rotated: 0 },
+        webview: { path: '/home/.dsh/dsh-desktop-webview.log', bytes: 30, rotated: 0 },
+        relay: { path: '/home/.dsh/shell-relay.log', bytes: 8, rotated: 0 },
+        archive: { dir: '/home/.dsh/logs/archive', files: 1, bytes: 120 },
+        level: 'info',
+        health: { ioErrorCount: 0, lastIoError: null },
       tail: ['2026-10-11 23:00:00.000 [shell] 起服务面：profile = desktop'],
     },
     process: {
@@ -121,7 +126,7 @@ describe('诊断导出（真文件）', () => {
         snapshot: buildDiagnostics(sampleInput(), new Date(2026, 9, 11, 8, 3, 9)),
         now: new Date(2026, 9, 11, 8, 3, 9),
         reveal: (path) => revealed.push(path),
-        log: (line) => logs.push(line),
+          log: collectingLogger(logs),
       })
       expect(result.path).toBe(join(diagnosticsDir(home), 'diag-20261011-080309.json'))
       expect(existsSync(result.path)).toBe(true)
@@ -129,7 +134,7 @@ describe('诊断导出（真文件）', () => {
       const parsed = JSON.parse(readFileSync(result.path, 'utf8')) as { summary?: string }
       expect(parsed.summary).toContain('desktop')
       expect(revealed).toEqual([result.path])
-      expect(logs).toEqual([`[diag] 诊断已导出：${result.path}（${String(result.bytes)} 字节）`])
+        expect(logs).toEqual([`诊断已导出：${result.path}（${String(result.bytes)} 字节）`])
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

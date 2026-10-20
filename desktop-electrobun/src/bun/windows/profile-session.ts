@@ -27,6 +27,7 @@ import {
   type WindowFrame,
 } from './window-max.ts'
 import { shellLogLine } from '../platform/shell-log.ts'
+import { formatMessage, type Logger } from '../../shared/logging/levels.ts'
 import { createWindowFocusTracker } from './window-focus.ts'
 import {
   frameForPersist,
@@ -178,9 +179,14 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
   /** 每 profile 的开窗单飞（#188：opening 中 → await 同一 promise）。 */
   const openings = new Map<string, Promise<OpenResult>>()
 
-  const log = (line: string): void => {
-    console.log(line)
-  }
+    // 窗口域日志：直接走日志内核（源 = shell），级别由调用点的级别方法决定，
+    // 不再靠行首前缀定级（#228 的教训：前缀 + tee 会叠加，前缀定级就失效了）。
+    const log: Logger = {
+        debug: (message, ...args) => shellLogLine(formatMessage(message, args), 'debug'),
+        info: (message, ...args) => shellLogLine(formatMessage(message, args), 'info'),
+        warn: (message, ...args) => shellLogLine(formatMessage(message, args), 'warn'),
+        error: (message, ...args) => shellLogLine(formatMessage(message, args), 'error'),
+    }
 
   /** 持有 lane 转发器的那份服务面（多实例下只有先起的那份非 null）。 */
   function findLaneForwarder(): LaneForwarder | null {
@@ -290,7 +296,7 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
       try {
         saveFrameNow(record, win)
       } catch (error) {
-        console.warn(`[shell] 窗口几何落盘失败：${String(error)}`)
+          log.warn(`窗口几何落盘失败：${String(error)}`)
       }
     }, FRAME_SAVE_DEBOUNCE_MS)
   }
@@ -306,22 +312,22 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
     const frame = win.getFrame()
     const workArea = deps.workArea(frame)
     if (workArea === null) {
-      shellLogLine(`[shell] #80 heal 检查（${reason}）：workArea 取不到（Screen 无显示器数据），跳过`)
+        log.debug(`#80 heal 检查（${reason}）：workArea 取不到（Screen 无显示器数据），跳过`)
       return
     }
     const verdict = healVerdict(isMaximizedPlacementDamaged(frame, workArea), record.healReplaces)
     if (verdict === 'clean') {
-      shellLogLine(`[shell] #80 heal 检查（${reason}）：落位正常，不干预 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}`)
+        log.debug(`#80 heal 检查（${reason}）：落位正常，不干预 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}`)
       return
     }
     if (verdict === 'exhausted') {
-      shellLogLine(`[shell] #80 heal 检查（${reason}）：已重摆 ${HEAL_MAX_REPLACES} 次仍外扩，停止防循环 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}（重摆也落不好，日志留给上游 WM_NCCALCSIZE 根治）`)
+        log.warn(`#80 heal 检查（${reason}）：已重摆 ${HEAL_MAX_REPLACES} 次仍外扩，停止防循环 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}（重摆也落不好，日志留给上游 WM_NCCALCSIZE 根治）`)
       return
     }
     record.healReplaces += 1
-    shellLogLine(
-      `[shell] #80 heal 检查（${reason}）：落位外扩 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}，原生重摆（第 ${record.healReplaces} 次）`,
-    )
+      log.debug(
+          `#80 heal 检查（${reason}）：落位外扩 frame=${JSON.stringify(frame)} workArea=${JSON.stringify(workArea)}，原生重摆（第 ${record.healReplaces} 次）`,
+      )
     win.unmaximize()
     win.maximize()
     // 重摆会引发 resize 与动画：作废在途的去抖检查与延迟复查，重摆落定后重排一次。
@@ -374,7 +380,7 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
       focusedProfile = profile
       // #115：焦点记账——通知的「聚焦不打扰」靠它；这条日志也是实机自证（聚焦时不弹）
       focus.focus(profile)
-      log(`[shell] 窗口聚焦：${profile}`)
+        log.debug(`窗口聚焦：${profile}`)
       // #73：启动恢复最大化断言（唯一断言点）——首次获得焦点时窗口必然已可见。
       // delete 语义必须保留：flag 不清，用户还原窗口后每次 focus 都会被重新拉最大化。
       if (record.pendingStartMaximized) {
@@ -398,7 +404,7 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
         if (win.isMaximized()) {
           win.unmaximize()
           win.maximize()
-          log(`[shell] 最小化恢复：重新落位最大化（${profile}）`)
+            log.info(`最小化恢复：重新落位最大化（${profile}）`)
         }
       }
     })
@@ -413,7 +419,7 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
         }, 200)
         if (typeof timer === 'object' && timer !== null && 'unref' in timer) (timer as { unref(): void }).unref()
       }
-      log(`[shell] 窗口失焦：${profile}`)
+        log.debug(`窗口失焦：${profile}`)
     })
     // 关窗策略三处共用 closePolicy；原生层先问 will-close，allow=false 就不关。
     win.on('will-close', (event: unknown) => {
@@ -423,15 +429,15 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
       const action = deps.closePolicy(profile, win)
       if (action === 'hidden') {
         ;(event as { response?: unknown }).response = { allow: false }
-        log(`[shell] 关窗回托盘（${profile} 窗口隐藏，进程继续）`)
+          log.info(`关窗回托盘（${profile} 窗口隐藏，进程继续）`)
         return
       }
       if (action === 'quit') {
-        log('[shell] 关窗（无托盘）：直接退出')
+          log.info('关窗（无托盘）：直接退出')
         deps.onQuitRequested()
         return
       }
-      log(`[shell] 关窗（${profile}）：只销毁窗口，实例继续跑`)
+        log.info(`关窗（${profile}）：只销毁窗口，实例继续跑`)
     })
     win.on('close', () => dispose(record, win))
     // D3：每窗各自记几何；#80：resize 也纳入 heal 触发面（任务栏恢复的落位外扩在最终摆位后才定格）。
@@ -453,7 +459,9 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
       record.frameSaveTimer = null
       try {
         saveFrameNow(record, win)
-      } catch {}
+      } catch (error) {
+          log.warn(`窗口几何落盘失败（${profile}）：${String(error)}`)
+      }
     }
     record.window = null
     record.ready = false
@@ -467,7 +475,7 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
     deps.views.revokeLabel(windowKey(profile))
     // 窗口里的 guest 子 webview 跟着窗口一起回收（否则会留在窗口之外无法关闭）
     const released = deps.guests.releaseHost(windowKey(profile))
-    if (released > 0) log(`[shell] 随窗口回收 guest：${released} 个（${profile}）`)
+      if (released > 0) log.debug(`随窗口回收 guest：${released} 个（${profile}）`)
     // #115：窗口没了就不再算「在前台」（关闭不一定补 blur）
     focus.release(profile)
     if (focusedProfile === profile) {
@@ -524,7 +532,7 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
     // 退过的服务面是终态对象（HTTP 面/看门狗/端口认领都拆了）：复用它拉不起 DSH
     // （supervisor 的 stopping 粘住）——退过的实例得重新起一份（#215）。
     if (existing !== null && before?.retired !== true) return existing
-    log(`[shell] 起服务面：profile = ${profile}`)
+      log.info(`起服务面：profile = ${profile}`)
     const started = await deps.createService(profile)
     let record = recordFor(profile)
     if (record === undefined) {
@@ -539,14 +547,14 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
 
   async function stopRecord(record: SessionRecord): Promise<void> {
     if (record.service === null) {
-      log(`[shell] 退出实例：${record.profile} 没有在跑的服务面，忽略`)
+        log.debug(`退出实例：${record.profile} 没有在跑的服务面，忽略`)
       return
     }
     if (record.retired) {
-      log(`[shell] 退出实例：${record.profile} 的实例已经退过了，忽略`)
+        log.debug(`退出实例：${record.profile} 的实例已经退过了，忽略`)
       return
     }
-    log(`[shell] 退出实例：停止 ${record.profile} 的 dsh 与服务面`)
+      log.info(`退出实例：停止 ${record.profile} 的 dsh 与服务面`)
     const svc = record.service
     record.stopping = true
     try {
@@ -685,7 +693,9 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
         if (record.window === null) continue
         try {
           saveFrameNow(record, record.window)
-        } catch {}
+        } catch (error) {
+            log.warn(`窗口几何落盘失败（${record.profile}）：${String(error)}`)
+        }
       }
     },
 
@@ -705,12 +715,16 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
     stop: async (profile: string) => {
       const record = recordFor(profile)
       if (record === undefined) {
-        log(`[shell] 退出实例：${profile} 没有在跑的服务面，忽略`)
+          log.debug(`退出实例：${profile} 没有在跑的服务面，忽略`)
         return
       }
       // stop() 等 opening 落定后再停（不取消）
       const pending = openings.get(profile)
-      if (pending !== undefined) await pending.catch(() => {})
+      if (pending !== undefined) {
+        await pending.catch(() => {
+            log.debug(`等待开窗落定失败（${profile}）`)
+        })
+      }
       await stopRecord(record)
     },
 

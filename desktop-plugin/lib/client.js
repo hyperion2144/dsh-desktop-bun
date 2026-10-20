@@ -44,9 +44,52 @@ __export(index_exports, {
 });
 module.exports = __toCommonJS(index_exports);
 
-// src/client/shell-rpc.ts
-var DEFAULT_TIMEOUT_MS = 15e3;
-var MAX_ID = 1e10;
+// ../shared/rpc/core.ts
+function createRpcCore(options) {
+  const post = options.post;
+  const defaultTimeoutMs = options.timeoutMs ?? 15e3;
+  const maxId = options.maxId ?? 1e10;
+  const scheduleTimeout = options.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
+  const cancelTimeout = options.clearTimeout ?? ((handle) => clearTimeout(handle));
+  const pending = /* @__PURE__ */ new Map();
+  let nextId = 0;
+  function settle(packet) {
+    const id = typeof packet.id === "number" ? packet.id : NaN;
+    const waiter = pending.get(id);
+    if (waiter === void 0) return;
+    pending.delete(id);
+    if (waiter.timer !== void 0) cancelTimeout(waiter.timer);
+    if (packet.success === true) waiter.resolve(packet.payload);
+    else waiter.reject(new Error(typeof packet.error === "string" ? packet.error : "shell rpc failed"));
+  }
+  return {
+    invoke(method, params, invokeOptions) {
+      nextId = nextId < maxId ? nextId + 1 : 1;
+      const id = nextId;
+      return new Promise((resolve, reject) => {
+        const timer = invokeOptions?.noTimeout === true ? void 0 : scheduleTimeout(() => {
+          pending.delete(id);
+          reject(new Error("RPC request timed out."));
+        }, invokeOptions?.timeoutMs ?? defaultTimeoutMs);
+        pending.set(id, { resolve, reject, timer });
+        try {
+          post(JSON.stringify({ type: "request", id, method, params: params ?? {} }));
+        } catch (error) {
+          pending.delete(id);
+          if (timer !== void 0) cancelTimeout(timer);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+    },
+    receive(packet) {
+      if (!packet || typeof packet !== "object" || packet.type !== "response") return;
+      settle(packet);
+    }
+  };
+}
+var SHELL_RPC_CORE_SOURCE = createRpcCore.toString();
+
+// src/client/shell/shell-rpc.ts
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -54,23 +97,19 @@ function createShellRpc(deps) {
   const readGlobals = deps?.readGlobals ?? (() => globalThis);
   const setTimeoutImpl = deps?.setTimeoutImpl ?? ((fn, ms) => setTimeout(fn, ms));
   const clearTimeoutImpl = deps?.clearTimeoutImpl ?? ((t) => clearTimeout(t));
-  const pending = /* @__PURE__ */ new Map();
-  let nextId = 0;
+  let core = null;
   let receiveAttached = false;
   function officialBridge() {
     const post = readGlobals().__electrobunHostBridge?.postMessage;
     return typeof post === "function" ? post : void 0;
   }
-  function handlePacket(packet) {
-    if (!isRecord(packet)) return;
-    if (packet.type !== "response") return;
-    const id = typeof packet.id === "number" ? packet.id : NaN;
-    const waiter = pending.get(id);
-    if (waiter === void 0) return;
-    pending.delete(id);
-    if (waiter.timer !== void 0) clearTimeoutImpl(waiter.timer);
-    if (packet.success === true) waiter.resolve(packet.payload);
-    else waiter.reject(new Error(typeof packet.error === "string" ? packet.error : "shell rpc failed"));
+  function rpcCore() {
+    if (core === null) {
+      const post = officialBridge();
+      if (post === void 0) throw new Error("official bridge unavailable");
+      core = createRpcCore({ post, setTimeout: setTimeoutImpl, clearTimeout: clearTimeoutImpl });
+    }
+    return core;
   }
   function ensureReceive() {
     if (typeof readGlobals().__DSH_SHELL_RPC__?.invoke === "function") {
@@ -81,12 +120,12 @@ function createShellRpc(deps) {
     const g = readGlobals();
     const eb = g.__electrobun;
     if (!eb) return;
-    eb.receiveMessageFromHost = handlePacket;
+    eb.receiveMessageFromHost = rpcCore().receive;
     receiveAttached = true;
     const queued = g.__electrobunPendingHostMessages;
     if (Array.isArray(queued)) {
       g.__electrobunPendingHostMessages = [];
-      for (const packet of queued) handlePacket(packet);
+      for (const packet of queued) rpcCore().receive(packet);
     }
   }
   function officialInvoke(cmd, args, options) {
@@ -95,32 +134,12 @@ function createShellRpc(deps) {
     const post = officialBridge();
     if (post === void 0) return Promise.reject(new Error("official bridge unavailable"));
     ensureReceive();
-    nextId = nextId < MAX_ID ? nextId + 1 : 1;
-    const id = nextId;
-    return new Promise((resolve, reject) => {
-      const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-      const timer = options?.noTimeout === true ? void 0 : setTimeoutImpl(() => {
-        pending.delete(id);
-        reject(new Error("RPC request timed out."));
-      }, timeoutMs);
-      pending.set(id, {
-        resolve: (value) => resolve(value),
-        reject,
-        timer
-      });
-      try {
-        post(JSON.stringify({ type: "request", id, method: cmd, params: args }));
-      } catch (error) {
-        pending.delete(id);
-        if (timer !== void 0) clearTimeoutImpl(timer);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
+    return rpcCore().invoke(cmd, args, options);
   }
   function relayInvoke(cmd, args) {
-    const invoke4 = readGlobals().__DSH_SHELL_RELAY__?.invoke;
-    if (typeof invoke4 !== "function") return Promise.reject(new Error("relay bridge unavailable"));
-    return invoke4(cmd, args);
+    const invoke2 = readGlobals().__DSH_SHELL_RELAY__?.invoke;
+    if (typeof invoke2 !== "function") return Promise.reject(new Error("relay bridge unavailable"));
+    return invoke2(cmd, args);
   }
   return {
     invoke(cmd, args, options) {
@@ -137,7 +156,33 @@ function createShellRpc(deps) {
 }
 var shellRpc = createShellRpc();
 
-// src/client/local-chrome.ts
+// src/client/desktop-settings/rpc.ts
+function invoke(cmd, args, options) {
+  return shellRpc.invoke(cmd, args, options);
+}
+function invokeCommand(cmd, args, options) {
+  return shellRpc.invoke(cmd, args, options);
+}
+var nsRpc = null;
+function captureNsRpc(ctx) {
+  try {
+    nsRpc = ctx.connection ?? null;
+  } catch {
+    nsRpc = null;
+  }
+}
+function hasNsRpc() {
+  return nsRpc !== null;
+}
+async function nsSave(patch) {
+  await invokeCommand("save_desktop_settings", { patch });
+}
+async function nsGet() {
+  const d = await invokeCommand("get_desktop_settings_data");
+  return d.settings && typeof d.settings === "object" ? d.settings : {};
+}
+
+// src/client/bridge/local-chrome.ts
 var DARWIN_STRIP_HEIGHT = 28;
 var TRAFFIC_LIGHT_BAND = 76;
 var FRAME_LAYER_SELECTOR = "[data-shell-overlay]";
@@ -194,7 +239,7 @@ function installLocalChrome(platform) {
   host.appendChild(bar);
   const refreshStatus = () => {
     if (!shellRpc.available()) return;
-    void shellRpc.invoke("get_dsh_status", {}).then((value) => {
+    void invokeCommand("get_dsh_status").then((value) => {
       const s = value.status;
       if (typeof s !== "number") return;
       currentStatus = s;
@@ -259,7 +304,7 @@ function installLocalChrome(platform) {
           return;
         }
         btn.disabled = true;
-        void shellRpc.invoke("exit_window_instance", {}).then(() => close()).catch((err) => {
+        void invokeCommand("exit_window_instance").then(() => close()).catch((err) => {
           bodyEl.textContent = `\u9000\u51FA\u5931\u8D25\uFF1A${String(err)}`;
           bodyEl.style.color = "#ef4444";
           btn.disabled = false;
@@ -446,7 +491,7 @@ function installLocalChrome(platform) {
   };
 }
 
-// src/client/styles.ts
+// src/client/ui/styles.ts
 var ADVANCED_STYLES = `
 .dshDesktopChromeHost { position: fixed; inset: 0; z-index: 45; pointer-events: none; }
 .dshDesktopChromeStrip { position: absolute; display: flex; align-items: stretch; pointer-events: auto; }
@@ -480,7 +525,7 @@ function installAdvancedStyles() {
   };
 }
 
-// src/client/advanced-shell.ts
+// src/client/shell/advanced-shell.ts
 function applyAdvancedShell(ctx, environment) {
   ctx.effect(() => {
     document.body.dataset.dshDesktopPlatform = environment.platform;
@@ -495,7 +540,7 @@ function applyAdvancedShell(ctx, environment) {
   ctx.effect(() => installLocalChrome(environment.platform), "desktop: local window chrome");
 }
 
-// src/client/downloads-tab.tsx
+// src/client/features/downloads-tab.tsx
 var import_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
 var import_react = require("react");
 var import_jsx_runtime = require("react/jsx-runtime");
@@ -527,8 +572,8 @@ function DownloadsPanel() {
     let alive = true;
     const refresh = async () => {
       try {
-        const list = await shellRpc.invoke("list_downloads");
-        const settings = await shellRpc.invoke("get_download_settings");
+        const list = await invokeCommand("list_downloads");
+        const settings = await invokeCommand("get_download_settings");
         if (!alive) return;
         setTasks(list);
         setConcurrency(settings.concurrency);
@@ -551,7 +596,7 @@ function DownloadsPanel() {
   const act = async (cmd, args) => {
     setBusy(true);
     try {
-      await shellRpc.invoke(cmd, args);
+      await invokeCommand(cmd, args);
     } catch {
     } finally {
       setBusy(false);
@@ -727,7 +772,7 @@ function registerDownloadsTab(ctx) {
   });
 }
 
-// src/client/download-intercept.ts
+// src/client/bridge/download-intercept.ts
 function interceptKind(href, hasDownloadAttr) {
   if (!hasDownloadAttr || href === null) return null;
   const trimmed = href.trim();
@@ -831,10 +876,7 @@ async function transferUrlToShell(href, filename) {
   }
 }
 
-// src/client/desktop-browser-bridge.ts
-function invoke(cmd, args) {
-  return shellRpc.invoke(cmd, args);
-}
+// src/client/bridge/desktop-browser-bridge.ts
 var mirrors = /* @__PURE__ */ new Map();
 var openListeners = /* @__PURE__ */ new Map();
 var rectSchedulers = /* @__PURE__ */ new Map();
@@ -908,12 +950,12 @@ function applyPush(push) {
   }
 }
 function patchElement(el, lease, m) {
-  const fireAndForget = (cmd, args) => {
-    void invoke(cmd, args).catch((e) => {
-      console.error("[desktop-browser-bridge] \u547D\u4EE4\u5931\u8D25", cmd, e);
+  const fireAndForget = (args) => {
+    void invokeCommand("browser_guest_control", args).catch((e) => {
+      console.error("[desktop-browser-bridge] browser_guest_control \u5931\u8D25", e);
     });
   };
-  el.loadURL = (url) => invoke("browser_guest_navigate", { lease, url }).then(
+  el.loadURL = (url) => invokeCommand("browser_guest_navigate", { lease, url }).then(
     () => void 0,
     (e) => {
       throw e;
@@ -924,9 +966,9 @@ function patchElement(el, lease, m) {
   el.isLoading = () => m.loading;
   el.canGoBack = () => m.canGoBack;
   el.canGoForward = () => m.canGoForward;
-  el.goBack = () => fireAndForget("browser_guest_control", { lease, action: "back" });
-  el.goForward = () => fireAndForget("browser_guest_control", { lease, action: "forward" });
-  el.reload = () => fireAndForget("browser_guest_control", { lease, action: "reload" });
+  el.goBack = () => fireAndForget({ lease, action: "back" });
+  el.goForward = () => fireAndForget({ lease, action: "forward" });
+  el.reload = () => fireAndForget({ lease, action: "reload" });
   el.clearHistory = () => {
   };
   el.stop = () => {
@@ -953,18 +995,20 @@ function installTagObserver() {
       const rectVisible = r.width > 1 && r.height > 1;
       const shouldShow = rectVisible && !m.overlayHidden;
       if (rectVisible) {
-        void invoke("browser_guest_set_bounds", {
+        void invokeCommand("browser_guest_set_bounds", {
           lease,
           x: r.x,
           y: r.y,
           width: r.width,
           height: r.height
-        }).catch(() => {
+        }).catch((error) => {
+          console.warn(`[dsh-desktop-tauriapp] guest \u63A7\u5236\u5931\u8D25\uFF08set_bounds\uFF09\uFF1A${String(error)}`);
         });
       }
       if (shouldShow !== m.shown) {
         m.shown = shouldShow;
-        void invoke("browser_guest_set_visible", { lease, visible: shouldShow }).catch(() => {
+        void invokeCommand("browser_guest_set_visible", { lease, visible: shouldShow }).catch((error) => {
+          console.warn(`[dsh-desktop-tauriapp] guest \u63A7\u5236\u5931\u8D25\uFF08set_visible\uFF09\uFF1A${String(error)}`);
         });
       }
     };
@@ -996,13 +1040,14 @@ function installTagObserver() {
     window.addEventListener("resize", scheduleRect);
     const dialogMo = new MutationObserver(recomputeOverlay);
     dialogMo.observe(document.body, { childList: true, subtree: true });
-    void invoke("browser_guest_state", { lease }).then((snap) => {
+    void invokeCommand("browser_guest_state", { lease }).then((snap) => {
       m.url = snap.url;
       m.title = snap.title;
       m.loading = snap.loading;
       m.canGoBack = snap.canGoBack;
       m.canGoForward = snap.canGoForward;
-    }).catch(() => {
+    }).catch((error) => {
+      console.warn(`[dsh-desktop-tauriapp] guest \u63A7\u5236\u5931\u8D25\uFF08guest_state\uFF09\uFF1A${String(error)}`);
     }).finally(() => {
       scheduleRect();
       recomputeOverlay();
@@ -1024,7 +1069,7 @@ function installDesktopBrowserBridge() {
   const impl = {
     acquire(workspace) {
       const key = typeof workspace === "string" ? workspace : String(workspace ?? "");
-      return invoke("browser_guest_acquire", { workspaceKey: key }).then(
+      return invokeCommand("browser_guest_acquire", { workspaceKey: key }).then(
         (res) => {
           mirrorOf(res.lease);
           return res;
@@ -1039,7 +1084,7 @@ function installDesktopBrowserBridge() {
         mirrors.delete(lease);
       }
       openListeners.delete(lease);
-      return invoke("browser_guest_release", { lease }).then(
+      return invokeCommand("browser_guest_release", { lease }).then(
         () => void 0,
         (e) => {
           console.error("[desktop-browser-bridge] guest release \u5931\u8D25", e);
@@ -1062,15 +1107,310 @@ function installDesktopBrowserBridge() {
   g.__dshShellBridgeImpl = impl;
   installTagObserver();
   window.addEventListener("pagehide", () => {
-    void invoke("browser_guest_release_all", {}).catch(() => {
+    void invokeCommand("browser_guest_release_all").catch(() => {
     });
   });
 }
 
 // src/client/desktop-settings.tsx
-var import_react18 = require("react");
+var import_react19 = require("react");
 
-// src/client/devtools-toggle.ts
+// src/client/desktop-settings/use-panel-data.ts
+var import_react2 = require("react");
+
+// src/client/desktop-settings/loopback-aggregation.ts
+var LOOPBACK_AGGREGATION_OPTIONS = [
+  { value: "full", label: "\u5168\u5F00", detail: "\u5408\u5E76\u5E76\u53D1 GET\uFF0C\u5E76\u6574\u6761\u7F13\u51B2 \u2264256KB \u7684\u54CD\u5E94" },
+  // 默认档＝壳侧 DEFAULT_LOOPBACK_AGGREGATION。面板不跨包 import 壳代码，两边各写一份字面量，
+  // 所以改默认值必须两边同时改（test-client.mjs 会核对这里与 panel-data.ts 占位值都等于 stream）。
+  { value: "stream", label: "\u53EA\u5173\u7F13\u51B2\uFF08\u9ED8\u8BA4\uFF09", detail: "\u4ECD\u5408\u5E76\uFF0C\u4F46\u54CD\u5E94\u8FB9\u5230\u8FB9\u4E0B\u53D1" },
+  { value: "none", label: "\u5168\u5173", detail: "\u4E0D\u5408\u5E76\uFF0C\u6BCF\u4E2A\u8BF7\u6C42\u5404\u81EA\u6253\u5BBF\u4E3B" }
+];
+function loopbackAggregationMode(raw) {
+  const hit = LOOPBACK_AGGREGATION_OPTIONS.find((o) => o.value === raw);
+  return hit === void 0 ? "stream" : hit.value;
+}
+
+// src/client/desktop-settings/panel-data.ts
+var PLACEHOLDER = {
+  proxy: { proxy_mode: "off", proxy_url: "", no_proxy: "", proxy_user: "", proxy_pass: "" },
+  proxyEffective: void 0,
+  desktop: { remote_addr: null, remote_list: [], port: 3080, profiles: [] },
+  // 壳首回话前的占位值；真实档位随后从 get_desktop_settings_data 回来。回退档＝壳侧 DEFAULT_LOOPBACK_AGGREGATION（stream）。
+  loopbackAggregation: "stream",
+  forwarderInput: "",
+  profilePortInputs: {},
+  profileLaneInputs: {},
+  profilePageInputs: {},
+  migrationSource: "",
+  migrationDest: ""
+};
+function buildSnapshot(ns, p, d) {
+  return {
+    proxy: {
+      proxy_mode: ns.proxy_mode || p.proxy_mode || "off",
+      proxy_url: ns.proxy_url || p.proxy_url || "",
+      no_proxy: ns.no_proxy || p.no_proxy || "",
+      proxy_user: ns.proxy_user || p.proxy_user || "",
+      proxy_pass: ns.proxy_pass || p.proxy_pass || ""
+    },
+    proxyEffective: p.effective,
+    // #128：聚合档位从壳回吐的设置快照读（老设置文件没这个键 = undefined ⇒ loopbackAggregationMode 回默认）。
+    loopbackAggregation: loopbackAggregationMode(ns.loopback_aggregation),
+    // 以 **壳返回的完整对象为基底**，只覆盖三个以 ns 优先的展示字段。
+    desktop: {
+      ...d,
+      remote_addr: ns.remote_addr ?? d.remote_addr ?? null,
+      remote_list: ns.remote_list ?? d.remote_list ?? [],
+      port: ns.port || d.port || 3080,
+      mux_heartbeat_ms: d.mux_heartbeat_ms ?? null,
+      desktop_layout_on_phones: d.desktop_layout_on_phones ?? null,
+      prevent_sleep: d.prevent_sleep ?? null,
+      keep_awake: d.keep_awake ?? null
+    },
+    forwarderInput: typeof ns.lane_forwarder_port === "number" && ns.lane_forwarder_port > 0 ? String(ns.lane_forwarder_port) : "",
+    ...savedPortInputs(ns),
+    ...migrationSelectDefaults(d)
+  };
+}
+function createPanelData(deps = {}) {
+  const io = {
+    nsGet: deps.nsGet ?? nsGet,
+    getProxySettings: deps.getProxySettings ?? (() => invokeCommand("get_proxy_settings")),
+    getDesktopData: deps.getDesktopData ?? (() => invokeCommand("get_desktop_settings_data")),
+    taskStatus: deps.taskStatus ?? (() => invokeCommand("task_status")),
+    save: deps.save ?? nsSave
+  };
+  const pollMs = deps.pollMs ?? 600;
+  const setIntervalImpl = deps.setIntervalImpl ?? ((fn, ms) => setInterval(fn, ms));
+  const clearIntervalImpl = deps.clearIntervalImpl ?? ((handle) => clearInterval(handle));
+  let state = { snapshot: PLACEHOLDER, loaded: null, task: null };
+  const listeners = /* @__PURE__ */ new Set();
+  let loadPromise = null;
+  let pollHandle = null;
+  let disposed = false;
+  function setState(patch) {
+    state = { ...state, ...patch };
+    for (const listener of listeners) listener();
+  }
+  function loadAll(onError) {
+    if (loadPromise !== null) return loadPromise;
+    loadPromise = (async () => {
+      try {
+        const [ns, proxy, desktop] = await Promise.all([
+          io.nsGet(),
+          io.getProxySettings(),
+          io.getDesktopData()
+        ]);
+        if (disposed) return;
+        const snapshot = buildSnapshot(ns, proxy, desktop);
+        setState({ snapshot, loaded: snapshot });
+      } catch (err) {
+        if (disposed) return;
+        onError?.(`\u8BFB\u53D6\u8BBE\u7F6E\u5931\u8D25\uFF1A${String(err)}`);
+      }
+    })();
+    return loadPromise;
+  }
+  async function refreshDesktop() {
+    try {
+      const desktop = await io.getDesktopData();
+      if (disposed) return;
+      setState({ snapshot: { ...state.snapshot, desktop } });
+    } catch {
+    }
+  }
+  function startTaskPolling() {
+    if (pollHandle !== null || disposed) return;
+    pollHandle = setIntervalImpl(() => {
+      void io.taskStatus().then((t) => {
+        if (disposed) return;
+        if (t.running || t.finished) setState({ task: t });
+      }).catch(() => {
+      });
+    }, pollMs);
+  }
+  function stopTaskPolling() {
+    if (pollHandle === null) return;
+    clearIntervalImpl(pollHandle);
+    pollHandle = null;
+  }
+  return {
+    getState: () => state,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    loadAll,
+    refreshDesktop,
+    save: (patch) => io.save(patch),
+    startTaskPolling,
+    stopTaskPolling,
+    dispose() {
+      disposed = true;
+      stopTaskPolling();
+      listeners.clear();
+    }
+  };
+}
+function savedPortInputs(ns) {
+  const saved = (key) => {
+    const raw = ns[key];
+    const out = {};
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      for (const [k, n] of Object.entries(raw)) {
+        if (typeof n === "number" && n > 0) out[k] = String(n);
+      }
+    }
+    return out;
+  };
+  return {
+    profilePortInputs: saved("profile_ports"),
+    profileLaneInputs: saved("profile_lane_ports"),
+    profilePageInputs: saved("profile_page_ports")
+  };
+}
+function migrationSelectDefaults(d) {
+  if (d.profiles.length === 0) return { migrationSource: "", migrationDest: "" };
+  const first = d.profiles[0];
+  if (!first) return { migrationSource: "", migrationDest: "" };
+  const other = d.profiles.find((pp) => pp.name !== first.name);
+  return { migrationSource: first.name, migrationDest: other ? other.name : "" };
+}
+
+// src/client/desktop-settings/use-panel-data.ts
+function usePanelData(onLoadError) {
+  const panel = (0, import_react2.useMemo)(() => createPanelData(), []);
+  const state = (0, import_react2.useSyncExternalStore)(panel.subscribe, panel.getState);
+  const onErrorRef = (0, import_react2.useRef)(onLoadError);
+  onErrorRef.current = onLoadError;
+  (0, import_react2.useEffect)(() => {
+    void panel.loadAll((text) => onErrorRef.current(text));
+    panel.startTaskPolling();
+    return () => {
+      panel.stopTaskPolling();
+      panel.dispose();
+    };
+  }, [panel]);
+  return { data: state.snapshot, loaded: state.loaded, taskInfo: state.task, refreshData: panel.refreshDesktop };
+}
+
+// src/client/desktop-settings/startup-flow.ts
+function startupDialogModel(res) {
+  if (!res || res.action === "none") return { kind: "none" };
+  if (res.action === "profile-selection") return { kind: "select", profiles: res.profiles ?? [] };
+  const profile = res.profile ?? "";
+  if (!profile) return { kind: "none" };
+  const details = res.details;
+  const missingDesc = details ? [
+    ...details.missing_files,
+    ...details.node_modules_exists ? [] : ["node_modules"],
+    ...details.dir_exists ? [] : ["profile \u76EE\u5F55"]
+  ].join(", ") : "";
+  return { kind: "incomplete", profile, missingDesc };
+}
+function mountStartupDialog(model, hooks) {
+  if (model.kind === "none") return;
+  if (model.kind === "select") {
+    const el2 = document.createElement("div");
+    el2.style.cssText = "position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)";
+    const card2 = document.createElement("div");
+    card2.style.cssText = "background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l2,#ffffff1f);border-radius:12px;padding:24px;min-width:320px;max-width:400px";
+    const title2 = document.createElement("div");
+    title2.style.cssText = "font-size:15px;font-weight:600;margin-bottom:16px;color:var(--dsw-alias-label-primary,#e7eaf0)";
+    title2.textContent = "\u9009\u62E9\u8981\u542F\u52A8\u7684 Profile";
+    card2.appendChild(title2);
+    const list = document.createElement("div");
+    list.style.cssText = "display:flex;flex-direction:column;gap:8px";
+    for (const p of model.profiles) {
+      const btn = document.createElement("button");
+      btn.style.cssText = "padding:10px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer;text-align:left";
+      btn.textContent = p;
+      btn.onmouseenter = () => btn.style.background = "var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07))";
+      btn.onmouseleave = () => btn.style.background = "transparent";
+      btn.onclick = () => {
+        el2.remove();
+        hooks.onSelectProfile(p);
+      };
+      list.appendChild(btn);
+    }
+    const input = document.createElement("input");
+    input.style.cssText = "margin-top:12px;padding:8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;width:100%;box-sizing:border-box";
+    input.placeholder = "\u6216\u8F93\u5165\u65B0 profile \u540D\u79F0";
+    const startBtn = document.createElement("button");
+    startBtn.style.cssText = "margin-top:8px;padding:8px 14px;border-radius:8px;border:none;background:var(--dsw-alias-brand-primary-new-color,#4176e6);color:#fff;font-size:13px;cursor:pointer;width:100%";
+    startBtn.textContent = "\u65B0\u5EFA\u5E76\u542F\u52A8";
+    startBtn.onclick = () => {
+      const name = input.value.trim();
+      if (!name) return;
+      el2.remove();
+      hooks.onCreateProfile(name);
+    };
+    card2.appendChild(list);
+    card2.appendChild(input);
+    card2.appendChild(startBtn);
+    el2.appendChild(card2);
+    document.body.appendChild(el2);
+    return;
+  }
+  const el = document.createElement("div");
+  el.style.cssText = "position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)";
+  const card = document.createElement("div");
+  card.style.cssText = "background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l2,#ffffff1f);border-radius:12px;padding:24px;min-width:340px;max-width:420px;text-align:center";
+  const title = document.createElement("div");
+  title.style.cssText = "font-size:15px;font-weight:600;margin-bottom:8px;color:var(--dsw-alias-label-primary,#e7eaf0)";
+  title.textContent = `Profile\u300C${model.profile}\u300D\u4E0D\u5B8C\u6574`;
+  const desc = document.createElement("div");
+  desc.style.cssText = "font-size:12px;color:var(--dsw-alias-label-secondary,#9aa4b2);margin-bottom:20px";
+  desc.textContent = `\u7F3A\u5931\uFF1A${model.missingDesc}\u3002\u662F\u5426\u4FEE\u590D\uFF1F`;
+  const btns = document.createElement("div");
+  btns.style.cssText = "display:flex;gap:10px";
+  const noBtn = document.createElement("button");
+  noBtn.style.cssText = "flex:1;padding:10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer";
+  noBtn.textContent = "\u76F4\u63A5\u542F\u52A8";
+  noBtn.onclick = () => {
+    el.remove();
+    hooks.onStartProfile(model.profile);
+  };
+  const yesBtn = document.createElement("button");
+  yesBtn.style.cssText = "flex:1;padding:10px;border-radius:8px;border:none;background:var(--dsw-alias-brand-primary-new-color,#4176e6);color:#fff;font-size:13px;cursor:pointer";
+  yesBtn.textContent = "\u4FEE\u590D\u5E76\u542F\u52A8";
+  yesBtn.onclick = () => {
+    el.remove();
+    hooks.onRepairProfile(model.profile);
+  };
+  btns.appendChild(noBtn);
+  btns.appendChild(yesBtn);
+  card.appendChild(title);
+  card.appendChild(desc);
+  card.appendChild(btns);
+  el.appendChild(card);
+  document.body.appendChild(el);
+}
+function runStartupFlow(res, notify) {
+  const model = startupDialogModel(res);
+  mountStartupDialog(model, {
+    onSelectProfile: (p) => {
+      notify(`\u6B63\u5728\u542F\u52A8 ${p} profile\u2026`, true);
+      void invokeCommand("confirm_startup_profile", { name: p, repair: false }).catch((e) => notify(`\u542F\u52A8\u5931\u8D25\uFF1A${String(e)}`, false));
+    },
+    onCreateProfile: (name) => {
+      notify(`\u6B63\u5728\u521B\u5EFA\u5E76\u542F\u52A8 ${name} profile\u2026`, true);
+      void invokeCommand("confirm_startup_profile", { name, repair: true }).catch((e) => notify(`\u521B\u5EFA\u5931\u8D25\uFF1A${String(e)}`, false));
+    },
+    onStartProfile: (profile) => {
+      void invokeCommand("confirm_startup_profile", { name: profile, repair: false }).catch((e) => notify(`\u542F\u52A8\u5931\u8D25\uFF1A${String(e)}`, false));
+    },
+    onRepairProfile: (profile) => {
+      notify(`\u6B63\u5728\u4FEE\u590D ${profile} profile\u2026`, true);
+      void invokeCommand("confirm_startup_profile", { name: profile, repair: true }).catch((e) => notify(`\u4FEE\u590D\u5931\u8D25\uFF1A${String(e)}`, false));
+    }
+  });
+}
+
+// src/client/shell/devtools-toggle.ts
 function planDevToolsUi(current, next) {
   if (current === next) return { action: "idle" };
   return { action: next ? "confirm-on" : "confirm-off" };
@@ -1227,29 +1567,6 @@ var WARN_NOTE_STYLE = {
   color: "var(--dsw-alias-state-warn,#e8a33d)"
 };
 
-// src/client/desktop-settings/rpc.ts
-function invoke2(cmd, args, options) {
-  return shellRpc.invoke(cmd, args, options);
-}
-var nsRpc = null;
-function captureNsRpc(ctx) {
-  try {
-    nsRpc = ctx.connection ?? null;
-  } catch {
-    nsRpc = null;
-  }
-}
-function hasNsRpc() {
-  return nsRpc !== null;
-}
-async function nsSave(patch) {
-  await invoke2("save_desktop_settings", { patch });
-}
-async function nsGet() {
-  const d = await invoke2("get_desktop_settings_data");
-  return d.settings && typeof d.settings === "object" ? d.settings : {};
-}
-
 // src/client/desktop-settings/chrome.tsx
 var import_jsx_runtime2 = require("react/jsx-runtime");
 function SectionBox({ title, children }) {
@@ -1264,7 +1581,8 @@ function PfBtn({
   onClick,
   children,
   style,
-  title
+  title,
+  testId
 }) {
   const baseStyle = variant === "primary" ? BTN_PRIMARY_STYLE : variant === "ghost" ? BTN_GHOST_STYLE : BTN_DANGER_STYLE;
   const cls = variant === "primary" ? "pf-btn" : `pf-btn ${variant}`;
@@ -1276,6 +1594,7 @@ function PfBtn({
       disabled,
       title,
       onClick,
+      "data-desktop-settings": testId,
       style: { ...baseStyle, ...style ?? {} },
       children
     }
@@ -1316,123 +1635,6 @@ function showToast(text, ok, tone = ok ? "ok" : "error") {
   if (ok) window.setTimeout(() => el.remove(), 5e3);
 }
 
-// src/client/desktop-settings/use-initial-data.ts
-var import_react2 = require("react");
-
-// src/client/desktop-settings/loopback-aggregation.ts
-var LOOPBACK_AGGREGATION_OPTIONS = [
-  { value: "full", label: "\u5168\u5F00", detail: "\u5408\u5E76\u5E76\u53D1 GET\uFF0C\u5E76\u6574\u6761\u7F13\u51B2 \u2264256KB \u7684\u54CD\u5E94" },
-  // 默认档＝壳侧 DEFAULT_LOOPBACK_AGGREGATION。面板不跨包 import 壳代码，两边各写一份字面量，
-  // 所以改默认值必须两边同时改（test-client.mjs 会核对这里与 use-initial-data.ts 的初始值都等于 stream）。
-  { value: "stream", label: "\u53EA\u5173\u7F13\u51B2\uFF08\u9ED8\u8BA4\uFF09", detail: "\u4ECD\u5408\u5E76\uFF0C\u4F46\u54CD\u5E94\u8FB9\u5230\u8FB9\u4E0B\u53D1" },
-  { value: "none", label: "\u5168\u5173", detail: "\u4E0D\u5408\u5E76\uFF0C\u6BCF\u4E2A\u8BF7\u6C42\u5404\u81EA\u6253\u5BBF\u4E3B" }
-];
-function loopbackAggregationMode(raw) {
-  const hit = LOOPBACK_AGGREGATION_OPTIONS.find((o) => o.value === raw);
-  return hit === void 0 ? "stream" : hit.value;
-}
-
-// src/client/desktop-settings/use-initial-data.ts
-var INITIAL = {
-  proxy: { proxy_mode: "off", proxy_url: "", no_proxy: "", proxy_user: "", proxy_pass: "" },
-  proxyEffective: void 0,
-  desktop: { remote_addr: null, remote_list: [], port: 3080, profiles: [] },
-  // 壳首回话前的占位值；真实档位随后从 get_desktop_settings_data 回来。回退档＝壳侧 DEFAULT_LOOPBACK_AGGREGATION（stream）。
-  loopbackAggregation: "stream",
-  forwarderInput: "",
-  profilePortInputs: {},
-  profileLaneInputs: {},
-  profilePageInputs: {},
-  migrationSource: "",
-  migrationDest: ""
-};
-function useInitialData(onLoadError) {
-  const [data, setData] = (0, import_react2.useState)(INITIAL);
-  const [loaded, setLoaded] = (0, import_react2.useState)(null);
-  const onLoadErrorRef = (0, import_react2.useRef)(onLoadError);
-  onLoadErrorRef.current = onLoadError;
-  (0, import_react2.useEffect)(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const [ns, p, d] = await Promise.all([
-          nsGet(),
-          invoke2("get_proxy_settings"),
-          invoke2("get_desktop_settings_data")
-        ]);
-        if (cancelled) return;
-        const next = {
-          proxy: {
-            proxy_mode: ns.proxy_mode || p.proxy_mode || "off",
-            proxy_url: ns.proxy_url || p.proxy_url || "",
-            no_proxy: ns.no_proxy || p.no_proxy || "",
-            proxy_user: ns.proxy_user || p.proxy_user || "",
-            proxy_pass: ns.proxy_pass || p.proxy_pass || ""
-          },
-          proxyEffective: p.effective,
-          // #128：聚合档位从壳回吐的设置快照读（老设置文件没这个键 = undefined ⇒ 下面回默认 full）
-          loopbackAggregation: loopbackAggregationMode(ns.loopback_aggregation),
-          // 以 **壳返回的完整对象为基底**，只覆盖三个以 ns 优先的展示字段——
-          // 之前是手写对象，漏字段就静默丢值（#147 实测：勾选保存成功但重开永远不勾）。
-          desktop: {
-            ...d,
-            remote_addr: ns.remote_addr ?? d.remote_addr ?? null,
-            remote_list: ns.remote_list ?? d.remote_list ?? [],
-            port: ns.port || d.port || 3080,
-            mux_heartbeat_ms: d.mux_heartbeat_ms ?? null,
-            desktop_layout_on_phones: d.desktop_layout_on_phones ?? null,
-            prevent_sleep: d.prevent_sleep ?? null,
-            keep_awake: d.keep_awake ?? null
-          },
-          forwarderInput: typeof ns.lane_forwarder_port === "number" && ns.lane_forwarder_port > 0 ? String(ns.lane_forwarder_port) : "",
-          ...savedPortInputs(ns),
-          ...migrationSelectDefaults(d)
-        };
-        setData(next);
-        setLoaded(next);
-      } catch (err) {
-        if (cancelled) return;
-        onLoadErrorRef.current(`\u8BFB\u53D6\u8BBE\u7F6E\u5931\u8D25\uFF1A${String(err)}`);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  const refreshData = (0, import_react2.useCallback)(async () => {
-    try {
-      const d = await invoke2("get_desktop_settings_data");
-      setData((prev) => ({ ...prev, desktop: d }));
-    } catch {
-    }
-  }, []);
-  return { data, loaded, refreshData };
-}
-function savedPortInputs(ns) {
-  const saved = (key) => {
-    const raw = ns[key];
-    const out = {};
-    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-      for (const [k, n] of Object.entries(raw)) {
-        if (typeof n === "number" && n > 0) out[k] = String(n);
-      }
-    }
-    return out;
-  };
-  return {
-    profilePortInputs: saved("profile_ports"),
-    profileLaneInputs: saved("profile_lane_ports"),
-    profilePageInputs: saved("profile_page_ports")
-  };
-}
-function migrationSelectDefaults(d) {
-  if (d.profiles.length === 0) return { migrationSource: "", migrationDest: "" };
-  const first = d.profiles[0];
-  if (!first) return { migrationSource: "", migrationDest: "" };
-  const other = d.profiles.find((pp) => pp.name !== first.name);
-  return { migrationSource: first.name, migrationDest: other ? other.name : "" };
-}
-
 // src/client/desktop-settings/cards/dependencies-card.tsx
 var import_react3 = __toESM(require("react"), 1);
 var import_jsx_runtime3 = require("react/jsx-runtime");
@@ -1443,7 +1645,7 @@ function DependenciesCard() {
   const [depError, setDepError] = (0, import_react3.useState)(null);
   const refreshDepStatus = (0, import_react3.useCallback)(async () => {
     try {
-      const r = await invoke2("list_profile_dependency_status");
+      const r = await invoke("list_profile_dependency_status");
       setDepProfiles(r?.profiles ?? []);
     } catch (err) {
       console.error("[desktop-settings] list_profile_dependency_status \u5931\u8D25\uFF1A", err);
@@ -1458,7 +1660,7 @@ function DependenciesCard() {
     if (depRebuilding) return;
     setDepRebuilding(profile);
     setDepNote(`${profile}\uFF1A\u4F9D\u8D56\u91CD\u5EFA\u4E2D\uFF08\u7528\u5185\u7F6E pnpm \u91CD\u88C5\uFF0C\u53EF\u80FD\u9700\u8981\u51E0\u5206\u949F\uFF09\u2026`);
-    void invoke2("rebuild_profile_dependencies", { profile }).then(() => {
+    void invoke("rebuild_profile_dependencies", { profile }).then(() => {
       setDepNote(`${profile}\uFF1A\u4F9D\u8D56\u5DF2\u91CD\u5EFA\uFF0C\u91CD\u542F\u8BE5 profile \u540E\u751F\u6548\u3002`);
       return refreshDepStatus();
     }).catch((err) => setDepNote(`${profile}\uFF1A\u91CD\u5EFA\u5931\u8D25 \u2014\u2014 ${String(err)}`)).finally(() => setDepRebuilding(null));
@@ -1515,7 +1717,7 @@ function DevToolsCard({ desktop }) {
   const saveDevToolsSetting = (on) => {
     setDevToolsConfirmKind(null);
     setDevTools(on);
-    void nsSave({ dev_tools: on }).then(() => invoke2("restart_desktop_app")).then((outcome) => setDevToolsNote(devToolsSavedNote(on, outcome))).catch((e) => {
+    void nsSave({ dev_tools: on }).then(() => invoke("restart_desktop_app")).then((outcome) => setDevToolsNote(devToolsSavedNote(on, outcome))).catch((e) => {
       if (/failed to fetch|network ?error|load failed|fetch failed|terminated/i.test(String(e))) {
         setDevToolsNote(devToolsSavedNote(on));
         return;
@@ -1559,159 +1761,14 @@ function DevToolsCard({ desktop }) {
 }
 
 // src/client/desktop-settings/cards/diagnostics-card.tsx
+var import_react7 = require("react");
+
+// src/client/desktop-settings/cards/logging-controls.tsx
+var import_react6 = require("react");
+
+// src/client/ui/theme-select.tsx
 var import_react5 = require("react");
 var import_jsx_runtime5 = require("react/jsx-runtime");
-function DiagnosticsCard() {
-  const [diagSummary, setDiagSummary] = (0, import_react5.useState)(null);
-  const [diagLogPath, setDiagLogPath] = (0, import_react5.useState)(null);
-  const [diagExport, setDiagExport] = (0, import_react5.useState)(null);
-  (0, import_react5.useEffect)(() => {
-    let cancelled = false;
-    void invoke2("get_diagnostics").then((r) => {
-      if (cancelled) return;
-      const summary = r.diagnostics?.summary;
-      if (typeof summary === "string" && summary !== "") setDiagSummary(summary);
-      const path = r.diagnostics?.logs?.shell?.path;
-      if (typeof path === "string" && path !== "") setDiagLogPath(path);
-    }).catch(() => {
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(SectionBox, { title: "\u65E5\u5FD7\u4E0E\u8BCA\u65AD", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { style: NOTE_STYLE, children: diagSummary === null ? "\u8BFB\u53D6\u4E2D\u2026" : diagSummary }),
-    diagLogPath !== null && /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { style: NOTE_STYLE, children: [
-      "\u58F3\u65E5\u5FD7\uFF1A",
-      diagLogPath
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { style: { display: "flex", gap: 8, marginTop: 8 }, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
-        PfBtn,
-        {
-          variant: "ghost",
-          onClick: () => {
-            void invoke2("export_diagnostics").then((r) => {
-              setDiagExport(r.path);
-              showToast(`\u8BCA\u65AD\u5DF2\u5BFC\u51FA\uFF1A${r.path}`, true);
-            }).catch((e) => showToast(`\u5BFC\u51FA\u5931\u8D25\uFF1A${String(e)}`, false));
-          },
-          children: "\u5BFC\u51FA\u8BCA\u65AD"
-        }
-      ),
-      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
-        PfBtn,
-        {
-          variant: "ghost",
-          onClick: () => {
-            void invoke2("get_diagnostics").then((r) => {
-              const path = r.diagnostics?.logs?.shell?.path;
-              if (typeof path === "string" && path !== "") showToast(`\u58F3\u65E5\u5FD7\uFF1A${path}`, true);
-              else showToast("\u8BCA\u65AD\u91CC\u6CA1\u6709\u65E5\u5FD7\u8DEF\u5F84", false);
-            }).catch((e) => showToast(`\u8BFB\u53D6\u5931\u8D25\uFF1A${String(e)}`, false));
-          },
-          children: "\u663E\u793A\u65E5\u5FD7\u8DEF\u5F84"
-        }
-      )
-    ] }),
-    diagExport !== null && /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { style: NOTE_STYLE, children: [
-      "\u4E0A\u6B21\u5BFC\u51FA\uFF1A",
-      diagExport
-    ] })
-  ] });
-}
-
-// src/client/desktop-settings/cards/download-card.tsx
-var import_react6 = require("react");
-var import_jsx_runtime6 = require("react/jsx-runtime");
-function DownloadCard({
-  note,
-  onNote
-}) {
-  const [concurrencyInput, setConcurrencyInput] = (0, import_react6.useState)("3");
-  const concurrencyTouchedRef = (0, import_react6.useRef)(false);
-  (0, import_react6.useEffect)(() => {
-    invoke2("get_download_settings").then((s) => {
-      if (!concurrencyTouchedRef.current) setConcurrencyInput(String(s.concurrency));
-    }).catch(() => {
-    });
-  }, []);
-  const handleSaveConcurrency = () => {
-    const v = Math.max(1, Math.min(32, parseInt(concurrencyInput, 10) || 3));
-    void nsSave({ download_concurrency: v }).then(() => invoke2("set_download_concurrency", { value: v })).then(() => onNote(`\u5DF2\u4FDD\u5B58\uFF1A\u5E76\u53D1\u4E0A\u9650 ${v}`)).catch(() => onNote("\u4FDD\u5B58\u5931\u8D25\uFF08\u65E0 Tauri IPC\uFF1F\uFF09"));
-  };
-  return /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)(SectionBox, { title: "\u4E0B\u8F7D", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { style: ROW_STYLE, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
-        "input",
-        {
-          placeholder: "1-32",
-          "data-desktop-settings": "download-concurrency",
-          style: { ...INPUT_BASE_STYLE, width: 80 },
-          value: concurrencyInput,
-          onChange: (e) => {
-            concurrencyTouchedRef.current = true;
-            setConcurrencyInput(e.target.value);
-          }
-        }
-      ),
-      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveConcurrency, children: "\u4FDD\u5B58" })
-    ] }),
-    note && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: NOTE_STYLE, children: note }),
-    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: NOTE_STYLE, children: "\u540C\u65F6\u8FDB\u884C\u7684\u4E0B\u8F7D\u6570\u4E0A\u9650\uFF0C\u8D85\u51FA\u6392\u961F\uFF1B\u6539\u52A8\u7ACB\u5373\u751F\u6548\u3002" })
-  ] });
-}
-
-// src/client/desktop-settings/cards/loopback-aggregation-card.tsx
-var import_react7 = require("react");
-var import_jsx_runtime7 = require("react/jsx-runtime");
-function LoopbackAggregationCard({ value }) {
-  const [loopbackAggregation, setLoopbackAggregation] = (0, import_react7.useState)(value);
-  const [loopbackAggregationNote, setLoopbackAggregationNote] = (0, import_react7.useState)(null);
-  (0, import_react7.useEffect)(() => {
-    setLoopbackAggregation(value);
-  }, [value]);
-  const handleSaveLoopbackAggregation = (next) => {
-    const prev = loopbackAggregation;
-    if (next === prev) return;
-    setLoopbackAggregation(next);
-    void nsSave({ loopback_aggregation: next }).then(
-      () => setLoopbackAggregationNote(
-        `\u5DF2\u4FDD\u5B58\uFF1A${LOOPBACK_AGGREGATION_OPTIONS.find((o) => o.value === next)?.label ?? next}\uFF08\u7ACB\u5373\u751F\u6548\uFF0C\u65E0\u9700\u91CD\u542F\uFF09`
-      )
-    ).catch((e) => {
-      setLoopbackAggregation(prev);
-      setLoopbackAggregationNote(`\u4FDD\u5B58\u5931\u8D25\uFF0C\u5DF2\u56DE\u5230\u539F\u6863\u4F4D\uFF1A${String(e)}`);
-    });
-  };
-  return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(SectionBox, { title: "loopback \u6570\u636E\u9762\u805A\u5408", children: [
-    LOOPBACK_AGGREGATION_OPTIONS.map((opt) => /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("label", { style: RADIO_ROW_STYLE, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
-        "input",
-        {
-          type: "radio",
-          name: "loopback-aggregation",
-          "data-desktop-settings": `loopback-aggregation-${opt.value}`,
-          checked: loopbackAggregation === opt.value,
-          onChange: () => handleSaveLoopbackAggregation(opt.value)
-        }
-      ),
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { style: RADIO_TEXT_STYLE, children: [
-        opt.label,
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { style: { color: "var(--dsw-alias-label-secondary,#9aa4b2)", marginLeft: 8 }, children: opt.detail })
-      ] })
-    ] }, opt.value)),
-    loopbackAggregationNote && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { style: NOTE_STYLE, children: loopbackAggregationNote }),
-    /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { style: NOTE_STYLE, children: "\u684C\u9762\u58F3\u56DE\u73AF\u6570\u636E\u9762\uFF08\u684C\u9762\u9875\u9762\u548C\u624B\u673A\u8FDC\u7A0B\u8BBF\u95EE\u90FD\u8D70\u5B83\uFF09\u5BF9 GET \u8BF7\u6C42\u7684\u5408\u5E76\u4E0E\u7F13\u51B2\u7B56\u7565\u3002\u300C\u53EA\u5173\u7F13\u51B2\u300D\u4FDD\u7559\u5408\u5E76\uFF0C \u53EA\u8BA9\u54CD\u5E94\u8FB9\u5230\u8FB9\u4E0B\u53D1\uFF1B\u300C\u5168\u5173\u300D\u8FDE\u5408\u5E76\u4E5F\u505C\u6389\uFF0C\u6BCF\u4E2A\u8BF7\u6C42\u5404\u81EA\u6253\u4E0A\u6E38\uFF0C\u4E0D\u4F1A\u5173\u6389\u522B\u7684\u529F\u80FD\u3002\u6539\u52A8\u7ACB\u5373\u751F\u6548\uFF0C \u4E0D\u9700\u8981\u91CD\u542F\u3002" })
-  ] });
-}
-
-// src/client/desktop-settings/cards/migration-card.tsx
-var import_react9 = require("react");
-
-// src/client/theme-select.tsx
-var import_react8 = require("react");
-var import_jsx_runtime8 = require("react/jsx-runtime");
 var TRIGGER_STYLE = {
   minWidth: 0,
   width: "100%",
@@ -1764,10 +1821,10 @@ var OPTION_BASE = {
   fontSize: 13
 };
 function ThemeSelect({ value, options, onChange, placeholder, style, disabled }) {
-  const [open, setOpen] = (0, import_react8.useState)(false);
-  const rootRef = (0, import_react8.useRef)(null);
-  const listRef = (0, import_react8.useRef)(null);
-  (0, import_react8.useEffect)(() => {
+  const [open, setOpen] = (0, import_react5.useState)(false);
+  const rootRef = (0, import_react5.useRef)(null);
+  const listRef = (0, import_react5.useRef)(null);
+  (0, import_react5.useEffect)(() => {
     if (!open) return;
     const onDown = (ev) => {
       if (rootRef.current && !rootRef.current.contains(ev.target)) setOpen(false);
@@ -1782,19 +1839,19 @@ function ThemeSelect({ value, options, onChange, placeholder, style, disabled })
       document.removeEventListener("keydown", onKey);
     };
   }, [open]);
-  (0, import_react8.useEffect)(() => {
+  (0, import_react5.useEffect)(() => {
     if (!open || !listRef.current) return;
     const sel = listRef.current.querySelector('[data-selected="1"]');
     sel?.scrollIntoView({ block: "nearest" });
   }, [open]);
-  const pick = (0, import_react8.useCallback)(
+  const pick = (0, import_react5.useCallback)(
     (v) => {
       setOpen(false);
       if (v !== value) onChange(v);
     },
     [onChange, value]
   );
-  const onMenuKey = (0, import_react8.useCallback)(
+  const onMenuKey = (0, import_react5.useCallback)(
     (ev) => {
       const idx = options.findIndex((o) => o.value === value);
       if (ev.key === "ArrowDown") {
@@ -1813,8 +1870,8 @@ function ThemeSelect({ value, options, onChange, placeholder, style, disabled })
     [options, onChange, value]
   );
   const current = options.find((o) => o.value === value);
-  return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { ref: rootRef, style: { minWidth: 0, position: "relative", ...style ?? {} }, onKeyDown: onMenuKey, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(
+  return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { ref: rootRef, style: { minWidth: 0, position: "relative", ...style ?? {} }, onKeyDown: onMenuKey, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(
       "button",
       {
         type: "button",
@@ -1823,7 +1880,7 @@ function ThemeSelect({ value, options, onChange, placeholder, style, disabled })
         onClick: () => setOpen((v) => !v),
         style: { ...TRIGGER_STYLE, opacity: disabled ? 0.5 : 1 },
         children: [
-          /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
             "span",
             {
               style: {
@@ -1837,7 +1894,7 @@ function ThemeSelect({ value, options, onChange, placeholder, style, disabled })
               children: current?.label ?? placeholder ?? ""
             }
           ),
-          /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
             "span",
             {
               style: {
@@ -1852,9 +1909,9 @@ function ThemeSelect({ value, options, onChange, placeholder, style, disabled })
         ]
       }
     ),
-    open && /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { ref: listRef, style: MENU_STYLE, role: "listbox", children: [
-      options.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { style: { color: "var(--dsw-alias-label-tertiary)", padding: 10, fontSize: 13, lineHeight: "20px" }, children: "\u65E0\u9009\u9879" }),
-      options.map((o) => /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
+    open && /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { ref: listRef, style: MENU_STYLE, role: "listbox", children: [
+      options.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { style: { color: "var(--dsw-alias-label-tertiary)", padding: 10, fontSize: 13, lineHeight: "20px" }, children: "\u65E0\u9009\u9879" }),
+      options.map((o) => /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
         "button",
         {
           type: "button",
@@ -1876,30 +1933,431 @@ function ThemeSelect({ value, options, onChange, placeholder, style, disabled })
   ] });
 }
 
-// src/client/desktop-settings/cards/migration-card.tsx
+// src/client/desktop-settings/cards/logging-controls.tsx
+var import_jsx_runtime6 = require("react/jsx-runtime");
+var LOG_LEVEL_OPTIONS = [
+  { value: "debug", label: "\u8C03\u8BD5 debug", detail: "\u6700\u8BE6\u7EC6\uFF0C\u6392\u969C\u65F6\u4E34\u65F6\u5F00" },
+  { value: "info", label: "\u4FE1\u606F info", detail: "\u5E38\u89C4\u8FD0\u884C\u8BB0\u5F55\uFF08\u9ED8\u8BA4\uFF09" },
+  { value: "warn", label: "\u8B66\u544A warn", detail: "\u53EA\u8BB0\u8B66\u544A\u4E0E\u9519\u8BEF" },
+  { value: "error", label: "\u9519\u8BEF error", detail: "\u53EA\u8BB0\u9519\u8BEF" }
+];
+var EXPORT_PRESETS = [
+  { value: "today", label: "\u4ECA\u5929" },
+  { value: "7d", label: "\u8FD1 7 \u5929" },
+  { value: "30d", label: "\u8FD1 30 \u5929" },
+  { value: "all", label: "\u5168\u90E8" },
+  { value: "custom", label: "\u81EA\u5B9A\u4E49\u8303\u56F4" }
+];
+var CONFIRM_AUTO_EXIT_MS = 3e4;
+var SUBTITLE_STYLE = {
+  fontSize: 12,
+  fontWeight: 600,
+  color: "var(--dsw-alias-label-primary,#e7eaf0)",
+  margin: "14px 0 6px"
+};
+function formatBytes(n) {
+  if (n >= 1024 * 1024 * 1024) return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${n} B`;
+}
+function clampInt(raw, min, max, fallback) {
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+function LoggingSection() {
+  const [level, setLevel] = (0, import_react6.useState)("info");
+  const [retentionDays, setRetentionDays] = (0, import_react6.useState)("14");
+  const [maxTotalMb, setMaxTotalMb] = (0, import_react6.useState)("200");
+  const [retentionNote, setRetentionNote] = (0, import_react6.useState)(null);
+  const [snap, setSnap] = (0, import_react6.useState)(null);
+  const [preset, setPreset] = (0, import_react6.useState)("7d");
+  const [exportFrom, setExportFrom] = (0, import_react6.useState)("");
+  const [exportTo, setExportTo] = (0, import_react6.useState)("");
+  const [exporting, setExporting] = (0, import_react6.useState)(false);
+  const [lastExport, setLastExport] = (0, import_react6.useState)(null);
+  const [clearConfirming, setClearConfirming] = (0, import_react6.useState)(false);
+  const clearTimerRef = (0, import_react6.useRef)(null);
+  const refresh = (0, import_react6.useCallback)(() => {
+    void invokeCommand("list_log_files").then((r) => setSnap(r)).catch(
+      () => {
+      }
+    );
+  }, []);
+  (0, import_react6.useEffect)(() => {
+    let cancelled = false;
+    void invokeCommand("get_desktop_settings_data").then((r) => {
+      if (cancelled) return;
+      const s = r.settings ?? {};
+      const lv = typeof s.log_level === "string" ? s.log_level : "info";
+      if (LOG_LEVEL_OPTIONS.some((o) => o.value === lv)) setLevel(lv);
+      if (typeof s.log_retention_days === "number") setRetentionDays(String(s.log_retention_days));
+      if (typeof s.log_max_total_mb === "number") setMaxTotalMb(String(s.log_max_total_mb));
+    }).catch(
+      () => {
+      }
+    );
+    refresh();
+    return () => {
+      cancelled = true;
+    };
+  }, [refresh]);
+  (0, import_react6.useEffect)(() => {
+    if (!clearConfirming) return;
+    clearTimerRef.current = setTimeout(() => setClearConfirming(false), CONFIRM_AUTO_EXIT_MS);
+    const onKey = (e) => {
+      if (e.key === "Escape") setClearConfirming(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      if (clearTimerRef.current !== null) clearTimeout(clearTimerRef.current);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [clearConfirming]);
+  const saveLevel = (next) => {
+    const prev = level;
+    if (next === prev) return;
+    setLevel(next);
+    void invokeCommand("save_desktop_settings", { patch: { log_level: next } }).then(() => {
+      const label = LOG_LEVEL_OPTIONS.find((o) => o.value === next)?.label ?? next;
+      showToast(`\u65E5\u5FD7\u7EA7\u522B\u5DF2\u5207\u5230${label}\uFF08\u7ACB\u5373\u751F\u6548\uFF09`, true);
+      refresh();
+    }).catch((e) => {
+      setLevel(prev);
+      showToast(`\u4FDD\u5B58\u5931\u8D25\uFF0C\u5DF2\u56DE\u5230\u539F\u6863\u4F4D\uFF1A${String(e)}`, false);
+    });
+  };
+  const saveRetention = () => {
+    const days = clampInt(retentionDays, 1, 365, 14);
+    const mb = clampInt(maxTotalMb, 50, 2e3, 200);
+    setRetentionDays(String(days));
+    setMaxTotalMb(String(mb));
+    void invokeCommand("save_desktop_settings", { patch: { log_retention_days: days, log_max_total_mb: mb } }).then((r) => {
+      setRetentionNote(
+        r.log_cleanup !== void 0 ? `\u5DF2\u4FDD\u5B58\uFF1B\u5E76\u6309\u65B0\u9608\u503C\u6E05\u7406\u4E86 ${r.log_cleanup.removed_files} \u4EFD\u5F52\u6863\u3001\u91CA\u653E ${formatBytes(r.log_cleanup.bytes_freed)}` : "\u5DF2\u4FDD\u5B58"
+      );
+      refresh();
+    }).catch((e) => showToast(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`, false));
+  };
+  const confirmClearLogs = () => {
+    setClearConfirming(false);
+    void invokeCommand("clear_logs").then((r) => {
+      showToast(`\u5DF2\u6E05\u7406 ${r.removed_files} \u4EFD\u5F52\u6863\u3001\u91CA\u653E ${formatBytes(r.bytes_freed)}`, true);
+      refresh();
+    }).catch((e) => showToast(`\u6E05\u7406\u5931\u8D25\uFF1A${String(e)}`, false));
+  };
+  const runExport = () => {
+    if (exporting) return;
+    if (preset === "custom" && exportFrom === "") {
+      showToast("\u81EA\u5B9A\u4E49\u8303\u56F4\u9700\u8981\u5148\u9009\u8D77\u59CB\u65E5\u671F", false);
+      return;
+    }
+    setExporting(true);
+    const args = preset === "custom" ? { range: "custom", from: exportFrom, ...exportTo === "" ? {} : { to: exportTo } } : { range: preset };
+    void invokeCommand("export_log_range", args).then((r) => {
+      const approx = r.approximations.length > 0 ? `\uFF08${r.approximations.length} \u4E2A\u6E90\u4E3A\u6574\u6587\u4EF6\u8FD1\u4F3C\uFF09` : "";
+      setLastExport(`${r.path}\uFF08${formatBytes(r.bytes)}\uFF09${approx}`);
+      showToast(`\u65E5\u5FD7\u5DF2\u5BFC\u51FA\u5230\u6240\u9009\u76EE\u5F55\uFF0C\u5171 ${r.archives_included} \u4EFD\u5F52\u6863\u5165\u5305`, true);
+      refresh();
+    }).catch((e) => showToast(`\u5BFC\u51FA\u5931\u8D25\uFF1A${String(e)}`, false)).finally(() => setExporting(false));
+  };
+  const openLogDir = () => {
+    void invokeCommand("list_log_files", { reveal: true }).then(() => showToast("\u5DF2\u5728\u6587\u4EF6\u7BA1\u7406\u5668\u6253\u5F00\u65E5\u5FD7\u76EE\u5F55", true, "info")).catch((e) => showToast(`\u6253\u5F00\u5931\u8D25\uFF1A${String(e)}`, false));
+  };
+  const activeTotal = snap?.active.reduce((sum, f) => sum + f.bytes, 0) ?? 0;
+  const archiveTotal = snap?.archives.reduce((sum, a) => sum + a.bytes, 0) ?? 0;
+  return /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)(import_jsx_runtime6.Fragment, { children: [
+    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: NOTE_STYLE, "data-desktop-settings": "log-status", children: snap === null ? "\u65E5\u5FD7\u73B0\u72B6\u8BFB\u53D6\u4E2D\u2026" : `\u5F53\u524D\u7EA7\u522B\uFF1A${snap.level} \xB7 \u5F52\u6863 ${snap.archives.length} \u4EFD \xB7 ${formatBytes(archiveTotal)} \xB7 \u6D3B\u8DC3 ${snap.active.length} \u6587\u4EF6 \xB7 ${formatBytes(activeTotal)}` }),
+    snap !== null && snap.health.io_error_count > 0 && /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { style: DANGER_NOTE_STYLE, "data-desktop-settings": "log-health", children: [
+      "\u65E5\u5FD7\u5199\u5165\u5F02\u5E38 ",
+      snap.health.io_error_count,
+      " \u6B21",
+      snap.health.last_io_error !== null ? `\uFF08\u6700\u8FD1\uFF1A${snap.health.last_io_error}\uFF09` : ""
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: SUBTITLE_STYLE, children: "\u65E5\u5FD7\u7EA7\u522B" }),
+    LOG_LEVEL_OPTIONS.map((opt) => /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("label", { style: RADIO_ROW_STYLE, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+        "input",
+        {
+          type: "radio",
+          name: "log-level",
+          "data-desktop-settings": `log-level-${opt.value}`,
+          checked: level === opt.value,
+          onChange: () => saveLevel(opt.value)
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("span", { style: RADIO_TEXT_STYLE, children: [
+        opt.label,
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { style: { color: "var(--dsw-alias-label-secondary,#9aa4b2)", marginLeft: 8 }, children: opt.detail })
+      ] })
+    ] }, opt.value)),
+    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: NOTE_STYLE, children: "\u7EA7\u522B\u53EA\u5F71\u54CD\u5199\u76D8\u8BE6\u7EC6\u7A0B\u5EA6\uFF0C\u5207\u6362\u7ACB\u5373\u751F\u6548\uFF08\u65E0\u9700\u91CD\u542F\uFF09\uFF1B\u8C03\u9AD8\u540E\u4F4E\u7EA7\u522B\u884C\u7ACB\u523B\u4E0D\u518D\u843D\u76D8\uFF0C\u5207\u56DE\u5373\u53EF\u627E\u56DE\u3002" }),
+    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: SUBTITLE_STYLE, children: "\u4FDD\u7559\u4E0E\u6E05\u7406" }),
+    /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { style: ROW_STYLE, "data-desktop-settings": "log-retention-fields", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("label", { style: ROW_STYLE, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { style: { fontSize: 12 }, children: "\u4FDD\u7559\u5929\u6570\uFF081\u2013365\uFF09" }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+          "input",
+          {
+            style: { ...INPUT_BASE_STYLE, width: 72 },
+            inputMode: "numeric",
+            "data-desktop-settings": "log-retention-days",
+            value: retentionDays,
+            onChange: (e) => setRetentionDays(e.target.value)
+          }
+        )
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("label", { style: ROW_STYLE, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { style: { fontSize: 12 }, children: "\u603B\u5927\u5C0F\u4E0A\u9650 MB\uFF0850\u20132000\uFF09" }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+          "input",
+          {
+            style: { ...INPUT_BASE_STYLE, width: 72 },
+            inputMode: "numeric",
+            "data-desktop-settings": "log-max-total-mb",
+            value: maxTotalMb,
+            onChange: (e) => setMaxTotalMb(e.target.value)
+          }
+        )
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(PfBtn, { variant: "ghost", onClick: saveRetention, testId: "log-retention-save", children: "\u4FDD\u5B58" })
+    ] }),
+    retentionNote !== null && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: NOTE_STYLE, children: retentionNote }),
+    /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { style: { ...ROW_STYLE, marginTop: 8 }, "data-desktop-settings": "log-clear-actions", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(PfBtn, { variant: "ghost", onClick: openLogDir, testId: "log-open-dir", children: "\u6253\u5F00\u65E5\u5FD7\u76EE\u5F55" }),
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(PfBtn, { variant: "danger", onClick: () => setClearConfirming(true), testId: "log-clear", children: "\u4E00\u952E\u6E05\u7406\u65E5\u5FD7" })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: NOTE_STYLE, children: "\u4FDD\u7559\u7B56\u7565\u8D85\u9650\u65F6\u81EA\u52A8\u5220\u6700\u65E7\u5F52\u6863\uFF08\u53EA\u6E05\u5F52\u6863\u76EE\u5F55\uFF0C\u4E0D\u78B0\u6D3B\u8DC3\u6587\u4EF6\uFF09\uFF1B\u300C\u4E00\u952E\u6E05\u7406\u300D\u989D\u5916\u622A\u65AD\u6D3B\u8DC3\u65E5\u5FD7\uFF0C\u9700\u8981\u4E8C\u6B21\u786E\u8BA4\u3002" }),
+    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: SUBTITLE_STYLE, children: "\u5BFC\u51FA\u65E5\u5FD7" }),
+    /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { style: ROW_STYLE, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: { width: 180 }, "data-desktop-settings": "log-export-preset", children: /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+        ThemeSelect,
+        {
+          value: preset,
+          options: EXPORT_PRESETS.map((o) => ({ value: o.value, label: o.label })),
+          onChange: (v) => setPreset(v)
+        }
+      ) }),
+      preset === "custom" && /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)(import_jsx_runtime6.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+          "input",
+          {
+            type: "date",
+            style: INPUT_BASE_STYLE,
+            "data-desktop-settings": "log-export-from",
+            value: exportFrom,
+            onChange: (e) => setExportFrom(e.target.value)
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary,#9aa4b2)" }, children: "\u81F3" }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+          "input",
+          {
+            type: "date",
+            style: INPUT_BASE_STYLE,
+            "data-desktop-settings": "log-export-to",
+            value: exportTo,
+            onChange: (e) => setExportTo(e.target.value)
+          }
+        )
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(PfBtn, { variant: "primary", disabled: exporting, onClick: runExport, testId: "log-export-run", children: exporting ? "\u5BFC\u51FA\u4E2D\u2026" : "\u5BFC\u51FA\u65E5\u5FD7" })
+    ] }),
+    lastExport !== null && /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { style: NOTE_STYLE, "data-desktop-settings": "log-last-export", children: [
+      "\u4E0A\u6B21\u65E5\u5FD7\u5BFC\u51FA\uFF1A",
+      lastExport
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: NOTE_STYLE, children: "\u5BFC\u51FA\u4E3A tar.gz \u5355\u5305\uFF0C\u6309\u6240\u9009\u65F6\u95F4\u8303\u56F4\u6536\u96C6\u5F52\u6863\u4E0E\u6D3B\u8DC3\u65E5\u5FD7\uFF0C\u843D\u5230\u4F60\u9009\u7684\u76EE\u5F55\u540E\u81EA\u52A8\u6253\u5F00\u6240\u5728\u4F4D\u7F6E\u3002\u9875\u9762\u65E5\u5FD7\u65E0\u65F6\u95F4\u6233\uFF0C\u4EE5\u6574\u6587\u4EF6\u65B9\u5F0F\u8FD1\u4F3C\u6536\u5F55\u3002" }),
+    clearConfirming && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: DEV_TOOLS_OVERLAY_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { style: DEV_TOOLS_MODAL_STYLE, "data-desktop-settings": "log-clear-confirm", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: DEV_TOOLS_TITLE_STYLE, children: "\u6E05\u7406\u5168\u90E8\u65E5\u5FD7\uFF1F" }),
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { style: DEV_TOOLS_BODY_STYLE, children: [
+        "\u5C06\u6E05\u7A7A\u5F52\u6863\u76EE\u5F55\u4E2D\u7684\u5168\u90E8 .gz \u5F52\u6863\uFF0C\u5E76\u628A\u4E09\u4E2A\u6D3B\u8DC3\u65E5\u5FD7\u6587\u4EF6\uFF08shell / \u9875\u9762 / relay\uFF09\u622A\u65AD\u4E3A\u7A7A\u3002",
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("br", {}),
+        "\u622A\u65AD\u540E\u58F3\u4F1A\u7EE7\u7EED\u5199\u5165\u65B0\u65E5\u5FD7\uFF0C\u4F46\u88AB\u6E05\u6389\u7684\u5185\u5BB9\u4E0D\u53EF\u6062\u590D\u3002\u7EA6 30 \u79D2\u65E0\u64CD\u4F5C\u81EA\u52A8\u53D6\u6D88\u3002"
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { style: DEV_TOOLS_ACTIONS_STYLE, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(PfBtn, { variant: "ghost", onClick: () => setClearConfirming(false), children: "\u53D6\u6D88" }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(PfBtn, { variant: "danger", onClick: confirmClearLogs, children: "\u786E\u8BA4\u6E05\u7406" })
+      ] })
+    ] }) })
+  ] });
+}
+
+// src/client/desktop-settings/cards/diagnostics-card.tsx
+var import_jsx_runtime7 = require("react/jsx-runtime");
+function DiagnosticsCard() {
+  const [diagSummary, setDiagSummary] = (0, import_react7.useState)(null);
+  const [diagLogPath, setDiagLogPath] = (0, import_react7.useState)(null);
+  const [diagExport, setDiagExport] = (0, import_react7.useState)(null);
+  (0, import_react7.useEffect)(() => {
+    let cancelled = false;
+    void invoke("get_diagnostics").then((r) => {
+      if (cancelled) return;
+      const summary = r.diagnostics?.summary;
+      if (typeof summary === "string" && summary !== "") setDiagSummary(summary);
+      const path = r.diagnostics?.logs?.shell?.path;
+      if (typeof path === "string" && path !== "") setDiagLogPath(path);
+    }).catch((error) => {
+      console.warn(`[dsh-desktop-tauriapp] \u8BFB\u53D6\u8BCA\u65AD\u5FEB\u7167\u5931\u8D25\uFF1A${String(error)}`);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(SectionBox, { title: "\u65E5\u5FD7\u4E0E\u8BCA\u65AD", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { style: NOTE_STYLE, children: diagSummary === null ? "\u8BFB\u53D6\u4E2D\u2026" : diagSummary }),
+    diagLogPath !== null && /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { style: NOTE_STYLE, children: [
+      "\u58F3\u65E5\u5FD7\uFF1A",
+      diagLogPath
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { style: { display: "flex", gap: 8, marginTop: 8 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+        PfBtn,
+        {
+          variant: "ghost",
+          onClick: () => {
+            void invoke("export_diagnostics").then((r) => {
+              setDiagExport(r.path);
+              showToast(`\u8BCA\u65AD\u5DF2\u5BFC\u51FA\uFF1A${r.path}`, true);
+            }).catch((e) => showToast(`\u5BFC\u51FA\u5931\u8D25\uFF1A${String(e)}`, false));
+          },
+          children: "\u5BFC\u51FA\u8BCA\u65AD"
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+        PfBtn,
+        {
+          variant: "ghost",
+          onClick: () => {
+            void invoke("get_diagnostics").then((r) => {
+              const path = r.diagnostics?.logs?.shell?.path;
+              if (typeof path === "string" && path !== "") showToast(`\u58F3\u65E5\u5FD7\uFF1A${path}`, true);
+              else showToast("\u8BCA\u65AD\u91CC\u6CA1\u6709\u65E5\u5FD7\u8DEF\u5F84", false);
+            }).catch((e) => showToast(`\u8BFB\u53D6\u5931\u8D25\uFF1A${String(e)}`, false));
+          },
+          children: "\u663E\u793A\u65E5\u5FD7\u8DEF\u5F84"
+        }
+      )
+    ] }),
+    diagExport !== null && /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { style: NOTE_STYLE, children: [
+      "\u4E0A\u6B21\u5BFC\u51FA\uFF1A",
+      diagExport
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(LoggingSection, {})
+  ] });
+}
+
+// src/client/desktop-settings/cards/download-card.tsx
+var import_react8 = require("react");
+var import_jsx_runtime8 = require("react/jsx-runtime");
+function DownloadCard({
+  note,
+  onNote
+}) {
+  const [concurrencyInput, setConcurrencyInput] = (0, import_react8.useState)("3");
+  const concurrencyTouchedRef = (0, import_react8.useRef)(false);
+  (0, import_react8.useEffect)(() => {
+    invoke("get_download_settings").then((s) => {
+      if (!concurrencyTouchedRef.current) setConcurrencyInput(String(s.concurrency));
+    }).catch(() => {
+    });
+  }, []);
+  const handleSaveConcurrency = () => {
+    const v = Math.max(1, Math.min(32, parseInt(concurrencyInput, 10) || 3));
+    void nsSave({ download_concurrency: v }).then(() => invoke("set_download_concurrency", { value: v })).then(() => onNote(`\u5DF2\u4FDD\u5B58\uFF1A\u5E76\u53D1\u4E0A\u9650 ${v}`)).catch(() => onNote("\u4FDD\u5B58\u5931\u8D25\uFF08\u65E0 Tauri IPC\uFF1F\uFF09"));
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(SectionBox, { title: "\u4E0B\u8F7D", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { style: ROW_STYLE, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
+        "input",
+        {
+          placeholder: "1-32",
+          "data-desktop-settings": "download-concurrency",
+          style: { ...INPUT_BASE_STYLE, width: 80 },
+          value: concurrencyInput,
+          onChange: (e) => {
+            concurrencyTouchedRef.current = true;
+            setConcurrencyInput(e.target.value);
+          }
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveConcurrency, children: "\u4FDD\u5B58" })
+    ] }),
+    note && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { style: NOTE_STYLE, children: note }),
+    /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { style: NOTE_STYLE, children: "\u540C\u65F6\u8FDB\u884C\u7684\u4E0B\u8F7D\u6570\u4E0A\u9650\uFF0C\u8D85\u51FA\u6392\u961F\uFF1B\u6539\u52A8\u7ACB\u5373\u751F\u6548\u3002" })
+  ] });
+}
+
+// src/client/desktop-settings/cards/loopback-aggregation-card.tsx
+var import_react9 = require("react");
 var import_jsx_runtime9 = require("react/jsx-runtime");
+function LoopbackAggregationCard({ value }) {
+  const [loopbackAggregation, setLoopbackAggregation] = (0, import_react9.useState)(value);
+  const [loopbackAggregationNote, setLoopbackAggregationNote] = (0, import_react9.useState)(null);
+  (0, import_react9.useEffect)(() => {
+    setLoopbackAggregation(value);
+  }, [value]);
+  const handleSaveLoopbackAggregation = (next) => {
+    const prev = loopbackAggregation;
+    if (next === prev) return;
+    setLoopbackAggregation(next);
+    void nsSave({ loopback_aggregation: next }).then(
+      () => setLoopbackAggregationNote(
+        `\u5DF2\u4FDD\u5B58\uFF1A${LOOPBACK_AGGREGATION_OPTIONS.find((o) => o.value === next)?.label ?? next}\uFF08\u7ACB\u5373\u751F\u6548\uFF0C\u65E0\u9700\u91CD\u542F\uFF09`
+      )
+    ).catch((e) => {
+      setLoopbackAggregation(prev);
+      setLoopbackAggregationNote(`\u4FDD\u5B58\u5931\u8D25\uFF0C\u5DF2\u56DE\u5230\u539F\u6863\u4F4D\uFF1A${String(e)}`);
+    });
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(SectionBox, { title: "loopback \u6570\u636E\u9762\u805A\u5408", children: [
+    LOOPBACK_AGGREGATION_OPTIONS.map((opt) => /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("label", { style: RADIO_ROW_STYLE, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+        "input",
+        {
+          type: "radio",
+          name: "loopback-aggregation",
+          "data-desktop-settings": `loopback-aggregation-${opt.value}`,
+          checked: loopbackAggregation === opt.value,
+          onChange: () => handleSaveLoopbackAggregation(opt.value)
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { style: RADIO_TEXT_STYLE, children: [
+        opt.label,
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { style: { color: "var(--dsw-alias-label-secondary,#9aa4b2)", marginLeft: 8 }, children: opt.detail })
+      ] })
+    ] }, opt.value)),
+    loopbackAggregationNote && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { style: NOTE_STYLE, children: loopbackAggregationNote }),
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { style: NOTE_STYLE, children: "\u684C\u9762\u58F3\u56DE\u73AF\u6570\u636E\u9762\uFF08\u684C\u9762\u9875\u9762\u548C\u624B\u673A\u8FDC\u7A0B\u8BBF\u95EE\u90FD\u8D70\u5B83\uFF09\u5BF9 GET \u8BF7\u6C42\u7684\u5408\u5E76\u4E0E\u7F13\u51B2\u7B56\u7565\u3002\u300C\u53EA\u5173\u7F13\u51B2\u300D\u4FDD\u7559\u5408\u5E76\uFF0C \u53EA\u8BA9\u54CD\u5E94\u8FB9\u5230\u8FB9\u4E0B\u53D1\uFF1B\u300C\u5168\u5173\u300D\u8FDE\u5408\u5E76\u4E5F\u505C\u6389\uFF0C\u6BCF\u4E2A\u8BF7\u6C42\u5404\u81EA\u6253\u4E0A\u6E38\uFF0C\u4E0D\u4F1A\u5173\u6389\u522B\u7684\u529F\u80FD\u3002\u6539\u52A8\u7ACB\u5373\u751F\u6548\uFF0C \u4E0D\u9700\u8981\u91CD\u542F\u3002" })
+  ] });
+}
+
+// src/client/desktop-settings/cards/migration-card.tsx
+var import_react10 = require("react");
+var import_jsx_runtime10 = require("react/jsx-runtime");
 function MigrationCard({
   profiles,
   loaded,
   notify
 }) {
-  const [migrationSource, setMigrationSource] = (0, import_react9.useState)("");
-  const [migrationDest, setMigrationDest] = (0, import_react9.useState)("");
-  const [migrationRunning, setMigrationRunning] = (0, import_react9.useState)(false);
-  const [migrationProgress, setMigrationProgress] = (0, import_react9.useState)(null);
-  const selectsFilledRef = (0, import_react9.useRef)(false);
-  (0, import_react9.useEffect)(() => {
+  const [migrationSource, setMigrationSource] = (0, import_react10.useState)("");
+  const [migrationDest, setMigrationDest] = (0, import_react10.useState)("");
+  const [migrationRunning, setMigrationRunning] = (0, import_react10.useState)(false);
+  const [migrationProgress, setMigrationProgress] = (0, import_react10.useState)(null);
+  const selectsFilledRef = (0, import_react10.useRef)(false);
+  (0, import_react10.useEffect)(() => {
     if (!loaded || selectsFilledRef.current) return;
     selectsFilledRef.current = true;
     setMigrationSource(loaded.migrationSource);
     setMigrationDest(loaded.migrationDest);
   }, [loaded]);
-  (0, import_react9.useEffect)(() => {
+  (0, import_react10.useEffect)(() => {
     if (!migrationRunning) return;
     let cancelled = false;
     const tick = async () => {
       try {
-        const st = await invoke2("migration_status");
+        const st = await invoke("migration_status");
         if (cancelled) return;
         if (st.running) {
           setMigrationProgress({ copied: st.copied, total: st.total });
@@ -1923,7 +2381,7 @@ function MigrationCard({
     const start = (overwrite) => {
       setMigrationRunning(true);
       setMigrationProgress({ copied: 0, total: 0 });
-      invoke2("migrate_profile", { source: migrationSource, dest: migrationDest, overwrite }).then((s) => {
+      invoke("migrate_profile", { source: migrationSource, dest: migrationDest, overwrite }).then((s) => {
         setMigrationRunning(false);
         setMigrationProgress(null);
         showToast(s, true);
@@ -1943,10 +2401,10 @@ function MigrationCard({
     start(false);
   };
   const migrationDestOptions = profiles.filter((p) => p.name !== migrationSource);
-  return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(SectionBox, { title: "\u8FC1\u79FB Profile", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { style: LABEL_STYLE, children: "\u6E90 profile \u2192 \u76EE\u6807 profile\uFF08\u5168\u91CF\u590D\u5236\uFF1B\u76EE\u6807\u5DF2\u5B58\u5728\u9700\u8986\u76D6\u786E\u8BA4\uFF09" }),
-    /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { style: ROW_STYLE, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+  return /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(SectionBox, { title: "\u8FC1\u79FB Profile", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: LABEL_STYLE, children: "\u6E90 profile \u2192 \u76EE\u6807 profile\uFF08\u5168\u91CF\u590D\u5236\uFF1B\u76EE\u6807\u5DF2\u5B58\u5728\u9700\u8986\u76D6\u786E\u8BA4\uFF09" }),
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { style: ROW_STYLE, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
         ThemeSelect,
         {
           style: { flex: 1 },
@@ -1961,7 +2419,7 @@ function MigrationCard({
           options: (profiles ?? []).map((p) => ({ value: p.name, label: p.name }))
         }
       ),
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
         ThemeSelect,
         {
           style: { flex: 1 },
@@ -1970,10 +2428,10 @@ function MigrationCard({
           options: migrationDestOptions.map((p) => ({ value: p.name, label: p.name }))
         }
       ),
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(PfBtn, { variant: "ghost", onClick: handleMigrate, children: "\u8FC1\u79FB\u2026" })
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(PfBtn, { variant: "ghost", onClick: handleMigrate, children: "\u8FC1\u79FB\u2026" })
     ] }),
-    migrationRunning && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { style: { marginTop: 10 }, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+    migrationRunning && /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { style: { marginTop: 10 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
         "div",
         {
           style: {
@@ -1982,7 +2440,7 @@ function MigrationCard({
             background: "var(--dsw-alias-bg-base,#111)",
             overflow: "hidden"
           },
-          children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+          children: /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
             "div",
             {
               style: {
@@ -1995,35 +2453,35 @@ function MigrationCard({
           )
         }
       ),
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { style: NOTE_STYLE, children: migrationProgress ? `\u8FC1\u79FB\u4E2D\uFF1A${migrationProgress.copied}/${migrationProgress.total} \u4E2A\u6587\u4EF6\uFF08${migrationProgress.total > 0 ? Math.min(100, Math.round(migrationProgress.copied / migrationProgress.total * 100)) : 0}%\uFF09` : "\u51C6\u5907\u4E2D\u2026" })
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: NOTE_STYLE, children: migrationProgress ? `\u8FC1\u79FB\u4E2D\uFF1A${migrationProgress.copied}/${migrationProgress.total} \u4E2A\u6587\u4EF6\uFF08${migrationProgress.total > 0 ? Math.min(100, Math.round(migrationProgress.copied / migrationProgress.total * 100)) : 0}%\uFF09` : "\u51C6\u5907\u4E2D\u2026" })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { style: NOTE_STYLE, children: "\u8FC1\u79FB\u4E3A\u5F53\u524D\u65F6\u70B9\u5FEB\u7167\uFF1A\u4E0D\u505C\u6B62\u3001\u4E0D\u91CD\u542F\u4EFB\u4F55\u8FD0\u884C\u4E2D\u7684\u670D\u52A1\uFF1B\u6E90\u5728\u8FC1\u79FB\u671F\u95F4\u7684\u65B0\u6570\u636E\u4E0D\u5305\u542B\u5728\u526F\u672C\u5185\u3002\u76EE\u6807\u4E3A\u6FC0\u6D3B profile \u65F6\u62D2\u7EDD\u8FC1\u79FB\u3002" })
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: NOTE_STYLE, children: "\u8FC1\u79FB\u4E3A\u5F53\u524D\u65F6\u70B9\u5FEB\u7167\uFF1A\u4E0D\u505C\u6B62\u3001\u4E0D\u91CD\u542F\u4EFB\u4F55\u8FD0\u884C\u4E2D\u7684\u670D\u52A1\uFF1B\u6E90\u5728\u8FC1\u79FB\u671F\u95F4\u7684\u65B0\u6570\u636E\u4E0D\u5305\u542B\u5728\u526F\u672C\u5185\u3002\u76EE\u6807\u4E3A\u6FC0\u6D3B profile \u65F6\u62D2\u7EDD\u8FC1\u79FB\u3002" })
   ] });
 }
 
 // src/client/desktop-settings/cards/mobile-access-card.tsx
-var import_react10 = require("react");
-var import_jsx_runtime10 = require("react/jsx-runtime");
+var import_react11 = require("react");
+var import_jsx_runtime11 = require("react/jsx-runtime");
 function MobileAccessCard({
   desktop,
   onNote
 }) {
-  const [muxHeartbeatInput, setMuxHeartbeatInput] = (0, import_react10.useState)("30000");
-  const [desktopLayoutOnPhones, setDesktopLayoutOnPhones] = (0, import_react10.useState)(false);
-  const [guardBackoffInput, setGuardBackoffInput] = (0, import_react10.useState)("10000");
-  const [guardBackoffNote, setGuardBackoffNote] = (0, import_react10.useState)(null);
-  const [mobileLayoutNote, setMobileLayoutNote] = (0, import_react10.useState)(null);
-  const muxInputRef = (0, import_react10.useRef)(null);
-  const guardInputRef = (0, import_react10.useRef)(null);
-  (0, import_react10.useEffect)(() => {
+  const [muxHeartbeatInput, setMuxHeartbeatInput] = (0, import_react11.useState)("30000");
+  const [desktopLayoutOnPhones, setDesktopLayoutOnPhones] = (0, import_react11.useState)(false);
+  const [guardBackoffInput, setGuardBackoffInput] = (0, import_react11.useState)("10000");
+  const [guardBackoffNote, setGuardBackoffNote] = (0, import_react11.useState)(null);
+  const [mobileLayoutNote, setMobileLayoutNote] = (0, import_react11.useState)(null);
+  const muxInputRef = (0, import_react11.useRef)(null);
+  const guardInputRef = (0, import_react11.useRef)(null);
+  (0, import_react11.useEffect)(() => {
     setDesktopLayoutOnPhones(desktop.desktop_layout_on_phones === true);
   }, [desktop.desktop_layout_on_phones]);
-  (0, import_react10.useEffect)(() => {
+  (0, import_react11.useEffect)(() => {
     if (typeof document !== "undefined" && document.activeElement === muxInputRef.current) return;
     const hb = desktop.mux_heartbeat_ms;
     setMuxHeartbeatInput(typeof hb === "number" ? String(hb) : "30000");
   }, [desktop.mux_heartbeat_ms]);
-  (0, import_react10.useEffect)(() => {
+  (0, import_react11.useEffect)(() => {
     if (typeof document !== "undefined" && document.activeElement === guardInputRef.current) return;
     const v = desktop.mobile_guard_backoff_ms;
     setGuardBackoffInput(typeof v === "number" && v > 0 ? String(v) : "10000");
@@ -2063,9 +2521,9 @@ function MobileAccessCard({
       setMobileLayoutNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`);
     });
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(SectionBox, { title: "\u624B\u673A\u8BBF\u95EE\uFF08\u8FDC\u7A0B\u8FDE\u63A5\uFF09", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { style: ROW_STYLE, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
+  return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(SectionBox, { title: "\u624B\u673A\u8BBF\u95EE\uFF08\u8FDC\u7A0B\u8FDE\u63A5\uFF09", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { style: ROW_STYLE, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
         "input",
         {
           placeholder: "30000",
@@ -2076,16 +2534,16 @@ function MobileAccessCard({
           onChange: (e) => setMuxHeartbeatInput(e.target.value)
         }
       ),
-      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveMuxHeartbeat, children: "\u4FDD\u5B58" })
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveMuxHeartbeat, children: "\u4FDD\u5B58" })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { style: NOTE_STYLE, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { style: NOTE_STYLE, children: [
       "dsh \u7F51\u5173\u5BF9 ",
-      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("code", { children: "/api/remote.mux" }),
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("code", { children: "/api/remote.mux" }),
       " \u7684\u5FC3\u8DF3\u95F4\u9694\uFF08\u6BEB\u79D2\uFF09\u3002dsh \u539F\u751F 2s \u4E14\u8FDE\u4E22 2 \u6B21\u5373\u65AD\u5F00\uFF0C \u79FB\u52A8\u7AEF\u5207\u540E\u53F0/\u5F31\u7F51\u4F1A\u88AB\u79D2\u5224\u6B7B\uFF08\u8868\u73B0\u4E3A\u300C\u80FD\u53D1\u6D88\u606F\u3001\u6536\u4E0D\u5230\u65B0\u6D88\u606F\u300D\uFF09\uFF1B\u58F3\u9ED8\u8BA4\u8986\u76D6\u4E3A 30000\u3002 \u586B 0 = \u4E0D\u8986\u76D6\uFF08\u56DE\u9000 dsh \u9ED8\u8BA4\uFF09\uFF0C\u6539\u52A8\u91CD\u542F dsh \u751F\u6548\u3002"
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: { ...LABEL_STYLE, marginTop: 12 }, children: "\u79FB\u52A8\u7AEF\u4F1A\u8BDD\u5B88\u536B" }),
-    /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { style: ROW_STYLE, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { style: { ...LABEL_STYLE, marginTop: 12 }, children: "\u79FB\u52A8\u7AEF\u4F1A\u8BDD\u5B88\u536B" }),
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { style: ROW_STYLE, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
         "input",
         {
           placeholder: "10000",
@@ -2096,13 +2554,13 @@ function MobileAccessCard({
           ref: guardInputRef
         }
       ),
-      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveGuardBackoff, children: "\u4FDD\u5B58" })
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveGuardBackoff, children: "\u4FDD\u5B58" })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: NOTE_STYLE, children: "\u79FB\u52A8\u7AEF\u58F3\u63A2\u6D4B\u5230\u4F1A\u8BDD\u5931\u6548\u65F6\uFF0C\u7B2C 2 \u6B21\u8D77\u6309\u300C\u57FA\u6570 \xD7 2^(n-2)\u300D\u9000\u907F\u91CD\u8FDE\uFF08\u5C01\u9876 30s\uFF09\u3002\u9ED8\u8BA4 10000ms\uFF1B \u8C03\u5927\u80FD\u51CF\u5C11\u5F31\u7F51\u4E0B\u7684\u300C\u65AD\u2014\u91CD\u8FDE\u300D\u6296\u52A8\uFF0C\u4EE3\u4EF7\u662F\u6062\u590D\u53D8\u6162\u3002\u6539\u52A8\u91CD\u542F dsh \u751F\u6548\u3002" }),
-    guardBackoffNote && /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: NOTE_STYLE, children: guardBackoffNote }),
-    /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: { ...LABEL_STYLE, marginTop: 12 }, children: "\u79FB\u52A8\u7AEF\u5E03\u5C40" }),
-    /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: ROW_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { style: NOTE_STYLE, children: "\u79FB\u52A8\u7AEF\u58F3\u63A2\u6D4B\u5230\u4F1A\u8BDD\u5931\u6548\u65F6\uFF0C\u7B2C 2 \u6B21\u8D77\u6309\u300C\u57FA\u6570 \xD7 2^(n-2)\u300D\u9000\u907F\u91CD\u8FDE\uFF08\u5C01\u9876 30s\uFF09\u3002\u9ED8\u8BA4 10000ms\uFF1B \u8C03\u5927\u80FD\u51CF\u5C11\u5F31\u7F51\u4E0B\u7684\u300C\u65AD\u2014\u91CD\u8FDE\u300D\u6296\u52A8\uFF0C\u4EE3\u4EF7\u662F\u6062\u590D\u53D8\u6162\u3002\u6539\u52A8\u91CD\u542F dsh \u751F\u6548\u3002" }),
+    guardBackoffNote && /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { style: NOTE_STYLE, children: guardBackoffNote }),
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { style: { ...LABEL_STYLE, marginTop: 12 }, children: "\u79FB\u52A8\u7AEF\u5E03\u5C40" }),
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { style: ROW_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
         "input",
         {
           type: "checkbox",
@@ -2113,15 +2571,15 @@ function MobileAccessCard({
       ),
       "\u624B\u673A\u7AEF\u6539\u7528\u684C\u9762\u5E03\u5C40\uFF08\u4E0D\u52A0\u8F7D\u79FB\u52A8\u5E03\u5C40\u63D2\u4EF6\uFF09"
     ] }) }),
-    /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: NOTE_STYLE, children: "\u624B\u673A\u4E0A\u7684\u5361\u987F\u6765\u81EA\u5BBF\u4E3B\u524D\u7AEF\uFF08\u4F1A\u8BDD\u6574\u6BB5\u6302\u8F7D + \u9010\u5757\u4EE3\u7801\u9AD8\u4EAE\uFF09\uFF0C\u4E0D\u662F\u7F51\u7EDC\u3002\u52FE\u9009\u540E\u624B\u673A\u8D70\u4E0E iPad \u76F8\u540C\u7684\u684C\u9762\u5E03\u5C40\uFF1A\u660E\u663E\u66F4\u6D41\u7545\uFF0C\u4EE3\u4EF7\u662F\u6392\u7248\u66F4\u6324\uFF08\u53EF\u6A2A\u5C4F\u7F13\u89E3\uFF09\u3002\u4E0D\u52FE\u9009 = \u79FB\u52A8\u5E03\u5C40\u3002\u6539\u52A8\u91CD\u542F dsh \u751F\u6548\u3002" }),
-    mobileLayoutNote && /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { style: NOTE_STYLE, children: mobileLayoutNote })
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { style: NOTE_STYLE, children: "\u624B\u673A\u4E0A\u7684\u5361\u987F\u6765\u81EA\u5BBF\u4E3B\u524D\u7AEF\uFF08\u4F1A\u8BDD\u6574\u6BB5\u6302\u8F7D + \u9010\u5757\u4EE3\u7801\u9AD8\u4EAE\uFF09\uFF0C\u4E0D\u662F\u7F51\u7EDC\u3002\u52FE\u9009\u540E\u624B\u673A\u8D70\u4E0E iPad \u76F8\u540C\u7684\u684C\u9762\u5E03\u5C40\uFF1A\u660E\u663E\u66F4\u6D41\u7545\uFF0C\u4EE3\u4EF7\u662F\u6392\u7248\u66F4\u6324\uFF08\u53EF\u6A2A\u5C4F\u7F13\u89E3\uFF09\u3002\u4E0D\u52FE\u9009 = \u79FB\u52A8\u5E03\u5C40\u3002\u6539\u52A8\u91CD\u542F dsh \u751F\u6548\u3002" }),
+    mobileLayoutNote && /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { style: NOTE_STYLE, children: mobileLayoutNote })
   ] });
 }
 
 // src/client/desktop-settings/cards/power-card.tsx
-var import_react11 = require("react");
+var import_react12 = require("react");
 
-// src/client/keep-awake-note.ts
+// src/client/features/keep-awake-note.ts
 var NOTE_TAIL = "\u76F4\u5230\u4F1A\u8BDD\u8DD1\u5B8C\u3001dsh \u5B9E\u4F8B\u505C\u6B62\u6216\u9000\u51FA\u58F3\u3002\u5C4F\u5E55\u8BE5\u5173\u8FD8\u662F\u7167\u5173\uFF0C\u53EA\u662F\u4E0D\u8BA9\u6574\u673A\u7761\u8FC7\u53BB\uFF1B\u5408\u76D6\u4ECD\u7136\u4F1A\u7761\u3002\u6539\u52A8\u7ACB\u5373\u751F\u6548\u3002";
 var GENERIC_HEAD = "\u7184\u5C4F\u540E\u82E5\u8FD8\u6709\u4F1A\u8BDD\u5728\u8DD1\uFF0C\u58F3\u4F1A\u6301\u6709\u7CFB\u7EDF\u9632\u4F11\u7720\u65AD\u8A00\uFF08macOS \u8D70 IOKit\u3001Windows \u8D70\u7EBF\u7A0B\u6267\u884C\u72B6\u6001\u3001Linux \u8D70 logind/GNOME \u4F1A\u8BDD\u6291\u5236\uFF09";
 var BACKEND_HEAD = /* @__PURE__ */ new Map([
@@ -2151,11 +2609,11 @@ function keepAwakeNote(capability) {
 }
 
 // src/client/desktop-settings/cards/power-card.tsx
-var import_jsx_runtime11 = require("react/jsx-runtime");
+var import_jsx_runtime12 = require("react/jsx-runtime");
 function PowerCard({ desktop }) {
-  const [preventSleep, setPreventSleep] = (0, import_react11.useState)(true);
-  const [preventSleepNote, setPreventSleepNote] = (0, import_react11.useState)(null);
-  (0, import_react11.useEffect)(() => {
+  const [preventSleep, setPreventSleep] = (0, import_react12.useState)(true);
+  const [preventSleepNote, setPreventSleepNote] = (0, import_react12.useState)(null);
+  (0, import_react12.useEffect)(() => {
     setPreventSleep(desktop.prevent_sleep !== false);
   }, [desktop]);
   const handleTogglePreventSleep = (next) => {
@@ -2166,9 +2624,9 @@ function PowerCard({ desktop }) {
       )
     ).catch((e) => setPreventSleepNote(`\u4FDD\u5B58\u5931\u8D25\uFF1A${String(e)}`));
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(SectionBox, { title: "\u7535\u6E90", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { style: ROW_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+  return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(SectionBox, { title: "\u7535\u6E90", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { style: ROW_STYLE, children: /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
         "input",
         {
           type: "checkbox",
@@ -2179,16 +2637,16 @@ function PowerCard({ desktop }) {
       ),
       "\u6709\u4F1A\u8BDD\u5728\u8DD1\u65F6\u963B\u6B62\u7CFB\u7EDF\u4F11\u7720\uFF08\u7F3A\u7701\u5F00\uFF09"
     ] }) }),
-    preventSleepNote && /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { style: NOTE_STYLE, children: preventSleepNote }),
+    preventSleepNote && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { style: NOTE_STYLE, children: preventSleepNote }),
     (() => {
       const note = keepAwakeNote(desktop.keep_awake);
-      return /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { style: note.tone === "warn" ? WARN_NOTE_STYLE : NOTE_STYLE, children: note.text });
+      return /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { style: note.tone === "warn" ? WARN_NOTE_STYLE : NOTE_STYLE, children: note.text });
     })()
   ] });
 }
 
 // src/client/desktop-settings/cards/profile-card.tsx
-var import_jsx_runtime12 = require("react/jsx-runtime");
+var import_jsx_runtime13 = require("react/jsx-runtime");
 function ProfileCard({
   desktop,
   notify
@@ -2203,15 +2661,15 @@ function ProfileCard({
     void (async () => {
       try {
         await nsSave({ active_profile: name });
-        await invoke2("restart_dsh_service");
+        await invoke("restart_dsh_service");
         notify({ ok: true, text: `\u5DF2\u5207\u6362\u5230 Profile\u300C${name}\u300D\uFF0C\u6B63\u5728\u91CD\u542F\u2026` });
       } catch (err) {
         notify({ ok: false, text: `\u5207\u6362 Profile \u5931\u8D25\uFF1A${String(err)}` });
       }
     })();
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(SectionBox, { title: "Profile", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+  return /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)(SectionBox, { title: "Profile", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
       ThemeSelect,
       {
         style: { marginBottom: 8 },
@@ -2223,23 +2681,23 @@ function ProfileCard({
         }))
       }
     ),
-    /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { style: NOTE_STYLE, children: "\u5207\u6362 Profile \u4F1A\u4EE5\u76EE\u6807 profile \u91CD\u542F dsh web\u3002" })
+    /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { style: NOTE_STYLE, children: "\u5207\u6362 Profile \u4F1A\u4EE5\u76EE\u6807 profile \u91CD\u542F dsh web\u3002" })
   ] });
 }
 
 // src/client/desktop-settings/cards/profile-ports-card.tsx
-var import_react12 = require("react");
-var import_jsx_runtime13 = require("react/jsx-runtime");
+var import_react13 = require("react");
+var import_jsx_runtime14 = require("react/jsx-runtime");
 function ProfilePortsCard({ loaded }) {
-  const [profilePorts, setProfilePorts] = (0, import_react12.useState)([]);
-  const [profilePortsStatus, setProfilePortsStatus] = (0, import_react12.useState)({ state: "loading", text: "\u52A0\u8F7D\u4E2D\u2026" });
-  const [profilePortInputs, setProfilePortInputs] = (0, import_react12.useState)({});
-  const [profileLaneInputs, setProfileLaneInputs] = (0, import_react12.useState)({});
-  const [profilePageInputs, setProfilePageInputs] = (0, import_react12.useState)({});
-  const [forwarderInput, setForwarderInput] = (0, import_react12.useState)("");
-  const [profilePortBoxNote, setProfilePortBoxNote] = (0, import_react12.useState)(null);
-  const inputsFilledRef = (0, import_react12.useRef)(false);
-  (0, import_react12.useEffect)(() => {
+  const [profilePorts, setProfilePorts] = (0, import_react13.useState)([]);
+  const [profilePortsStatus, setProfilePortsStatus] = (0, import_react13.useState)({ state: "loading", text: "\u52A0\u8F7D\u4E2D\u2026" });
+  const [profilePortInputs, setProfilePortInputs] = (0, import_react13.useState)({});
+  const [profileLaneInputs, setProfileLaneInputs] = (0, import_react13.useState)({});
+  const [profilePageInputs, setProfilePageInputs] = (0, import_react13.useState)({});
+  const [forwarderInput, setForwarderInput] = (0, import_react13.useState)("");
+  const [profilePortBoxNote, setProfilePortBoxNote] = (0, import_react13.useState)(null);
+  const inputsFilledRef = (0, import_react13.useRef)(false);
+  (0, import_react13.useEffect)(() => {
     if (!loaded || inputsFilledRef.current) return;
     inputsFilledRef.current = true;
     setForwarderInput(loaded.forwarderInput);
@@ -2247,11 +2705,11 @@ function ProfilePortsCard({ loaded }) {
     setProfileLaneInputs(loaded.profileLaneInputs);
     setProfilePageInputs(loaded.profilePageInputs);
   }, [loaded]);
-  (0, import_react12.useEffect)(() => {
+  (0, import_react13.useEffect)(() => {
     let cancelled = false;
     let attempt = 0;
     const load = () => {
-      invoke2("list_profile_ports").then((rows) => {
+      invoke("list_profile_ports").then((rows) => {
         if (cancelled) return;
         setProfilePorts(rows);
         setProfilePortsStatus({ state: "ok" });
@@ -2305,10 +2763,10 @@ function ProfilePortsCard({ loaded }) {
     if (v === null) return;
     savePortSetting("lane_forwarder_port", v, `lane \u8F6C\u53D1\u5668\u7AEF\u53E3\u5DF2\u6539\u4E3A ${v}\uFF1B\u91CD\u542F\u58F3\u751F\u6548\u3002`);
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)(SectionBox, { title: "Profile \u7AEF\u53E3", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { style: { ...ROW_STYLE, marginBottom: 10 }, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { style: LABEL_STYLE, children: "\u58F3 lane \u8F6C\u53D1\u5668\u53E3\uFF08\u91CD\u542F\u58F3\u751F\u6548\uFF09" }),
-      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+  return /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(SectionBox, { title: "Profile \u7AEF\u53E3", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { style: { ...ROW_STYLE, marginBottom: 10 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { style: LABEL_STYLE, children: "\u58F3 lane \u8F6C\u53D1\u5668\u53E3\uFF08\u91CD\u542F\u58F3\u751F\u6548\uFF09" }),
+      /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
         "input",
         {
           style: { ...INPUT_BASE_STYLE, width: 84 },
@@ -2321,13 +2779,13 @@ function ProfilePortsCard({ loaded }) {
           }
         }
       ),
-      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveForwarderPort, children: "\u4FDD\u5B58" })
+      /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(PfBtn, { variant: "ghost", onClick: handleSaveForwarderPort, children: "\u4FDD\u5B58" })
     ] }),
-    profilePortsStatus.state === "ok" ? /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("table", { style: { width: "100%", fontSize: 12, borderCollapse: "collapse" }, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("tr", { children: ["Profile", "dsh \u7AEF\u53E3\uFF08\u4E0A\u6E38\uFF09", "\u9875\u9762\u53E3\uFF08loopback\uFF09", "Lane \u7AEF\u53E3", "\u72B6\u6001", ""].map((h) => /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("th", { style: { textAlign: "left" }, children: h }, h)) }) }),
-      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("tbody", { children: profilePorts.map((r) => /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("tr", { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("td", { children: r.profile }),
-        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+    profilePortsStatus.state === "ok" ? /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("table", { style: { width: "100%", fontSize: 12, borderCollapse: "collapse" }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("tr", { children: ["Profile", "dsh \u7AEF\u53E3\uFF08\u4E0A\u6E38\uFF09", "\u9875\u9762\u53E3\uFF08loopback\uFF09", "Lane \u7AEF\u53E3", "\u72B6\u6001", ""].map((h) => /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("th", { style: { textAlign: "left" }, children: h }, h)) }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("tbody", { children: profilePorts.map((r) => /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("tr", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("td", { children: r.profile }),
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
           PortCell,
           {
             testId: `profile-port-${r.profile}`,
@@ -2338,7 +2796,7 @@ function ProfilePortsCard({ loaded }) {
             onSave: () => handleSaveProfilePort(r.profile)
           }
         ) }),
-        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
           PortCell,
           {
             testId: `profile-page-port-${r.profile}`,
@@ -2349,7 +2807,7 @@ function ProfilePortsCard({ loaded }) {
             onSave: () => handleSaveProfilePagePort(r.profile)
           }
         ) }),
-        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
           PortCell,
           {
             testId: `profile-lane-port-${r.profile}`,
@@ -2360,7 +2818,7 @@ function ProfilePortsCard({ loaded }) {
             onSave: () => handleSaveProfileLanePort(r.profile)
           }
         ) }),
-        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
           "td",
           {
             style: {
@@ -2369,30 +2827,30 @@ function ProfilePortsCard({ loaded }) {
             children: r.running ? "\u25CF \u8FD0\u884C\u4E2D" : "\u672A\u8FD0\u884C"
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("td", {})
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("td", {})
       ] }, r.profile)) })
-    ] }) : profilePortsStatus.state === "error" ? /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { style: DANGER_NOTE_STYLE, children: profilePortsStatus.text }) : /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { style: NOTE_STYLE, children: profilePortsStatus.text ?? "\u52A0\u8F7D\u4E2D\u2026" }),
-    profilePortBoxNote && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { style: NOTE_STYLE, children: profilePortBoxNote }),
-    /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { style: NOTE_STYLE, children: "\u4E0A\u6E38\uFF08dsh \u5B9E\u4F8B\uFF09\uFF1Aweb 3080 \xB7 desktop 3081 \xB7 \u5176\u4F59 3082 \u8D77\u6563\u5217\u907F\u8BA9\uFF1Blane\uFF08\u624B\u673A\u4EE3\u7406\uFF09\uFF1Aweb 3092 \xB7 desktop 3093 \xB7 \u5176\u4F59 3094 \u8D77\u6563\u5217\uFF1B\u9875\u9762\u53E3\uFF08loopback origin\uFF09\uFF1A6390 \u8D77 40 \u4E2A\u987A\u5EF6\u3002\u6539\u52A8\u540E\u91CD\u542F\u8BE5 profile \u751F\u6548\uFF1B \u8F93\u5165\u6846\u663E\u793A\u7684\u662F\u5DF2\u4FDD\u5B58\u7684\u671F\u671B\u503C\uFF0C\u7070\u5B57 placeholder \u662F\u5F53\u524D\u5B9E\u9645\u503C\u3002" }),
-    /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { style: DANGER_NOTE_STYLE, children: "\u26A0\uFE0F \u6539\u9875\u9762\u53E3\uFF1D\u6362\u6D4F\u89C8\u5668\u672C\u5730\u5B58\u50A8\uFF1AlocalStorage / IndexedDB / \u767B\u5F55\u6001\u7559\u5728\u65E7\u7AEF\u53E3\uFF0C\u4E0D\u4F1A\u8DDF\u968F\u5230\u65B0\u53E3\uFF1B\u8F6C\u53D1\u5668\u53E3\u6539\u52A8\u9700\u91CD\u542F\u58F3\u3002" })
+    ] }) : profilePortsStatus.state === "error" ? /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: DANGER_NOTE_STYLE, children: profilePortsStatus.text }) : /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: NOTE_STYLE, children: profilePortsStatus.text ?? "\u52A0\u8F7D\u4E2D\u2026" }),
+    profilePortBoxNote && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: NOTE_STYLE, children: profilePortBoxNote }),
+    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: NOTE_STYLE, children: "\u4E0A\u6E38\uFF08dsh \u5B9E\u4F8B\uFF09\uFF1Aweb 3080 \xB7 desktop 3081 \xB7 \u5176\u4F59 3082 \u8D77\u6563\u5217\u907F\u8BA9\uFF1Blane\uFF08\u624B\u673A\u4EE3\u7406\uFF09\uFF1Aweb 3092 \xB7 desktop 3093 \xB7 \u5176\u4F59 3094 \u8D77\u6563\u5217\uFF1B\u9875\u9762\u53E3\uFF08loopback origin\uFF09\uFF1A6390 \u8D77 40 \u4E2A\u987A\u5EF6\u3002\u6539\u52A8\u540E\u91CD\u542F\u8BE5 profile \u751F\u6548\uFF1B \u8F93\u5165\u6846\u663E\u793A\u7684\u662F\u5DF2\u4FDD\u5B58\u7684\u671F\u671B\u503C\uFF0C\u7070\u5B57 placeholder \u662F\u5F53\u524D\u5B9E\u9645\u503C\u3002" }),
+    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: DANGER_NOTE_STYLE, children: "\u26A0\uFE0F \u6539\u9875\u9762\u53E3\uFF1D\u6362\u6D4F\u89C8\u5668\u672C\u5730\u5B58\u50A8\uFF1AlocalStorage / IndexedDB / \u767B\u5F55\u6001\u7559\u5728\u65E7\u7AEF\u53E3\uFF0C\u4E0D\u4F1A\u8DDF\u968F\u5230\u65B0\u53E3\uFF1B\u8F6C\u53D1\u5668\u53E3\u6539\u52A8\u9700\u91CD\u542F\u58F3\u3002" })
   ] });
 }
 
 // src/client/desktop-settings/cards/proxy-card.tsx
-var import_react13 = require("react");
-var import_jsx_runtime14 = require("react/jsx-runtime");
+var import_react14 = require("react");
+var import_jsx_runtime15 = require("react/jsx-runtime");
 function ProxyCard({
   proxy,
   proxyEffective,
   loaded,
   notify
 }) {
-  const [draft, setDraft] = (0, import_react13.useState)(proxy);
-  const [busy, setBusy] = (0, import_react13.useState)(false);
-  const [testResult, setTestResult] = (0, import_react13.useState)(null);
-  const [testBusy, setTestBusy] = (0, import_react13.useState)(false);
-  const filledRef = (0, import_react13.useRef)(false);
-  (0, import_react13.useEffect)(() => {
+  const [draft, setDraft] = (0, import_react14.useState)(proxy);
+  const [busy, setBusy] = (0, import_react14.useState)(false);
+  const [testResult, setTestResult] = (0, import_react14.useState)(null);
+  const [testBusy, setTestBusy] = (0, import_react14.useState)(false);
+  const filledRef = (0, import_react14.useRef)(false);
+  (0, import_react14.useEffect)(() => {
     if (!loaded || filledRef.current) return;
     filledRef.current = true;
     setDraft(loaded.proxy);
@@ -2426,7 +2884,7 @@ function ProxyCard({
     setTestResult(null);
     void (async () => {
       try {
-        const ms = await invoke2("test_proxy_connectivity", { url: draft.proxy_url });
+        const ms = await invoke("test_proxy_connectivity", { url: draft.proxy_url });
         setTestResult(`\u8FDE\u63A5\u6210\u529F\uFF08${ms}ms\uFF09`);
       } catch (err) {
         setTestResult(`\u8FDE\u63A5\u5931\u8D25\uFF1A${String(err)}`);
@@ -2435,9 +2893,9 @@ function ProxyCard({
       }
     })();
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(SectionBox, { title: "\u4EE3\u7406\u8BBE\u7F6E", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: LABEL_STYLE, children: "\u4EE3\u7406\u6A21\u5F0F" }),
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+  return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(SectionBox, { title: "\u4EE3\u7406\u8BBE\u7F6E", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: LABEL_STYLE, children: "\u4EE3\u7406\u6A21\u5F0F" }),
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
       ThemeSelect,
       {
         style: { marginBottom: 10 },
@@ -2450,9 +2908,9 @@ function ProxyCard({
         ]
       }
     ),
-    draft.proxy_mode === "manual" && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(import_jsx_runtime14.Fragment, { children: [
-      /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: LABEL_STYLE, children: "\u4EE3\u7406 URL" }),
-      /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+    draft.proxy_mode === "manual" && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(import_jsx_runtime15.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: LABEL_STYLE, children: "\u4EE3\u7406 URL" }),
+      /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
         "input",
         {
           placeholder: "http/https/socks5://host:port",
@@ -2464,10 +2922,10 @@ function ProxyCard({
         }
       )
     ] }),
-    (draft.proxy_mode === "manual" || draft.proxy_mode === "system") && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(import_jsx_runtime14.Fragment, { children: [
-      draft.proxy_mode === "manual" && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(import_jsx_runtime14.Fragment, { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: LABEL_STYLE, children: "NO_PROXY\uFF08\u4E0D\u8D70\u4EE3\u7406\u7684\u5730\u5740\uFF0C\u9017\u53F7\u5206\u9694\uFF09" }),
-        /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+    (draft.proxy_mode === "manual" || draft.proxy_mode === "system") && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(import_jsx_runtime15.Fragment, { children: [
+      draft.proxy_mode === "manual" && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(import_jsx_runtime15.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: LABEL_STYLE, children: "NO_PROXY\uFF08\u4E0D\u8D70\u4EE3\u7406\u7684\u5730\u5740\uFF0C\u9017\u53F7\u5206\u9694\uFF09" }),
+        /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
           "input",
           {
             placeholder: "localhost,127.0.0.1,*.internal",
@@ -2479,10 +2937,10 @@ function ProxyCard({
           }
         )
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { style: { display: "flex", gap: 8, marginTop: 8 }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { style: FLEX_1_STYLE, children: [
-          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: LABEL_STYLE, children: "\u7528\u6237\u540D\uFF08\u53EF\u9009\uFF09" }),
-          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+      /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { style: { display: "flex", gap: 8, marginTop: 8 }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { style: FLEX_1_STYLE, children: [
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: LABEL_STYLE, children: "\u7528\u6237\u540D\uFF08\u53EF\u9009\uFF09" }),
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
             "input",
             {
               value: draft.proxy_user,
@@ -2493,9 +2951,9 @@ function ProxyCard({
             }
           )
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { style: FLEX_1_STYLE, children: [
-          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: LABEL_STYLE, children: "\u5BC6\u7801\uFF08\u53EF\u9009\uFF09" }),
-          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { style: FLEX_1_STYLE, children: [
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: LABEL_STYLE, children: "\u5BC6\u7801\uFF08\u53EF\u9009\uFF09" }),
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
             "input",
             {
               type: "password",
@@ -2509,23 +2967,23 @@ function ProxyCard({
         ] })
       ] })
     ] }),
-    proxyEffective && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { style: NOTE_STYLE, children: [
+    proxyEffective && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { style: NOTE_STYLE, children: [
       "\u5F53\u524D\u751F\u6548\uFF1A",
       JSON.stringify(proxyEffective)
     ] }),
-    draft.proxy_mode === "system" && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: NOTE_STYLE, children: "\u7CFB\u7EDF\u4EE3\u7406\u6A21\u5F0F\u4E0B\uFF0C\u4EE3\u7406\u5730\u5740\u4E0E NO_PROXY \u6765\u81EA\u7CFB\u7EDF\u8BBE\u7F6E\uFF08\u5982 Windows \u6CE8\u518C\u8868 ProxyOverride\uFF09\uFF1B\u7528\u6237\u540D/\u5BC6\u7801\u4ECD\u53D6\u81EA\u8BBE\u7F6E\u5E76\u62FC\u5165\u4EE3\u7406\u5730\u5740\u3002" }),
-    draft.proxy_mode === "manual" && draft.proxy_url && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(import_jsx_runtime14.Fragment, { children: [
-      /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: { marginTop: 8 }, children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(PfBtn, { variant: "ghost", onClick: handleTestProxy, children: testBusy ? "\u6D4B\u8BD5\u4E2D\u2026" : "\u6D4B\u8BD5\u8FDE\u63A5" }) }),
-      testResult && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: NOTE_STYLE, children: testResult })
+    draft.proxy_mode === "system" && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: NOTE_STYLE, children: "\u7CFB\u7EDF\u4EE3\u7406\u6A21\u5F0F\u4E0B\uFF0C\u4EE3\u7406\u5730\u5740\u4E0E NO_PROXY \u6765\u81EA\u7CFB\u7EDF\u8BBE\u7F6E\uFF08\u5982 Windows \u6CE8\u518C\u8868 ProxyOverride\uFF09\uFF1B\u7528\u6237\u540D/\u5BC6\u7801\u4ECD\u53D6\u81EA\u8BBE\u7F6E\u5E76\u62FC\u5165\u4EE3\u7406\u5730\u5740\u3002" }),
+    draft.proxy_mode === "manual" && draft.proxy_url && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(import_jsx_runtime15.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: { marginTop: 8 }, children: /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(PfBtn, { variant: "ghost", onClick: handleTestProxy, children: testBusy ? "\u6D4B\u8BD5\u4E2D\u2026" : "\u6D4B\u8BD5\u8FDE\u63A5" }) }),
+      testResult && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: NOTE_STYLE, children: testResult })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { style: { marginTop: 10 }, children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(PfBtn, { variant: "primary", disabled: busy, onClick: handleSaveProxy, children: busy ? "\u4FDD\u5B58\u4E2D\u2026" : "\u4FDD\u5B58\u4EE3\u7406\u8BBE\u7F6E" }) })
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: { marginTop: 10 }, children: /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(PfBtn, { variant: "primary", disabled: busy, onClick: handleSaveProxy, children: busy ? "\u4FDD\u5B58\u4E2D\u2026" : "\u4FDD\u5B58\u4EE3\u7406\u8BBE\u7F6E" }) })
   ] });
 }
 
 // src/client/desktop-settings/cards/runtime-card.tsx
-var import_react14 = require("react");
+var import_react15 = require("react");
 
-// src/client/runtime-download-ui.ts
+// src/client/features/runtime-download-ui.ts
 var IDLE = { progress: null, entry: null, toast: null };
 function stripDownloadErrorPrefix(text) {
   return text.replace(/^下载失败[:：]\s*/, "").trim();
@@ -2596,19 +3054,19 @@ function runtimeDownloadHint(entry) {
 }
 
 // src/client/desktop-settings/cards/runtime-card.tsx
-var import_jsx_runtime15 = require("react/jsx-runtime");
+var import_jsx_runtime16 = require("react/jsx-runtime");
 function RuntimeCard({ notify }) {
-  const [runtimeSource, setRuntimeSource] = (0, import_react14.useState)("github");
-  const [runtimeStatus, setRuntimeStatus] = (0, import_react14.useState)({ state: "loading", text: "\u8BFB\u53D6\u4E2D\u2026" });
-  const [runtimeCatalog, setRuntimeCatalog] = (0, import_react14.useState)(null);
-  const [runtimeDownloading, setRuntimeDownloading] = (0, import_react14.useState)({});
-  const [dlProgress, setDlProgress] = (0, import_react14.useState)(null);
-  const [runtimeExpanded, setRuntimeExpanded] = (0, import_react14.useState)(false);
-  const [removingVersion, setRemovingVersion] = (0, import_react14.useState)(null);
-  const refreshRuntimes = (0, import_react14.useCallback)(async () => {
+  const [runtimeSource, setRuntimeSource] = (0, import_react15.useState)("github");
+  const [runtimeStatus, setRuntimeStatus] = (0, import_react15.useState)({ state: "loading", text: "\u8BFB\u53D6\u4E2D\u2026" });
+  const [runtimeCatalog, setRuntimeCatalog] = (0, import_react15.useState)(null);
+  const [runtimeDownloading, setRuntimeDownloading] = (0, import_react15.useState)({});
+  const [dlProgress, setDlProgress] = (0, import_react15.useState)(null);
+  const [runtimeExpanded, setRuntimeExpanded] = (0, import_react15.useState)(false);
+  const [removingVersion, setRemovingVersion] = (0, import_react15.useState)(null);
+  const refreshRuntimes = (0, import_react15.useCallback)(async () => {
     setRuntimeStatus({ state: "loading", text: "\u8BFB\u53D6\u7248\u672C\u76EE\u5F55\u4E2D\u2026" });
     try {
-      const s = await invoke2("list_runtime_catalog", { source: runtimeSource });
+      const s = await invoke("list_runtime_catalog", { source: runtimeSource });
       setRuntimeCatalog(s);
       setRuntimeStatus(
         s.error ? { state: "error", text: `\u76EE\u5F55\u62C9\u53D6\u5931\u8D25\uFF1A${s.error}\uFF08\u4EC5\u663E\u793A\u5DF2\u4E0B\u8F7D\u7248\u672C\uFF09` } : { state: "ok" }
@@ -2618,20 +3076,20 @@ function RuntimeCard({ notify }) {
       setRuntimeStatus({ state: "error", text: `\u7248\u672C\u76EE\u5F55\u8BFB\u53D6\u5931\u8D25\uFF1A${String(err)}` });
     }
   }, [runtimeSource]);
-  (0, import_react14.useEffect)(() => {
-    void invoke2("runtime_download_status").then((s) => {
+  (0, import_react15.useEffect)(() => {
+    void invoke("runtime_download_status").then((s) => {
       if (s.active && s.version) {
         setRuntimeDownloading((prev) => ({ ...prev, [s.version]: "downloading" }));
       }
     }).catch(() => {
     });
   }, []);
-  (0, import_react14.useEffect)(() => {
+  (0, import_react15.useEffect)(() => {
     void refreshRuntimes();
   }, [refreshRuntimes]);
   const handleDownloadRuntime = (version) => {
     setRuntimeDownloading((prev) => ({ ...prev, [version]: "downloading" }));
-    void invoke2("download_runtime", { source: runtimeSource, version }, { noTimeout: true }).then(() => {
+    void invoke("download_runtime", { source: runtimeSource, version }, { noTimeout: true }).then(() => {
       void refreshRuntimes();
     }).catch((err) => {
       const text = String(err);
@@ -2649,14 +3107,14 @@ function RuntimeCard({ notify }) {
     });
   };
   const handleCancelRuntimeDownload = (version) => {
-    void invoke2("cancel_runtime_download", {}, { noTimeout: true }).then((r) => {
+    void invoke("cancel_runtime_download", {}, { noTimeout: true }).then((r) => {
       if (r.cancelled) showToast(`\u6B63\u5728\u53D6\u6D88 dsh ${version} \u4E0B\u8F7D\u2026`, true, "info");
     }).catch((err) => showToast(`\u53D6\u6D88\u5931\u8D25\uFF1A${String(err)}`, false));
   };
-  (0, import_react14.useEffect)(() => {
+  (0, import_react15.useEffect)(() => {
     let sawActive = false;
     const timer = setInterval(() => {
-      void invoke2("runtime_download_status").then((s) => {
+      void invoke("runtime_download_status").then((s) => {
         const decision = decideRuntimeDownload(s, sawActive);
         if (s.active) sawActive = true;
         else if (sawActive) sawActive = false;
@@ -2692,7 +3150,7 @@ function RuntimeCard({ notify }) {
     return () => clearInterval(timer);
   }, [refreshRuntimes]);
   const handleSwitchRuntime = (version) => {
-    void nsSave({ dsh_runtime: version, dsh_mode: "builtin" }).then(() => invoke2("restart_dsh_service")).then(() => {
+    void nsSave({ dsh_runtime: version, dsh_mode: "builtin" }).then(() => invoke("restart_dsh_service")).then(() => {
       notify({ ok: true, text: `\u5DF2\u5207\u6362\u5230 dsh ${version}\uFF0C\u6B63\u5728\u91CD\u542F\u2026` });
       void refreshRuntimes();
     }).catch((err) => notify({ ok: false, text: `\u5207\u6362\u5931\u8D25\uFF1A${String(err)}` }));
@@ -2701,13 +3159,13 @@ function RuntimeCard({ notify }) {
     if (removingVersion) return;
     if (!window.confirm(`\u5378\u8F7D\u8FD0\u884C\u65F6 dsh ${version}\uFF1F\u5C06\u5220\u9664\u672C\u5730\u5DF2\u4E0B\u8F7D\u6587\u4EF6\uFF0C\u4E0D\u53EF\u6062\u590D\u3002`)) return;
     setRemovingVersion(version);
-    invoke2("remove_runtime", { version }).then(() => {
+    invoke("remove_runtime", { version }).then(() => {
       notify({ ok: true, text: `\u5DF2\u5378\u8F7D\u8FD0\u884C\u65F6 dsh ${version}` });
       void refreshRuntimes();
     }).catch((err) => notify({ ok: false, text: `\u5378\u8F7D\u5931\u8D25\uFF1A${String(err)}` })).finally(() => setRemovingVersion(null));
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(SectionBox, { title: "dsh \u8FD0\u884C\u65F6\uFF08\u7248\u672C\u4E0B\u8F7D / \u5207\u6362\uFF09", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+  return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)(SectionBox, { title: "dsh \u8FD0\u884C\u65F6\uFF08\u7248\u672C\u4E0B\u8F7D / \u5207\u6362\uFF09", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
       ThemeSelect,
       {
         style: { marginBottom: 8 },
@@ -2719,36 +3177,32 @@ function RuntimeCard({ notify }) {
         ]
       }
     ),
-    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(PfBtn, { variant: "ghost", onClick: () => void refreshRuntimes(), children: "\u5237\u65B0\u7248\u672C\u76EE\u5F55" }),
-    /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { style: { marginTop: 8 }, children: [
-      runtimeStatus.state === "error" && runtimeStatus.text && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: DANGER_NOTE_STYLE, children: runtimeStatus.text }),
-      runtimeCatalog && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(import_jsx_runtime15.Fragment, { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: { marginBottom: 6 }, children: currentRuntimeLine({
+    /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(PfBtn, { variant: "ghost", onClick: () => void refreshRuntimes(), children: "\u5237\u65B0\u7248\u672C\u76EE\u5F55" }),
+    /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { style: { marginTop: 8 }, children: [
+      runtimeStatus.state === "error" && runtimeStatus.text && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { style: DANGER_NOTE_STYLE, children: runtimeStatus.text }),
+      runtimeCatalog && /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)(import_jsx_runtime16.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { style: { marginBottom: 6 }, children: currentRuntimeLine({
           selected: runtimeCatalog.selected,
           builtin: runtimeCatalog.builtin,
           running: runtimeCatalog.running
         }) }),
-        runtimeCatalog.note && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: { ...DANGER_NOTE_STYLE, marginBottom: 6, whiteSpace: "pre-wrap" }, children: `\u26A0 ${runtimeCatalog.note}` }),
+        runtimeCatalog.note && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { style: { ...DANGER_NOTE_STYLE, marginBottom: 6, whiteSpace: "pre-wrap" }, children: `\u26A0 ${runtimeCatalog.note}` }),
         (() => {
+          const all = runtimeCatalog.candidates;
           const seen = /* @__PURE__ */ new Set();
+          const remoteRows = all.filter((c) => c.source === "remote");
           const heads = [];
           for (const ch of ["latest", "alpha", "rc"]) {
-            const e = runtimeCatalog.catalog.find((c) => c.channel === ch);
+            const e = remoteRows.find((c) => c.channel === ch);
             if (e && !seen.has(e.version)) {
               seen.add(e.version);
               heads.push(e);
             }
           }
-          const installedPinned = runtimeCatalog.catalog.filter(
-            (c) => !seen.has(c.version) && runtimeCatalog.installed.some((i) => i.version === c.version)
-          );
-          const rest = runtimeCatalog.catalog.filter((c) => !seen.has(c.version));
-          const installedOnly = runtimeCatalog.installed.filter((i) => !runtimeCatalog.catalog.some((c) => c.version === i.version)).map((i) => ({ version: i.version, channel: "" }));
-          if (runtimeCatalog.builtin && !runtimeCatalog.catalog.some((c) => c.version === runtimeCatalog.builtin) && !installedOnly.some((i) => i.version === runtimeCatalog.builtin)) {
-            installedOnly.unshift({ version: runtimeCatalog.builtin, channel: "" });
-          }
-          const visible = runtimeExpanded ? [...runtimeCatalog.catalog, ...installedOnly] : [...heads, ...installedPinned, ...installedOnly.filter((i) => !seen.has(i.version))];
-          return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(import_jsx_runtime15.Fragment, { children: [
+          const localRows = all.filter((c) => c.local && !seen.has(c.version));
+          const rest = all.filter((c) => !seen.has(c.version) && !c.local);
+          const visible = runtimeExpanded ? all : [...heads, ...localRows];
+          return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)(import_jsx_runtime16.Fragment, { children: [
             visible.map((c) => {
               const installed = runtimeCatalog.installed.some((i) => i.version === c.version);
               const isBuiltin = runtimeCatalog.builtin === c.version;
@@ -2770,8 +3224,8 @@ function RuntimeCard({ notify }) {
               const downloadState = runtimeDownloading[c.version];
               const failedReason = runtimeDownloadHint(downloadState);
               const pct = dlProgress && dlProgress.version === c.version && dlProgress.resolved > 0 ? Math.min(100, Math.round(dlProgress.downloaded / dlProgress.resolved * 100)) : 0;
-              return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { style: { margin: "4px 0" }, children: [
-                /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(
+              return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { style: { margin: "4px 0" }, children: [
+                /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)(
                   "div",
                   {
                     style: {
@@ -2780,9 +3234,9 @@ function RuntimeCard({ notify }) {
                       alignItems: "center"
                     },
                     children: [
-                      /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { children: `${c.version}${tags.length ? "\uFF08" + tags.join(" \xB7 ") + "\uFF09" : ""}` }),
-                      !available ? /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { style: { display: "flex", gap: 6, alignItems: "center" }, children: [
-                        /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+                      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: `${c.version}${tags.length ? "\uFF08" + tags.join(" \xB7 ") + "\uFF09" : ""}` }),
+                      !available ? /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { style: { display: "flex", gap: 6, alignItems: "center" }, children: [
+                        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
                           PfBtn,
                           {
                             variant: "ghost",
@@ -2791,9 +3245,9 @@ function RuntimeCard({ notify }) {
                             children: runtimeDownloadButtonLabel(downloadState)
                           }
                         ),
-                        downloadState === "downloading" && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(PfBtn, { variant: "ghost", onClick: () => handleCancelRuntimeDownload(c.version), children: "\u53D6\u6D88" })
-                      ] }) : /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { style: { display: "flex", gap: 6, alignItems: "center" }, children: [
-                        /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+                        downloadState === "downloading" && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(PfBtn, { variant: "ghost", onClick: () => handleCancelRuntimeDownload(c.version), children: "\u53D6\u6D88" })
+                      ] }) : /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { style: { display: "flex", gap: 6, alignItems: "center" }, children: [
+                        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
                           PfBtn,
                           {
                             variant: "ghost",
@@ -2802,7 +3256,7 @@ function RuntimeCard({ notify }) {
                             children: isCurrent ? "\u4F7F\u7528\u4E2D" : "\u5207\u6362\u5230\u6B64\u7248\u672C"
                           }
                         ),
-                        !isBuiltin && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+                        !isBuiltin && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
                           PfBtn,
                           {
                             variant: "danger",
@@ -2816,8 +3270,8 @@ function RuntimeCard({ notify }) {
                     ]
                   }
                 ),
-                downloadState === "downloading" && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { style: { marginTop: 4 }, children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+                downloadState === "downloading" && /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { style: { marginTop: 4 }, children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
                     "div",
                     {
                       style: {
@@ -2826,7 +3280,7 @@ function RuntimeCard({ notify }) {
                         background: "var(--dsw-alias-bg-base,#111)",
                         overflow: "hidden"
                       },
-                      children: /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+                      children: /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
                         "div",
                         {
                           style: {
@@ -2839,9 +3293,9 @@ function RuntimeCard({ notify }) {
                       )
                     }
                   ),
-                  /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { style: NOTE_STYLE, children: dlProgress && dlProgress.version === c.version ? `\u5B89\u88C5\u4F9D\u8D56\uFF1A\u5DF2\u4E0B\u8F7D ${dlProgress.downloaded} / ${dlProgress.resolved || "\u2026"} \u4E2A\u5305${dlProgress.resolved > 0 ? `\uFF08${pct}%\uFF09` : ""}` : "\u51C6\u5907\u4E2D\u2026" })
+                  /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { style: NOTE_STYLE, children: dlProgress && dlProgress.version === c.version ? `\u5B89\u88C5\u4F9D\u8D56\uFF1A\u5DF2\u4E0B\u8F7D ${dlProgress.downloaded} / ${dlProgress.resolved || "\u2026"} \u4E2A\u5305${dlProgress.resolved > 0 ? `\uFF08${pct}%\uFF09` : ""}` : "\u51C6\u5907\u4E2D\u2026" })
                 ] }),
-                failedReason && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+                failedReason && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
                   "div",
                   {
                     style: {
@@ -2855,12 +3309,12 @@ function RuntimeCard({ notify }) {
                 )
               ] }, c.version);
             }),
-            rest.length > 0 && !runtimeExpanded && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(PfBtn, { variant: "ghost", style: { marginTop: 4 }, onClick: () => setRuntimeExpanded(true), children: [
+            rest.length > 0 && !runtimeExpanded && /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)(PfBtn, { variant: "ghost", style: { marginTop: 4 }, onClick: () => setRuntimeExpanded(true), children: [
               "\u5C55\u5F00\u5168\u90E8 ",
-              runtimeCatalog.catalog.length,
+              all.length,
               " \u4E2A\u7248\u672C \u25BE"
             ] }),
-            runtimeExpanded && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(PfBtn, { variant: "ghost", style: { marginTop: 4 }, onClick: () => setRuntimeExpanded(false), children: "\u6536\u8D77\u7248\u672C\u5217\u8868 \u25B4" })
+            runtimeExpanded && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(PfBtn, { variant: "ghost", style: { marginTop: 4 }, onClick: () => setRuntimeExpanded(false), children: "\u6536\u8D77\u7248\u672C\u5217\u8868 \u25B4" })
           ] });
         })()
       ] })
@@ -2869,7 +3323,7 @@ function RuntimeCard({ notify }) {
 }
 
 // src/client/desktop-settings/cards/service-address-card.tsx
-var import_react15 = require("react");
+var import_react16 = require("react");
 
 // src/client/desktop-settings/format.ts
 function fmtBytes2(bytes) {
@@ -2893,18 +3347,18 @@ function normalizeRemote(input) {
 }
 
 // src/client/desktop-settings/cards/service-address-card.tsx
-var import_jsx_runtime16 = require("react/jsx-runtime");
+var import_jsx_runtime17 = require("react/jsx-runtime");
 function ServiceAddressCard({
   desktop,
   refreshData,
   notify
 }) {
-  const [newRemoteUrl, setNewRemoteUrl] = (0, import_react15.useState)("");
+  const [newRemoteUrl, setNewRemoteUrl] = (0, import_react16.useState)("");
   const handleSelectRemote = (addr) => {
     void (async () => {
       try {
         await nsSave({ remote_addr: addr });
-        await invoke2("restart_dsh_service");
+        await invoke("restart_dsh_service");
         notify({ ok: true, text: "\u5DF2\u5207\u6362 dsh \u670D\u52A1\u6765\u6E90\uFF0C\u6B63\u5728\u91CD\u542F\u2026" });
       } catch (err) {
         notify({ ok: false, text: `\u5207\u6362\u5931\u8D25\uFF1A${String(err)}` });
@@ -2944,8 +3398,8 @@ function ServiceAddressCard({
       await refreshData();
     })();
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)(SectionBox, { title: "dsh \u670D\u52A1\u5730\u5740", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(SectionBox, { title: "dsh \u670D\u52A1\u5730\u5740", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
       ThemeSelect,
       {
         style: { marginBottom: 8 },
@@ -2957,8 +3411,8 @@ function ServiceAddressCard({
         ]
       }
     ),
-    /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { style: ROW_STYLE, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { style: ROW_STYLE, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
         "input",
         {
           placeholder: "\u65B0\u589E\uFF1Adsh web \u6253\u5370\u7684\u5B8C\u6574 URL\uFF08\u542B token\uFF09\u6216 host[:port]",
@@ -2969,9 +3423,9 @@ function ServiceAddressCard({
           onChange: (e) => setNewRemoteUrl(e.target.value.trim())
         }
       ),
-      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(PfBtn, { variant: "ghost", onClick: handleAddRemote, children: "\u65B0\u589E" })
+      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(PfBtn, { variant: "ghost", onClick: handleAddRemote, children: "\u65B0\u589E" })
     ] }),
-    desktop.remote_list.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }, children: desktop.remote_list.map((addr) => /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)(
+    desktop.remote_list.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }, children: desktop.remote_list.map((addr) => /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(
       PfBtn,
       {
         variant: "danger",
@@ -2984,27 +3438,27 @@ function ServiceAddressCard({
       },
       addr
     )) }),
-    /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { style: NOTE_STYLE, children: "\u9009\u62E9\u8FDC\u7A0B\u5730\u5740\u540E\u7ACB\u5373\u6309\u5F53\u524D\u6A21\u5F0F\u91CD\u542F dsh\uFF1B\u65B0\u589E/\u5220\u9664\u4EC5\u6539\u5217\u8868\uFF0C\u91CD\u542F\u540E\u751F\u6548\u3002" }),
-    /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { style: NOTE_STYLE, children: "\u6B64\u5904\u7684\u5730\u5740\u662F\u684C\u9762\u58F3\u8FDE\u63A5\u7684 dsh \u670D\u52A1\u6765\u6E90\uFF08\u58F3\u5C06\u76F4\u8FDE\u8BE5\u5730\u5740\uFF0C\u4E0D\u518D\u62C9\u8D77\u672C\u5730\u670D\u52A1\uFF09\uFF1B\u82E5\u8981\u7ED9\u624B\u673A/\u5176\u5B83\u8BBE\u5907\u8FDE\u63A5\u672C\u673A\uFF0C\u8BF7\u7528\u300C\u624B\u673A\u8BBF\u95EE \u2192 \u8FDC\u7A0B\u8BBF\u95EE\u300D\u3002" })
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { style: NOTE_STYLE, children: "\u9009\u62E9\u8FDC\u7A0B\u5730\u5740\u540E\u7ACB\u5373\u6309\u5F53\u524D\u6A21\u5F0F\u91CD\u542F dsh\uFF1B\u65B0\u589E/\u5220\u9664\u4EC5\u6539\u5217\u8868\uFF0C\u91CD\u542F\u540E\u751F\u6548\u3002" }),
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { style: NOTE_STYLE, children: "\u6B64\u5904\u7684\u5730\u5740\u662F\u684C\u9762\u58F3\u8FDE\u63A5\u7684 dsh \u670D\u52A1\u6765\u6E90\uFF08\u58F3\u5C06\u76F4\u8FDE\u8BE5\u5730\u5740\uFF0C\u4E0D\u518D\u62C9\u8D77\u672C\u5730\u670D\u52A1\uFF09\uFF1B\u82E5\u8981\u7ED9\u624B\u673A/\u5176\u5B83\u8BBE\u5907\u8FDE\u63A5\u672C\u673A\uFF0C\u8BF7\u7528\u300C\u624B\u673A\u8BBF\u95EE \u2192 \u8FDC\u7A0B\u8BBF\u95EE\u300D\u3002" })
   ] });
 }
 
 // src/client/desktop-settings/cards/source-card.tsx
-var import_react16 = require("react");
-var import_jsx_runtime17 = require("react/jsx-runtime");
+var import_react17 = require("react");
+var import_jsx_runtime18 = require("react/jsx-runtime");
 function SourceCard() {
-  const [sourceState, setSourceState] = (0, import_react16.useState)(null);
-  const [sourceError, setSourceError] = (0, import_react16.useState)(null);
-  const refreshSource = (0, import_react16.useCallback)(async () => {
+  const [sourceState, setSourceState] = (0, import_react17.useState)(null);
+  const [sourceError, setSourceError] = (0, import_react17.useState)(null);
+  const refreshSource = (0, import_react17.useCallback)(async () => {
     setSourceError(null);
     try {
-      const s = await invoke2("get_dsh_source");
+      const s = await invoke("get_dsh_source");
       setSourceState(s);
     } catch (err) {
       setSourceError(String(err));
     }
   }, []);
-  (0, import_react16.useEffect)(() => {
+  (0, import_react17.useEffect)(() => {
     void refreshSource();
   }, [refreshSource]);
   const sourceInfoText = (() => {
@@ -3020,20 +3474,20 @@ function SourceCard() {
     if (sourceState.builtin) parts.push(`\u5185\u7F6E\u53EF\u7528\uFF1Adsh ${sourceState.builtin.dsh_version}`);
     return parts.join(" \xB7 ");
   })();
-  return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(SectionBox, { title: "dsh \u6765\u6E90", children: [
-    sourceState ? /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { style: NOTE_STYLE, children: sourceInfoText }) : sourceError ? /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { style: DANGER_NOTE_STYLE, children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(SectionBox, { title: "dsh \u6765\u6E90", children: [
+    sourceState ? /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: sourceInfoText }) : sourceError ? /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { style: DANGER_NOTE_STYLE, children: [
       "\u68C0\u6D4B\u5931\u8D25\uFF1A",
       sourceError
-    ] }) : /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { style: NOTE_STYLE, children: "\u68C0\u6D4B\u4E2D\u2026" }),
-    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { style: { marginTop: 8 }, children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(PfBtn, { variant: "ghost", onClick: () => void refreshSource(), children: "\u91CD\u65B0\u68C0\u6D4B" }) }),
-    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { style: NOTE_STYLE, children: "\u5185\u7F6E\uFF1A\u968F\u5E94\u7528\u5206\u53D1\u7684 dsh \u4F9D\u8D56\u6811 + Node\uFF0C\u76F4\u8C03\u5185\u90E8\u542F\u52A8\u63A5\u53E3\uFF08\u4E0D\u4F9D\u8D56\u7CFB\u7EDF\u73AF\u5883\uFF09\u3002" })
+    ] }) : /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: "\u68C0\u6D4B\u4E2D\u2026" }),
+    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: { marginTop: 8 }, children: /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(PfBtn, { variant: "ghost", onClick: () => void refreshSource(), children: "\u91CD\u65B0\u68C0\u6D4B" }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: "\u5185\u7F6E\uFF1A\u968F\u5E94\u7528\u5206\u53D1\u7684 dsh \u4F9D\u8D56\u6811 + Node\uFF0C\u76F4\u8C03\u5185\u90E8\u542F\u52A8\u63A5\u53E3\uFF08\u4E0D\u4F9D\u8D56\u7CFB\u7EDF\u73AF\u5883\uFF09\u3002" })
   ] });
 }
 
 // src/client/desktop-settings/cards/update-card.tsx
-var import_react17 = require("react");
+var import_react18 = require("react");
 
-// src/client/update-notice-settings.ts
+// src/client/features/update-notice-settings.ts
 var KIND_LABELS = {
   shell: "\u684C\u9762\u58F3",
   runtime: "DSH \u8FD0\u884C\u65F6"
@@ -3074,19 +3528,19 @@ function ignoredEmptyHint() {
 }
 
 // src/client/desktop-settings/cards/update-card.tsx
-var import_jsx_runtime18 = require("react/jsx-runtime");
+var import_jsx_runtime19 = require("react/jsx-runtime");
 function UpdateCard() {
-  const [updateState, setUpdateState] = (0, import_react17.useState)(null);
+  const [updateState, setUpdateState] = (0, import_react18.useState)(null);
   const updateBusy = updateState !== null && (updateState.view.phase === "checking" || updateState.view.phase === "downloading" || updateState.view.phase === "preparing");
   const runUpdate = (cmd) => {
-    void invoke2(cmd).then((snapshot) => {
+    void invoke(cmd).then((snapshot) => {
       setUpdateState(snapshot);
       showToast(snapshot.view.label, snapshot.view.phase !== "error");
     }).catch((e) => showToast(`\u66F4\u65B0\u5931\u8D25\uFF1A${String(e)}`, false));
   };
-  (0, import_react17.useEffect)(() => {
+  (0, import_react18.useEffect)(() => {
     let cancelled = false;
-    void invoke2("get_update_state").then((snapshot) => {
+    void invoke("get_update_state").then((snapshot) => {
       if (!cancelled) setUpdateState(snapshot);
     }).catch(() => {
     });
@@ -3094,23 +3548,23 @@ function UpdateCard() {
       cancelled = true;
     };
   }, []);
-  (0, import_react17.useEffect)(() => {
+  (0, import_react18.useEffect)(() => {
     if (!updateBusy) return;
     const timer = setInterval(() => {
-      void invoke2("get_update_state").then(setUpdateState).catch(() => {
+      void invoke("get_update_state").then(setUpdateState).catch(() => {
       });
     }, 1e3);
     return () => clearInterval(timer);
   }, [updateBusy]);
-  const [updateNotice, setUpdateNotice] = (0, import_react17.useState)(null);
-  const [updateNoticeError, setUpdateNoticeError] = (0, import_react17.useState)(null);
+  const [updateNotice, setUpdateNotice] = (0, import_react18.useState)(null);
+  const [updateNoticeError, setUpdateNoticeError] = (0, import_react18.useState)(null);
   const refreshUpdateNotice = () => {
-    void invoke2("get_update_notice_state").then((raw) => {
+    void invoke("get_update_notice_state").then((raw) => {
       setUpdateNotice(parseUpdateNoticeState(raw));
       setUpdateNoticeError(null);
     }).catch((e) => setUpdateNoticeError(String(e)));
   };
-  (0, import_react17.useEffect)(() => {
+  (0, import_react18.useEffect)(() => {
     refreshUpdateNotice();
   }, []);
   const afterUpdateNoticeWrite = (raw) => {
@@ -3120,34 +3574,34 @@ function UpdateCard() {
   const failUpdateNoticeWrite = (e) => setUpdateNoticeError(String(e));
   const handleToggleUpdateNotice = (enabled) => {
     setUpdateNotice((prev) => prev === null ? prev : { ...prev, enabled });
-    void invoke2("set_update_notice_enabled", { enabled }).then(afterUpdateNoticeWrite).catch((e) => {
+    void invoke("set_update_notice_enabled", { enabled }).then(afterUpdateNoticeWrite).catch((e) => {
       failUpdateNoticeWrite(e);
       refreshUpdateNotice();
     });
   };
   const handleRestoreIgnored = (row) => {
     if (row.kind === null) return;
-    void invoke2("restore_update_notice", {
+    void invoke("restore_update_notice", {
       targets: [{ kind: row.kind, version: row.version }]
     }).then(afterUpdateNoticeWrite).catch(failUpdateNoticeWrite);
   };
   const handleClearIgnored = () => {
-    void invoke2("clear_update_notice_ignored").then(afterUpdateNoticeWrite).catch(failUpdateNoticeWrite);
+    void invoke("clear_update_notice_ignored").then(afterUpdateNoticeWrite).catch(failUpdateNoticeWrite);
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(SectionBox, { title: "\u5E94\u7528\u66F4\u65B0", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: updateState === null ? "\u8BFB\u53D6\u4E2D\u2026" : `\u5F53\u524D\u7248\u672C ${updateState.view.current || "\u672A\u77E5"}${updateState.view.channel ? `\uFF08${updateState.view.channel}\uFF09` : ""} \xB7 ${updateState.view.label}` }),
-    updateState !== null && updateState.view.message !== "" && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: updateState.view.message }),
-    updateState !== null && updateState.actions.hint !== "" && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: updateState.actions.hint }),
-    updateState !== null && !updateState.available && updateState.reason !== "" && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: updateState.reason }),
-    updateState !== null && updateState.view.error !== "" && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: DANGER_NOTE_STYLE, children: updateState.view.error }),
-    updateBusy && updateState !== null && updateState.view.progress !== null && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { style: NOTE_STYLE, children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)(SectionBox, { title: "\u5E94\u7528\u66F4\u65B0", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: NOTE_STYLE, children: updateState === null ? "\u8BFB\u53D6\u4E2D\u2026" : `\u5F53\u524D\u7248\u672C ${updateState.view.current || "\u672A\u77E5"}${updateState.view.channel ? `\uFF08${updateState.view.channel}\uFF09` : ""} \xB7 ${updateState.view.label}` }),
+    updateState !== null && updateState.view.message !== "" && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: NOTE_STYLE, children: updateState.view.message }),
+    updateState !== null && updateState.actions.hint !== "" && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: NOTE_STYLE, children: updateState.actions.hint }),
+    updateState !== null && !updateState.available && updateState.reason !== "" && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: NOTE_STYLE, children: updateState.reason }),
+    updateState !== null && updateState.view.error !== "" && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: DANGER_NOTE_STYLE, children: updateState.view.error }),
+    updateBusy && updateState !== null && updateState.view.progress !== null && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { style: NOTE_STYLE, children: [
       "\u8FDB\u5EA6 ",
       updateState.view.progress,
       "%",
       updateState.view.totalBytes !== null ? `\uFF08${fmtBytes2(updateState.view.bytesDownloaded)} / ${fmtBytes2(updateState.view.totalBytes)}\uFF09` : ""
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { style: { display: "flex", gap: 8, marginTop: 8 }, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { style: { display: "flex", gap: 8, marginTop: 8 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
         PfBtn,
         {
           variant: "ghost",
@@ -3156,7 +3610,7 @@ function UpdateCard() {
           children: "\u68C0\u67E5\u66F4\u65B0"
         }
       ),
-      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
+      /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
         PfBtn,
         {
           variant: "ghost",
@@ -3165,7 +3619,7 @@ function UpdateCard() {
           children: "\u4E0B\u8F7D\u66F4\u65B0"
         }
       ),
-      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
+      /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
         PfBtn,
         {
           variant: "ghost",
@@ -3175,8 +3629,8 @@ function UpdateCard() {
         }
       )
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: { ...ROW_STYLE, marginTop: 16 }, children: /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: { ...ROW_STYLE, marginTop: 16 }, children: /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("label", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
         "input",
         {
           type: "checkbox",
@@ -3188,17 +3642,17 @@ function UpdateCard() {
       ),
       "\u542F\u52A8\u65F6\u6709\u65B0\u7248\u672C\u5C31\u63D0\u9192\uFF08\u7F3A\u7701\u5F00\uFF09"
     ] }) }),
-    updateNoticeError !== null && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: DANGER_NOTE_STYLE, children: updateNoticeError }),
-    updateNotice !== null && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: updateNoticeEnabledHint(updateNotice.enabled) }),
-    updateNotice !== null && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { style: { marginTop: 8 }, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: { fontWeight: 600, marginBottom: 4 }, children: "\u5DF2\u5FFD\u7565\u7684\u7248\u672C" }),
+    updateNoticeError !== null && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: DANGER_NOTE_STYLE, children: updateNoticeError }),
+    updateNotice !== null && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: NOTE_STYLE, children: updateNoticeEnabledHint(updateNotice.enabled) }),
+    updateNotice !== null && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { style: { marginTop: 8 }, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: { fontWeight: 600, marginBottom: 4 }, children: "\u5DF2\u5FFD\u7565\u7684\u7248\u672C" }),
       (() => {
         const rows = ignoredRows(updateNotice.ignored);
-        if (rows.length === 0) return /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: ignoredEmptyHint() });
-        return /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { children: [
-          rows.map((row) => /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { style: { ...ROW_STYLE, marginBottom: 4 }, children: [
-            /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { style: FLEX_1_STYLE, children: row.label }),
-            /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
+        if (rows.length === 0) return /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: NOTE_STYLE, children: ignoredEmptyHint() });
+        return /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { children: [
+          rows.map((row) => /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { style: { ...ROW_STYLE, marginBottom: 4 }, children: [
+            /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("span", { style: FLEX_1_STYLE, children: row.label }),
+            /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
               PfBtn,
               {
                 variant: "ghost",
@@ -3208,8 +3662,8 @@ function UpdateCard() {
               }
             )
           ] }, row.key)),
-          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: NOTE_STYLE, children: "\u6807\u300C\u672A\u77E5\u6765\u6E90\u300D\u7684\u6761\u76EE\u662F\u65E9\u671F\u683C\u5F0F\u5199\u7684\uFF0C\u6CA1\u6CD5\u5355\u72EC\u6062\u590D\uFF0C\u7528\u300C\u6E05\u7A7A\u5168\u90E8\u300D\u4E00\u5E76\u6E05\u6389\u3002" }),
-          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { style: { marginTop: 4 }, children: /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(PfBtn, { variant: "ghost", onClick: handleClearIgnored, children: "\u6E05\u7A7A\u5168\u90E8" }) })
+          /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: NOTE_STYLE, children: "\u6807\u300C\u672A\u77E5\u6765\u6E90\u300D\u7684\u6761\u76EE\u662F\u65E9\u671F\u683C\u5F0F\u5199\u7684\uFF0C\u6CA1\u6CD5\u5355\u72EC\u6062\u590D\uFF0C\u7528\u300C\u6E05\u7A7A\u5168\u90E8\u300D\u4E00\u5E76\u6E05\u6389\u3002" }),
+          /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: { marginTop: 4 }, children: /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(PfBtn, { variant: "ghost", onClick: handleClearIgnored, children: "\u6E05\u7A7A\u5168\u90E8" }) })
         ] });
       })()
     ] })
@@ -3217,34 +3671,24 @@ function UpdateCard() {
 }
 
 // src/client/desktop-settings.tsx
-var import_jsx_runtime19 = require("react/jsx-runtime");
+var import_jsx_runtime20 = require("react/jsx-runtime");
 function DesktopSettingsPanel() {
-  const [msg, setMsg] = (0, import_react18.useState)(null);
-  const notify = (0, import_react18.useCallback)((m) => setMsg(m), []);
-  (0, import_react18.useEffect)(() => {
+  const [msg, setMsg] = (0, import_react19.useState)(null);
+  const notify = (0, import_react19.useCallback)((m) => setMsg(m), []);
+  (0, import_react19.useEffect)(() => {
     if (msg && msg.ok) {
       const t = window.setTimeout(() => setMsg(null), 4e3);
       return () => window.clearTimeout(t);
     }
   }, [msg]);
-  const [taskInfo, setTaskInfo] = (0, import_react18.useState)(null);
-  (0, import_react18.useEffect)(() => {
-    const timer = setInterval(() => {
-      void invoke2("task_status").then((t) => {
-        if (t.running || t.finished) setTaskInfo(t);
-      }).catch(() => {
-      });
-    }, 600);
-    return () => clearInterval(timer);
-  }, []);
-  const [downloadBoxNote, setDownloadBoxNote] = (0, import_react18.useState)(null);
-  (0, import_react18.useEffect)(() => {
+  const [downloadBoxNote, setDownloadBoxNote] = (0, import_react19.useState)(null);
+  (0, import_react19.useEffect)(() => {
     ensureStyles();
   }, []);
-  const { data, loaded, refreshData } = useInitialData((text) => notify({ ok: false, text }));
+  const { data, loaded, refreshData, taskInfo } = usePanelData((text) => notify({ ok: false, text }));
   const { desktop, proxy, proxyEffective, loopbackAggregation } = data;
-  return /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { "data-desktop-settings": "", style: ROOT_STYLE, children: [
-    taskInfo && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)(
+  return /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { "data-desktop-settings": "", style: ROOT_STYLE, children: [
+    taskInfo && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)(
       "div",
       {
         style: {
@@ -3256,14 +3700,14 @@ function DesktopSettingsPanel() {
           border: taskInfo.finished ? taskInfo.error ? "1px solid rgba(239,68,68,.6)" : "1px solid rgba(34,197,94,.5)" : "1px solid var(--dsw-alias-border-neutral,#2a2e37)"
         },
         children: [
-          /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { style: { fontWeight: 600, marginBottom: 4 }, children: [
+          /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { style: { fontWeight: 600, marginBottom: 4 }, children: [
             taskInfo.running ? "\u23F3 " : taskInfo.error ? "\u2717 " : "\u2713 ",
             taskInfo.title
           ] }),
-          taskInfo.running && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)(import_jsx_runtime19.Fragment, { children: [
-            /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: { opacity: 0.8 }, children: taskInfo.stage || "\u51C6\u5907\u4E2D\u2026" }),
-            taskInfo.total > 0 && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)(import_jsx_runtime19.Fragment, { children: [
-              /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
+          taskInfo.running && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)(import_jsx_runtime20.Fragment, { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { style: { opacity: 0.8 }, children: taskInfo.stage || "\u51C6\u5907\u4E2D\u2026" }),
+            taskInfo.total > 0 && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)(import_jsx_runtime20.Fragment, { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
                 "div",
                 {
                   style: {
@@ -3273,7 +3717,7 @@ function DesktopSettingsPanel() {
                     overflow: "hidden",
                     background: "rgba(127,127,127,.25)"
                   },
-                  children: /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
+                  children: /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
                     "div",
                     {
                       style: {
@@ -3286,33 +3730,33 @@ function DesktopSettingsPanel() {
                   )
                 }
               ),
-              /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { style: { opacity: 0.6, marginTop: 3 }, children: [
+              /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { style: { opacity: 0.6, marginTop: 3 }, children: [
                 taskInfo.done,
                 "/",
                 taskInfo.total
               ] })
             ] })
           ] }),
-          taskInfo.finished && taskInfo.error && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: { color: "#f87171", whiteSpace: "pre-wrap" }, children: taskInfo.error }),
-          taskInfo.finished && !taskInfo.error && taskInfo.result && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: { opacity: 0.85 }, children: taskInfo.result })
+          taskInfo.finished && taskInfo.error && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { style: { color: "#f87171", whiteSpace: "pre-wrap" }, children: taskInfo.error }),
+          taskInfo.finished && !taskInfo.error && taskInfo.result && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { style: { opacity: 0.85 }, children: taskInfo.result })
         ]
       }
     ),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(SourceCard, {}),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(ServiceAddressCard, { desktop, refreshData, notify }),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(ProfileCard, { desktop, notify }),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(ProfilePortsCard, { loaded }),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(MigrationCard, { profiles: desktop.profiles, loaded, notify }),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(DiagnosticsCard, {}),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(UpdateCard, {}),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(RuntimeCard, { notify }),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(DependenciesCard, {}),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(DownloadCard, { note: downloadBoxNote, onNote: setDownloadBoxNote }),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(MobileAccessCard, { desktop, onNote: setDownloadBoxNote }),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(LoopbackAggregationCard, { value: loopbackAggregation }),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(PowerCard, { desktop }),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(DevToolsCard, { desktop }),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(SourceCard, {}),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(ServiceAddressCard, { desktop, refreshData, notify }),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(ProfileCard, { desktop, notify }),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(ProfilePortsCard, { loaded }),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(MigrationCard, { profiles: desktop.profiles, loaded, notify }),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(DiagnosticsCard, {}),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(UpdateCard, {}),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(RuntimeCard, { notify }),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(DependenciesCard, {}),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(DownloadCard, { note: downloadBoxNote, onNote: setDownloadBoxNote }),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(MobileAccessCard, { desktop, onNote: setDownloadBoxNote }),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(LoopbackAggregationCard, { value: loopbackAggregation }),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(PowerCard, { desktop }),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(DevToolsCard, { desktop }),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
       ProxyCard,
       {
         proxy,
@@ -3321,7 +3765,7 @@ function DesktopSettingsPanel() {
         notify
       }
     ),
-    msg && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
+    msg && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
       "div",
       {
         style: {
@@ -3346,7 +3790,7 @@ function DesktopSettingsPanel() {
         children: msg.text
       }
     ),
-    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
       "div",
       {
         style: {
@@ -3372,117 +3816,26 @@ function registerDesktopSettings(ctx) {
       DesktopSettingsPanel
     )
   );
-  void invoke2("get_pending_active_profile").then((profile) => {
+  void invokeCommand("get_pending_active_profile").then((profile) => {
     if (profile && hasNsRpc()) {
       void nsSave({ active_profile: profile }).catch(() => {
       });
     }
   }).catch(() => {
   });
-  void invoke2("check_startup_needed").then((res) => {
-    if (!res || res.action === "none") return;
-    if (res.action === "profile-selection") {
-      const profiles = res.profiles ?? [];
-      const el = document.createElement("div");
-      el.style.cssText = "position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)";
-      const card = document.createElement("div");
-      card.style.cssText = "background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l2,#ffffff1f);border-radius:12px;padding:24px;min-width:320px;max-width:400px";
-      const title = document.createElement("div");
-      title.style.cssText = "font-size:15px;font-weight:600;margin-bottom:16px;color:var(--dsw-alias-label-primary,#e7eaf0)";
-      title.textContent = "\u9009\u62E9\u8981\u542F\u52A8\u7684 Profile";
-      card.appendChild(title);
-      const list = document.createElement("div");
-      list.style.cssText = "display:flex;flex-direction:column;gap:8px";
-      for (const p of profiles) {
-        const btn = document.createElement("button");
-        btn.style.cssText = "padding:10px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer;text-align:left";
-        btn.textContent = p;
-        btn.onmouseenter = () => btn.style.background = "var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07))";
-        btn.onmouseleave = () => btn.style.background = "transparent";
-        btn.onclick = () => {
-          el.remove();
-          showToast(`\u6B63\u5728\u542F\u52A8 ${p} profile\u2026`, true);
-          void invoke2("confirm_startup_profile", { name: p, repair: false }).catch((e) => showToast(`\u542F\u52A8\u5931\u8D25\uFF1A${String(e)}`, false));
-        };
-        list.appendChild(btn);
-      }
-      const input = document.createElement("input");
-      input.style.cssText = "margin-top:12px;padding:8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;width:100%;box-sizing:border-box";
-      input.placeholder = "\u6216\u8F93\u5165\u65B0 profile \u540D\u79F0";
-      const startBtn = document.createElement("button");
-      startBtn.style.cssText = "margin-top:8px;padding:8px 14px;border-radius:8px;border:none;background:var(--dsw-alias-brand-primary-new-color,#4176e6);color:#fff;font-size:13px;cursor:pointer;width:100%";
-      startBtn.textContent = "\u65B0\u5EFA\u5E76\u542F\u52A8";
-      startBtn.onclick = () => {
-        const name = input.value.trim();
-        if (!name) return;
-        el.remove();
-        showToast(`\u6B63\u5728\u521B\u5EFA\u5E76\u542F\u52A8 ${name} profile\u2026`, true);
-        void invoke2("confirm_startup_profile", { name, repair: true }).catch((e) => showToast(`\u521B\u5EFA\u5931\u8D25\uFF1A${String(e)}`, false));
-      };
-      card.appendChild(list);
-      card.appendChild(input);
-      card.appendChild(startBtn);
-      el.appendChild(card);
-      document.body.appendChild(el);
-      return;
-    }
-    if (res.action === "profile-incomplete") {
-      const profile = res.profile ?? "";
-      if (!profile) return;
-      const details = res.details;
-      const missingDesc = details ? [
-        ...details.missing_files,
-        ...details.node_modules_exists ? [] : ["node_modules"],
-        ...details.dir_exists ? [] : ["profile \u76EE\u5F55"]
-      ].join(", ") : "";
-      const el = document.createElement("div");
-      el.style.cssText = "position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)";
-      const card = document.createElement("div");
-      card.style.cssText = "background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l2,#ffffff1f);border-radius:12px;padding:24px;min-width:340px;max-width:420px;text-align:center";
-      const title = document.createElement("div");
-      title.style.cssText = "font-size:15px;font-weight:600;margin-bottom:8px;color:var(--dsw-alias-label-primary,#e7eaf0)";
-      title.textContent = `Profile\u300C${profile}\u300D\u4E0D\u5B8C\u6574`;
-      const desc = document.createElement("div");
-      desc.style.cssText = "font-size:12px;color:var(--dsw-alias-label-secondary,#9aa4b2);margin-bottom:20px";
-      desc.textContent = `\u7F3A\u5931\uFF1A${missingDesc}\u3002\u662F\u5426\u4FEE\u590D\uFF1F`;
-      const btns = document.createElement("div");
-      btns.style.cssText = "display:flex;gap:10px";
-      const noBtn = document.createElement("button");
-      noBtn.style.cssText = "flex:1;padding:10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer";
-      noBtn.textContent = "\u76F4\u63A5\u542F\u52A8";
-      noBtn.onclick = () => {
-        el.remove();
-        void invoke2("confirm_startup_profile", { name: profile, repair: false }).catch((e) => showToast(`\u542F\u52A8\u5931\u8D25\uFF1A${String(e)}`, false));
-      };
-      const yesBtn = document.createElement("button");
-      yesBtn.style.cssText = "flex:1;padding:10px;border-radius:8px;border:none;background:var(--dsw-alias-brand-primary-new-color,#4176e6);color:#fff;font-size:13px;cursor:pointer";
-      yesBtn.textContent = "\u4FEE\u590D\u5E76\u542F\u52A8";
-      yesBtn.onclick = () => {
-        el.remove();
-        showToast(`\u6B63\u5728\u4FEE\u590D ${profile} profile\u2026`, true);
-        void invoke2("confirm_startup_profile", { name: profile, repair: true }).catch((e) => showToast(`\u4FEE\u590D\u5931\u8D25\uFF1A${String(e)}`, false));
-      };
-      btns.appendChild(noBtn);
-      btns.appendChild(yesBtn);
-      card.appendChild(title);
-      card.appendChild(desc);
-      card.appendChild(btns);
-      el.appendChild(card);
-      document.body.appendChild(el);
-    }
-  }).catch(() => {
+  void invokeCommand("check_startup_needed").then((res) => runStartupFlow(res, showToast)).catch(() => {
   });
 }
 
-// src/client/notifications-tab.tsx
-var import_react19 = require("react");
+// src/client/features/notifications-tab.tsx
+var import_react20 = require("react");
 
-// src/client/notification-focus-hint.ts
+// src/client/features/notification-focus-hint.ts
 function focusSuppressHint() {
   return "\u5E94\u7528\u7A97\u53E3\u5728\u524D\u53F0\u805A\u7126\u65F6\u4E0D\u5F39\u901A\u77E5\uFF08\u5931\u7126\u3001\u6700\u5C0F\u5316\u540E\u7167\u5E38\uFF09\uFF0C\u8BE5\u7B56\u7565\u56FA\u5B9A\u4E0D\u53EF\u914D\u7F6E\u3002";
 }
 
-// src/client/notification-sound-ui.ts
+// src/client/features/notification-sound-ui.ts
 var SOUND_EXTENSIONS = ["wav", "mp3", "ogg"];
 var CUSTOM_PREFIX = "custom:";
 var FALLBACK_REASON = "\u672C\u673A\u6CA1\u6709\u8BE5\u683C\u5F0F\u7684\u64AD\u653E\u540E\u7AEF";
@@ -3561,11 +3914,8 @@ function deniedPermissionCopy(platform, bundleId) {
   return `${base}\u5F00\u53D1\u671F\u53EF\u6267\u884C tccutil reset Notifications ${bundleId} \u540E\u91CD\u8BD5\u3002`;
 }
 
-// src/client/notifications-tab.tsx
-var import_jsx_runtime20 = require("react/jsx-runtime");
-function invoke3(cmd, args) {
-  return shellRpc.invoke(cmd, args);
-}
+// src/client/features/notifications-tab.tsx
+var import_jsx_runtime21 = require("react/jsx-runtime");
 var SYS_PREFS = "x-apple.systempreferences:com.apple.Preference.Notifications";
 var PANEL_CSS2 = `
 [data-notification-settings] { font-size: 13px; }
@@ -3610,12 +3960,12 @@ function ensureStyles2() {
   document.head.appendChild(style);
 }
 function NotificationSettingsPanel() {
-  const [data, setData] = (0, import_react19.useState)(null);
-  const [busy, setBusy] = (0, import_react19.useState)(false);
-  const [previewNote, setPreviewNote] = (0, import_react19.useState)(null);
-  const [loadFailed, setLoadFailed] = (0, import_react19.useState)(false);
-  const refresh = (0, import_react19.useCallback)(() => {
-    invoke3("get_notifications_state").then((res) => {
+  const [data, setData] = (0, import_react20.useState)(null);
+  const [busy, setBusy] = (0, import_react20.useState)(false);
+  const [previewNote, setPreviewNote] = (0, import_react20.useState)(null);
+  const [loadFailed, setLoadFailed] = (0, import_react20.useState)(false);
+  const refresh = (0, import_react20.useCallback)(() => {
+    invokeCommand("get_notifications_state").then((res) => {
       setLoadFailed(false);
       setData(res);
     }).catch((e) => {
@@ -3623,11 +3973,11 @@ function NotificationSettingsPanel() {
       setLoadFailed(true);
     });
   }, []);
-  (0, import_react19.useEffect)(() => {
+  (0, import_react20.useEffect)(() => {
     refresh();
   }, [refresh]);
-  const refetched = (0, import_react19.useRef)(false);
-  (0, import_react19.useEffect)(() => {
+  const refetched = (0, import_react20.useRef)(false);
+  (0, import_react20.useEffect)(() => {
     if (data === null || refetched.current) return;
     refetched.current = true;
     const timer = setTimeout(() => {
@@ -3635,18 +3985,16 @@ function NotificationSettingsPanel() {
     }, 700);
     return () => clearTimeout(timer);
   }, [data, refresh]);
-  const save = (0, import_react19.useCallback)((next) => {
+  const save = (0, import_react20.useCallback)((next) => {
     setBusy(true);
-    invoke3("set_notifications_config", { config: next }).catch((e) => {
+    invokeCommand("set_notifications_config", { config: next }).catch((e) => {
       logFail(e);
     }).finally(() => setBusy(false));
   }, []);
   const logFail = (e) => {
-    const w = window;
-    w.__xnlLogWarn?.(String(e));
     console.warn("[notifications] \u4FDD\u5B58\u5931\u8D25", e);
   };
-  const patch = (0, import_react19.useCallback)((fn) => {
+  const patch = (0, import_react20.useCallback)((fn) => {
     setData((prev) => {
       if (prev === null) return prev;
       const next = {
@@ -3662,28 +4010,29 @@ function NotificationSettingsPanel() {
     });
   }, [save]);
   if (data === null) {
-    return /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { "data-notification-settings": true, className: "n-note", children: loadFailed ? "\u901A\u77E5\u8BBE\u7F6E\u8BFB\u53D6\u5931\u8D25\uFF1A\u684C\u9762\u58F3\u6CA1\u6709\u54CD\u5E94\uFF08\u8BE6\u89C1\u63A7\u5236\u53F0\uFF09" : "\u52A0\u8F7D\u4E2D\u2026" });
+    return /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { "data-notification-settings": true, className: "n-note", children: loadFailed ? "\u901A\u77E5\u8BBE\u7F6E\u8BFB\u53D6\u5931\u8D25\uFF1A\u684C\u9762\u58F3\u6CA1\u6709\u54CD\u5E94\uFF08\u8BE6\u89C1\u63A7\u5236\u53F0\uFF09" : "\u52A0\u8F7D\u4E2D\u2026" });
   }
   const requestPerm = () => {
     setBusy(true);
-    invoke3("request_notification_permission_cmd").then(() => refresh()).catch(() => {
+    invokeCommand("request_notification_permission_cmd").then(() => refresh()).catch((error) => {
+      console.warn(`[notifications] \u901A\u77E5\u6743\u9650\u7533\u8BF7\u5931\u8D25\uFF1A${String(error)}`);
     }).finally(() => setBusy(false));
   };
   const openSysPrefs = () => {
-    void invoke3("open_external", { url: SYS_PREFS }).catch(() => {
+    void invokeCommand("open_external", { url: SYS_PREFS }).catch(() => {
     });
   };
   const chooseSound = () => {
-    invoke3("choose_notification_sound").then((path) => {
+    invokeCommand("choose_notification_sound").then((path) => {
       if (path === null || path === void 0 || path === "") return;
-      return invoke3("import_notification_sound", { path }).then((name) => {
+      return invokeCommand("import_notification_sound", { path }).then((name) => {
         refresh();
         return name;
       });
     }).catch((e) => console.warn("[notifications] \u5BFC\u5165\u97F3\u6548\u5931\u8D25", e));
   };
   const previewSound = (id, sound) => {
-    invoke3("preview_notification_sound", { sound }).then((res) => {
+    invokeCommand("preview_notification_sound", { sound }).then((res) => {
       const failure = previewFailure(res);
       setPreviewNote(failure === null ? null : { id, text: failure });
     }).catch((e) => {
@@ -3700,31 +4049,31 @@ function NotificationSettingsPanel() {
   const soundHint = capabilityHint(capability);
   const soundChoices = customSoundOptions(data.sounds, capability);
   const permissionUnavailable = permissionUnavailableCopy(capability?.platform);
-  return /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { "data-notification-settings": true, className: data.config.enabled ? "" : "n-mastoff", children: [
-    data.permission === "granted" ? /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-banner granted", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-chip ok", children: "\u5DF2\u6388\u4E88" }),
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "grow", children: "\u7CFB\u7EDF\u5141\u8BB8\u672C\u5E94\u7528\u53D1\u9001\u901A\u77E5\u3002" }),
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { className: "n-btn ghost mini", onClick: openSysPrefs, children: "\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E" })
-    ] }) : data.permission === "denied" ? /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-banner denied", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-chip danger", children: "\u88AB\u62D2\u7EDD" }),
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "grow", children: deniedPermissionCopy(capability?.platform, data.bundleId) }),
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { className: "n-btn ghost mini", onClick: openSysPrefs, children: "\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E" }),
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { className: "n-btn mini", onClick: requestPerm, disabled: busy, children: "\u7533\u8BF7\u6743\u9650" })
-    ] }) : data.permission === "unavailable" ? /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: `n-banner${permissionUnavailable.neutral ? " neutral" : ""}`, children: [
-      permissionUnavailable.chip !== null && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-chip", children: permissionUnavailable.chip }),
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "grow", children: permissionUnavailable.text })
-    ] }) : /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-banner", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-chip warn", children: "\u672A\u51B3\u5B9A" }),
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "grow", children: "\u5C1A\u672A\u5411\u7CFB\u7EDF\u7533\u8BF7\u901A\u77E5\u6743\u9650\uFF0C\u9996\u6B21\u7533\u8BF7\u4F1A\u5F39\u7CFB\u7EDF\u6388\u6743\u7A97\u3002" }),
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { className: "n-btn mini", onClick: requestPerm, disabled: busy, children: "\u7533\u8BF7\u6743\u9650" }),
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { className: "n-btn ghost mini", onClick: openSysPrefs, children: "\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E" })
+  return /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { "data-notification-settings": true, className: data.config.enabled ? "" : "n-mastoff", children: [
+    data.permission === "granted" ? /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "n-banner granted", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "n-chip ok", children: "\u5DF2\u6388\u4E88" }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "grow", children: "\u7CFB\u7EDF\u5141\u8BB8\u672C\u5E94\u7528\u53D1\u9001\u901A\u77E5\u3002" }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("button", { className: "n-btn ghost mini", onClick: openSysPrefs, children: "\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E" })
+    ] }) : data.permission === "denied" ? /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "n-banner denied", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "n-chip danger", children: "\u88AB\u62D2\u7EDD" }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "grow", children: deniedPermissionCopy(capability?.platform, data.bundleId) }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("button", { className: "n-btn ghost mini", onClick: openSysPrefs, children: "\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E" }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("button", { className: "n-btn mini", onClick: requestPerm, disabled: busy, children: "\u7533\u8BF7\u6743\u9650" })
+    ] }) : data.permission === "unavailable" ? /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: `n-banner${permissionUnavailable.neutral ? " neutral" : ""}`, children: [
+      permissionUnavailable.chip !== null && /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "n-chip", children: permissionUnavailable.chip }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "grow", children: permissionUnavailable.text })
+    ] }) : /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "n-banner", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "n-chip warn", children: "\u672A\u51B3\u5B9A" }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "grow", children: "\u5C1A\u672A\u5411\u7CFB\u7EDF\u7533\u8BF7\u901A\u77E5\u6743\u9650\uFF0C\u9996\u6B21\u7533\u8BF7\u4F1A\u5F39\u7CFB\u7EDF\u6388\u6743\u7A97\u3002" }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("button", { className: "n-btn mini", onClick: requestPerm, disabled: busy, children: "\u7533\u8BF7\u6743\u9650" }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("button", { className: "n-btn ghost mini", onClick: openSysPrefs, children: "\u6253\u5F00\u7CFB\u7EDF\u8BBE\u7F6E" })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-card", children: /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-setrow", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("b", { children: "\u542F\u7528\u684C\u9762\u901A\u77E5" }),
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-note", children: "\u603B\u5F00\u5173\uFF1A\u5173\u95ED\u540E\u6240\u6709\u573A\u666F\u4E00\u5F8B\u9759\u9ED8\uFF08\u573A\u666F\u5F00\u5173\u4FDD\u7559\uFF0C\u91CD\u65B0\u5F00\u542F\u5373\u6062\u590D\uFF09" })
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "n-card", children: /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "n-setrow", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("b", { children: "\u542F\u7528\u684C\u9762\u901A\u77E5" }),
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "n-note", children: "\u603B\u5F00\u5173\uFF1A\u5173\u95ED\u540E\u6240\u6709\u573A\u666F\u4E00\u5F8B\u9759\u9ED8\uFF08\u573A\u666F\u5F00\u5173\u4FDD\u7559\uFF0C\u91CD\u65B0\u5F00\u542F\u5373\u6062\u590D\uFF09" })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(
         "span",
         {
           className: `n-switch ${data.config.enabled ? "on" : ""}`,
@@ -3734,13 +4083,13 @@ function NotificationSettingsPanel() {
         }
       )
     ] }) }),
-    /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-card", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-setrow", style: { marginBottom: 10 }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("b", { children: "\u514D\u6253\u6270\u65F6\u6BB5" }),
-          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-note", children: "\u65F6\u6BB5\u5185\u901A\u77E5\u9759\u9ED8\uFF08\u4ECD\u8FDB\u7CFB\u7EDF\u901A\u77E5\u4E2D\u5FC3\uFF09" })
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "n-card", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "n-setrow", style: { marginBottom: 10 }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("b", { children: "\u514D\u6253\u6270\u65F6\u6BB5" }),
+          /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "n-note", children: "\u65F6\u6BB5\u5185\u901A\u77E5\u9759\u9ED8\uFF08\u4ECD\u8FDB\u7CFB\u7EDF\u901A\u77E5\u4E2D\u5FC3\uFF09" })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(
           "span",
           {
             className: `n-switch ${data.config.dnd.on ? "on" : ""}`,
@@ -3750,9 +4099,9 @@ function NotificationSettingsPanel() {
           }
         )
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 10, opacity: data.config.dnd.on ? 1 : 0.45 }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-note", style: { margin: 0 }, children: "\u4ECE" }),
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 10, opacity: data.config.dnd.on ? 1 : 0.45 }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "n-note", style: { margin: 0 }, children: "\u4ECE" }),
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(
           "input",
           {
             className: "n-time",
@@ -3764,8 +4113,8 @@ function NotificationSettingsPanel() {
             })
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-note", style: { margin: 0 }, children: "\u5230" }),
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "n-note", style: { margin: 0 }, children: "\u5230" }),
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(
           "input",
           {
             className: "n-time",
@@ -3778,46 +4127,46 @@ function NotificationSettingsPanel() {
           }
         )
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-setrow", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("b", { children: "\u5168\u5C4F\u65F6\u9759\u9ED8" }),
-          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-note", children: "\u672C\u5E94\u7528\u7A97\u53E3\u5168\u5C4F\u65F6\u4E0D\u5F39\u6A2A\u5E45" })
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "n-setrow", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("b", { children: "\u5168\u5C4F\u65F6\u9759\u9ED8" }),
+          /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "n-note", children: "\u672C\u5E94\u7528\u7A97\u53E3\u5168\u5C4F\u65F6\u4E0D\u5F39\u6A2A\u5E45" })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(
           "span",
           {
-            className: `n-switch ${data.config.dnd.suppress_fullscreen ? "on" : ""}`,
+            className: `n-switch ${data.config.dnd.suppressFullscreen ? "on" : ""}`,
             onClick: () => patch((c) => {
-              c.dnd.suppress_fullscreen = !c.dnd.suppress_fullscreen;
+              c.dnd.suppressFullscreen = !c.dnd.suppressFullscreen;
             })
           }
         )
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-note", children: focusSuppressHint() })
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "n-note", children: focusSuppressHint() })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-card", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline" }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("b", { style: { fontSize: 13 }, children: "\u573A\u666F" }),
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-note", children: "\u6BCF\u4E2A\u573A\u666F\u72EC\u7ACB\u5F00\u5173\u4E0E\u97F3\u6548" })
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "n-card", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline" }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("b", { style: { fontSize: 13 }, children: "\u573A\u666F" }),
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "n-note", children: "\u6BCF\u4E2A\u573A\u666F\u72EC\u7ACB\u5F00\u5173\u4E0E\u97F3\u6548" })
       ] }),
-      grouped.map(({ gid, rows }) => /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-grp", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-gname", children: groupLabel(gid) }),
+      grouped.map(({ gid, rows }) => /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "n-grp", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "n-gname", children: groupLabel(gid) }),
         rows.map((s) => {
           const conf = data.config.scenarios[s.id] ?? { enabled: s.defaultOn, sound: "default" };
           const soundWarning = configuredSoundWarning(capability, conf.sound);
           const failureNote = previewNote !== null && previewNote.id === s.id ? previewNote.text : null;
-          return /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-srow", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-sinfo", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("b", { children: s.name }),
-              /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("span", { className: "n-mono", style: { display: "block" }, children: [
+          return /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "n-srow", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "n-sinfo", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("b", { children: s.name }),
+              /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "n-mono", style: { display: "block" }, children: [
                 s.id,
                 " \xB7 ",
                 s.desc
               ] }),
-              soundWarning !== null && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-note", style: { color: "var(--dsw-alias-state-warn,#e8a33d)" }, children: soundWarning }),
-              failureNote !== null && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "n-note", style: { color: "var(--dsw-alias-state-danger,#e5534b)" }, children: failureNote })
+              soundWarning !== null && /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "n-note", style: { color: "var(--dsw-alias-state-warn,#e8a33d)" }, children: soundWarning }),
+              failureNote !== null && /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "n-note", style: { color: "var(--dsw-alias-state-danger,#e5534b)" }, children: failureNote })
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
+            /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(
               "span",
               {
                 className: `n-switch ${conf.enabled ? "on" : ""}`,
@@ -3827,7 +4176,7 @@ function NotificationSettingsPanel() {
                 })
               }
             ),
-            /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)(
+            /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)(
               "select",
               {
                 className: "n-select",
@@ -3843,14 +4192,14 @@ function NotificationSettingsPanel() {
                   });
                 },
                 children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("option", { value: "default", children: "\u7CFB\u7EDF\u9ED8\u8BA4" }),
-                  /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("option", { value: "none", children: "\u65E0\u58F0" }),
-                  soundChoices.map((opt) => /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("option", { value: opt.value, disabled: opt.disabled, title: opt.title, children: opt.label }, opt.value)),
-                  /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("option", { value: "__choose", children: "\u81EA\u5B9A\u4E49\u6587\u4EF6\u2026" })
+                  /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("option", { value: "default", children: "\u7CFB\u7EDF\u9ED8\u8BA4" }),
+                  /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("option", { value: "none", children: "\u65E0\u58F0" }),
+                  soundChoices.map((opt) => /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("option", { value: opt.value, disabled: opt.disabled, title: opt.title, children: opt.label }, opt.value)),
+                  /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("option", { value: "__choose", children: "\u81EA\u5B9A\u4E49\u6587\u4EF6\u2026" })
                 ]
               }
             ),
-            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
+            /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(
               "button",
               {
                 className: "n-btn ghost mini",
@@ -3862,13 +4211,13 @@ function NotificationSettingsPanel() {
           ] }, s.id);
         })
       ] }, gid)),
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-note", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "n-note", children: [
         "\u81EA\u5B9A\u4E49\u97F3\u6548\u6587\u4EF6\uFF08wav / mp3 / ogg\uFF0C\u22645MB\uFF09\u5BFC\u5165\u540E\u5B58\u653E\u4E8E\u6570\u636E\u76EE\u5F55 sounds/\uFF0C\u53EF\u968F\u65F6\u5728\u4E0B\u62C9\u4E2D\u5207\u6362\u6216\u8986\u76D6\u3002",
         busy ? " \xB7 \u4FDD\u5B58\u4E2D\u2026" : ""
       ] }),
-      soundHint !== null && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "n-banner", style: { marginTop: 10, marginBottom: 0 }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "n-chip warn", children: "\u97F3\u6548" }),
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "grow", children: soundHint })
+      soundHint !== null && /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "n-banner", style: { marginTop: 10, marginBottom: 0 }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "n-chip warn", children: "\u97F3\u6548" }),
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "grow", children: soundHint })
       ] })
     ] })
   ] });
@@ -3886,7 +4235,7 @@ function registerNotificationsTab(ctx) {
   );
 }
 
-// src/client/environment.ts
+// src/client/features/environment.ts
 var PLATFORMS = /* @__PURE__ */ new Set(["darwin", "win32", "linux"]);
 function parseDesktopClientEnvironment(search) {
   const params = new URLSearchParams(search);
@@ -3901,7 +4250,7 @@ async function requestDesktopClientEnvironment() {
   if (!shellRpc.available()) return void 0;
   let raw;
   try {
-    raw = await shellRpc.invoke("get_desktop_client_environment", {});
+    raw = await invokeCommand("get_desktop_client_environment");
   } catch {
     return void 0;
   }
@@ -3914,7 +4263,7 @@ async function requestDesktopClientEnvironment() {
   };
 }
 
-// src/client/platform-keyboard.ts
+// src/client/bridge/platform-keyboard.ts
 var SHORTCUT_SCHEMA_VERSION = 2;
 var MODIFIER_CODES = /* @__PURE__ */ new Set([
   "MetaLeft",
@@ -4059,7 +4408,7 @@ var KeyboardEmitter = class {
   }
   subscribe(listener) {
     this.listeners.add(listener);
-    console.info("[desktop][probe] dsh \u8BA2\u9605\u4E86\u539F\u751F\u6309\u952E\u8F93\u5165");
+    console.debug("[desktop][probe] dsh \u8BA2\u9605\u4E86\u539F\u751F\u6309\u952E\u8F93\u5165");
     return () => {
       this.listeners.delete(listener);
     };
@@ -4289,7 +4638,7 @@ function installDesktopPlatformBridge(ctx) {
   console.info(`[desktop] platform \u952E\u76D8\u6865\u5B9E\u73B0\u5DF2\u5C31\u7EEA\uFF08profile=${profile}\uFF09`);
   setTimeout(() => {
     const catalog = currentCatalog(service);
-    console.info(
+    console.debug(
       "[desktop] \u5FEB\u6377\u952E\u6865\u81EA\u68C0\uFF1A" + JSON.stringify({
         service: service ? `${service.runtime ?? "?"}:${service.platform ?? "?"}` : null,
         catalog: catalog.length,
@@ -4300,7 +4649,7 @@ function installDesktopPlatformBridge(ctx) {
   }, 3e3);
 }
 
-// src/client/composer-input-guard.ts
+// src/client/ui/composer-input-guard.ts
 var ALLOWED_CONTROL = /* @__PURE__ */ new Set([9, 10, 13]);
 function isDisallowed(code) {
   if (code > 31 && code !== 127) return false;
@@ -4359,7 +4708,7 @@ function editableRootOf(node) {
 }
 function trace(kind, payload) {
   try {
-    console.info(`[input-guard] ${kind} ${JSON.stringify(payload)}`);
+    console.debug(`[input-guard] ${kind} ${JSON.stringify(payload)}`);
   } catch {
   }
 }
@@ -4471,7 +4820,7 @@ function installComposerInputGuard() {
   });
 }
 
-// src/client/console-batch.ts
+// src/client/shell/console-batch.ts
 function createConsoleBatch(options) {
   const maxItems = options.maxItems ?? 20;
   const maxChars = options.maxChars ?? 16384;
@@ -4523,8 +4872,9 @@ var inject = [
   "connection"
 ];
 function installWebviewConsoleMirror() {
-  const invoke4 = (cmd, args) => {
-    void shellRpc.invoke(cmd, args).catch(() => {
+  const invoke2 = (cmd, args) => {
+    void shellRpc.invoke(cmd, args).catch((error) => {
+      console.warn(`[dsh-desktop-tauriapp] \u9875\u9762\u65E5\u5FD7\u955C\u50CF\u901A\u9053\u4E0D\u53EF\u7528\uFF1A${String(error)}`);
     });
   };
   let batchSupported = true;
@@ -4541,12 +4891,12 @@ function installWebviewConsoleMirror() {
           },
           () => {
             batchSupported = false;
-            for (const item of items) invoke4("log_console", item);
+            for (const item of items) invoke2("log_console", item);
           }
         );
         return;
       }
-      for (const item of items) invoke4("log_console", item);
+      for (const item of items) invoke2("log_console", item);
     }
   });
   const fwd = (level, args) => {
@@ -4620,7 +4970,8 @@ function apply(ctx) {
     step = "\u9AD8\u7EA7\u5E03\u5C40";
     void requestDesktopClientEnvironment().then((environment) => {
       if (environment !== void 0) applyAdvancedShell(ctx, environment);
-    }).catch(() => {
+    }).catch((error) => {
+      console.warn(`[dsh-desktop-tauriapp] \u63D2\u4EF6\u6FC0\u6D3B\u6B65\u9AA4\u5931\u8D25\uFF08${step}\uFF09\uFF1A${String(error)}`);
     });
   } catch (error) {
     console.error(`[dsh-desktop-tauriapp] \u63D2\u4EF6\u6FC0\u6D3B\u5931\u8D25\u4E8E\u300C${step}\u300D`, error);

@@ -19,6 +19,7 @@ import {
   profileHealth,
   testProxyConnectivity,
 } from '../src/bun/profiles/profile-manager.ts'
+import { silentLogger } from './helpers/test-logger.ts'
 import { PROFILE_REQUIRED_FILES } from '../src/shared/profiles/profile-ops.ts'
 
 function tempRoot(): string {
@@ -85,7 +86,7 @@ describe('迁移 profile（旧壳 migrate_profile_inner）', () => {
     const home = tempRoot()
     seedProfile(home, 'desktop')
     const install = async (): Promise<{ ok: true; error: '' }> => ({ ok: true, error: '' })
-    const base = { home, source: 'desktop', dest: 'web', overwrite: false, activeProfile: null, install, log: () => {} }
+      const base = { home, source: 'desktop', dest: 'web', overwrite: false, activeProfile: null, install, log: silentLogger }
 
     await expect(migrateProfile({ ...base, dest: '有中文' })).rejects.toThrow('名称仅允许字母、数字')
     await expect(migrateProfile({ ...base, activeProfile: 'web' })).rejects.toThrow('正在使用，拒绝迁移')
@@ -139,7 +140,7 @@ describe('迁移 profile（旧壳 migrate_profile_inner）', () => {
         return { ok: true, error: '' }
       },
       track,
-      log: () => {},
+        log: silentLogger,
     })
     const dst = join(home, 'profiles', 'web')
     expect(summary).toContain('已迁移 desktop → web')
@@ -209,7 +210,7 @@ describe('依赖重建的前置条件（依赖解析）', () => {
       profile: 'desktop',
       appSupport: join(home, 'support'),
       env: { PATH: '/nonexistent' },
-      log: () => {},
+        log: silentLogger,
     })
     expect(result.ok).toBe(false)
     expect(result.error).toContain('找不到 pnpm.cjs')

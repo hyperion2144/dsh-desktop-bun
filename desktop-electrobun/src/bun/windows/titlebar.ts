@@ -168,7 +168,7 @@ export function titlebarScript(platform: CarrierPlatform): string {
     '    queryState = () => {',
     '      void call(STATE_METHOD, {})',
     '        .then((state) => { if (state !== null && state !== undefined && typeof state.maximized === "boolean") setIcon(state.maximized) })',
-    '        .catch(() => {})',
+    '        .catch(() => console.debug("[titlebar] 标题栏状态查询失败"))',
     '    }',
     '    queryState()',
     '    let resizeTimer = 0',

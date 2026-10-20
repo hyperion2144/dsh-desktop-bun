@@ -19,6 +19,7 @@
 import { dlopen, ptr } from 'bun:ffi'
 import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import type { Logger } from '../../shared/logging/levels.ts'
 
 const WM_SETICON = 0x0080
 const ICON_SMALL = 0
@@ -168,14 +169,14 @@ export function windowIconCandidates(execDir: string): string[] {
   ]
 }
 
-export function applyWindowsIcon(log: (line: string) => void, icoCandidates: readonly string[]): ApplyWindowIconResult {
+export function applyWindowsIcon(log: Logger, icoCandidates: readonly string[]): ApplyWindowIconResult {
   if (process.platform !== 'win32') return { ok: false, windows: 0, reason: '非 Windows 平台' }
   try {
     const libs = loadHostLibs()
     const icons = ensureIcons(libs, icoCandidates)
     if (icons === null) {
       const reason = iconsFailure ?? '拿不到图标'
-      log(`[shell] 窗口图标设置失败（不影响启动）：${reason}`)
+      log.warn(`窗口图标设置失败（不影响启动）：${reason}`)
       return { ok: false, windows: 0, reason }
     }
     const { big, small } = icons
@@ -208,11 +209,11 @@ export function applyWindowsIcon(log: (line: string) => void, icoCandidates: rea
     if (count === 0) {
       return { ok: false, windows: 0, reason: '没有枚举到壳窗口（launcher/bun 进程的顶层窗口）' }
     }
-    log(`[shell] 窗口图标已设置（${icons.how} → ${String(count)} 扇壳窗口；宿主进程窗口随窗口集合变化重跑覆盖）`)
+    log.debug(`窗口图标已设置（${icons.how} → ${String(count)} 扇壳窗口；宿主进程窗口随窗口集合变化重跑覆盖）`)
     return { ok: true, windows: count, reason: null }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
-    log(`[shell] 窗口图标设置失败（不影响启动）：${reason}`)
+    log.warn(`窗口图标设置失败（不影响启动）：${reason}`)
     return { ok: false, windows: 0, reason }
   }
 }

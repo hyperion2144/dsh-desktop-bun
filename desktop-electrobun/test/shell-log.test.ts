@@ -2,15 +2,20 @@
 // 覆盖：路径解析口径（DSH_SHELL_LOG 优先 / dshHome 兜底）、行落盘 + 时间戳格式、
 // stdout 镜像（dev 终端可见性）、单例身份。
 // 注意：sink 是进程级单例，env 必须在本文件任何用例触达 sink 之前定死——
-// shell-log.ts 对 env 是懒读取（调用时才解析），模块顶层赋值即可。
-
-import { describe, expect, test } from 'bun:test'
+// 注意：sink 是进程级单例，env 必须在本文件任何用例触达 sink 之前定死——
+// shell-log.ts 对 env 是懒读取（调用时才解析），模块顶层赋值即可；
+// 但 bun test 同进程按文件顺序串行/并发跑其它测试文件，这个 env 必须在文件结束时复原，
+// 否则会泄漏进后面的测试文件（CI 上曾把 logging-kernel 的临时 home 顶掉：#234 CI 6 fail）。
+import { afterAll, describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const logDir = mkdtempSync(join(tmpdir(), 'dsh-shell-log-'))
 process.env.DSH_SHELL_LOG = join(logDir, 'shell.log')
+afterAll(() => {
+    delete process.env.DSH_SHELL_LOG
+})
 
 import { installShellConsoleTee, resolveShellLogFile, shellLogLine, shellLogSink } from '../src/bun/platform/shell-log.ts'
 
@@ -27,9 +32,9 @@ describe('shell-log：路径解析', () => {
 
 describe('shell-log：落盘与单例', () => {
   test('shellLogLine 写进文件且带时间戳前缀', () => {
-    shellLogLine('[shell] #80 heal 检查（test）：落位正常，不干预')
+      shellLogLine('#80 heal 检查（test）：落位正常，不干预')
     const content = readFileSync(process.env.DSH_SHELL_LOG!, 'utf8')
-    expect(content).toContain('[shell] #80 heal 检查（test）：落位正常，不干预')
+      expect(content).toContain('[shell] [info] #80 heal 检查（test）：落位正常，不干预')
     // 本地时区时间戳（log-sink 的 formatLogLine 统一格式），行首非空
     const line = content.split('\n').find((row) => row.includes('#80 heal 检查'))!
     expect(line.startsWith('[')).toBe(false)
@@ -41,18 +46,18 @@ describe('shell-log：落盘与单例', () => {
     const seen: string[] = []
     console.log = (line: unknown) => seen.push(String(line))
     try {
-      shellLogLine('[shell] mirror-probe')
+        shellLogLine('mirror-probe')
     } finally {
       console.log = original
     }
-    expect(seen.some((row) => row.includes('[shell] mirror-probe'))).toBe(true)
+      expect(seen.some((row) => row.includes('[shell] [info] mirror-probe'))).toBe(true)
   })
 
   test('console tee：installShellConsoleTee 后 console.log 同步进 shell.log', () => {
     installShellConsoleTee()
-    console.log('[shell] tee-probe')
+      console.log('tee-probe')
     const content = readFileSync(process.env.DSH_SHELL_LOG!, 'utf8')
-    expect(content).toContain('[shell log] [shell] tee-probe')
+      expect(content).toContain('[shell] [info] tee-probe')
   })
 
   test('单例身份：重复取同一实例（路径不会被二次初始化改写）', () => {

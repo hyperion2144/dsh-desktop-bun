@@ -55,8 +55,23 @@ _Avoid_: 忽略、屏蔽、记账、已读
 就绪；DSH 起不来时服务面仍在，`state.status` 是它的状态事实源。
 _Avoid_: 主进程、后台服务、shell 服务
 
+**统一日志内核**：
+壳进程里把全部落盘日志收进一处的那层模块：单写者、级别过滤、轮转归档、保留清理、导出都从它走。桌面设置「日志与诊断」卡是它的唯一管理入口。
+_Avoid_: 日志服务、log 服务、日志系统
+
+**活跃文件 / 归档份**：
+正在被追加写的日志文件叫活跃文件（`shell.log` 等三个文件名是契约，永远不变）；轮转出来的 gzip 压缩份叫归档份，统一住进 `logs/archive/`。
+_Avoid_: 旧日志、历史文件、备份日志
+
+**内容日**：
+一份归档份里第一行日志所属的那一天。归档文件名与导出的时间过滤都用它，不用轮转发生的时刻——跨天静默期产出的份不会错天。
+_Avoid_: 轮转日期、文件日期、mtime
+
+
 ## 相关决定
 
 - [ADR-0006](docs/adr/0006-builtin-runtime-as-first-class-candidate.md)：内置运行时是一等候选，参与更新比较。
 - [ADR-0005](docs/adr/0005-shell-page-transport-boundary.md)：壳↔页面通道以官方 Electrobun Typed RPC 为主路。
+- [ADR-0011](docs/adr/0011-unified-log-sink-dual-rotation.md)：shell.log 单写者合并与按天/大小双触发轮转归档。
+- [ADR-0012](docs/adr/0012-logging-commands-not-in-grant-lists.md)：日志管理命令不进远程/访客白名单。
 - 索引见 [docs/adr/README.md](docs/adr/README.md)。

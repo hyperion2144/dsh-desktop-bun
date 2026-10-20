@@ -9,7 +9,7 @@ import { reconcileProfileRuntimeTree } from '../profiles/profile-tree.ts'
 import { scaffoldProfile } from '../profiles/profile-scaffold.ts'
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
-import { choosePort, claimFor, parseClaims, pruneClaims, releaseClaim, upsertClaim } from '../../shared/net/ports.ts'
+import { PAGE_PORT_SPAN, choosePort, claimFor, parseClaims, pruneClaims, releaseClaim, upsertClaim } from '../../shared/net/ports.ts'
 import { decideClaim } from '../../shared/net/port-claim.ts'
 import { startLaneForwarder, type LaneForwarder } from '../net/lane-forwarder.ts'
 import { portOpen, stopPortOwner } from '../net/port-owner.ts'
@@ -58,10 +58,12 @@ import { updateSettings } from '../platform/settings-store.ts'
 import type { RuntimeDownloadStatus } from '../runtime/runtime-install.ts'
 import { listProfiles } from '../profiles/profiles.ts'
 import { createDownloadManager } from '../commands/downloads.ts'
-import { createLogSink, describeLogFile } from '../platform/log-sink.ts'
+import { loggingKernel } from '../logging/kernel.ts'
+import { exportLogRange, resolveRangePreset } from '../logging/exporter.ts'
 import { buildDiagnostics, DIAG_TAIL_LINES, type DiagnosticsInput } from '../../shared/app/diagnostics.ts'
 import { exportDiagnostics } from '../commands/diagnostics.ts'
 import { classifyLevel, mirrorToShellLog, pageLogLines } from '../../shared/app/log-file.ts'
+import { LEVEL_TAGS, formatMessage, pageLevelToLogLevel, type Logger, type LogLevel } from '../../shared/logging/levels.ts'
 import { revealPath } from '../commands/downloads.ts'
 import { release as osRelease, cpus as osCpus, freemem as osFreemem, totalmem as osTotalmem } from 'node:os'
 import { builtinPnpmVersion, createTaskTracker, installProfileDependencies, migrateProfile, profileDependencyRows, profileHealth, testProxyConnectivity } from '../profiles/profile-manager.ts'
@@ -129,7 +131,7 @@ export interface ServiceOptions {
   isWindowFocused?: (profile: string) => boolean
   /** 最大化态读取（#112 壳层标题栏带）：GET /__shell__/window 回 { maximized }；缺省时 GET 仍 405 */
   onWindowState?: () => WindowMaxState
-  onLog?: (line: string) => void
+  onLog?: (line: string, level?: 'debug' | 'info' | 'warn' | 'error') => void
   /** 通知权限桥（index.ts 注入同一个实例；缺省自建） */
   notifyBridge?: NativeNotify
   /** 应用更新（index.ts 可注入同一个实例；缺省自建；单测可注入假实现） */
@@ -245,33 +247,70 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   const claimsFile = env.DSH_SHELL_PORT_CLAIMS ?? join(home, 'shell-ports.json')
   mkdirSync(home, { recursive: true })
 
-  // 壳日志：本地时区时间戳 + 有界轮转（10 MB × 5 份；旧壳 KeepAll 实测堆了 90+ 份）。
-  const shellLog = createLogSink({
-    file: logFile,
-    // #54：批量异步刷盘——行进内存缓冲 100ms 合并落盘，不再逐行同步 I/O；退出钩子同步 flush
-    bufferMs: 100,
-    stdout: (line) => console.log(line),
-    onRotate: ({ moved, deleted }) => console.log(`[shell] 日志轮转：搬 ${String(moved)} 份、删 ${String(deleted)} 份`),
+  // 壳日志与页面日志统一由日志内核接管（#221：进程级唯一 sink + 级别持有者；
+  // 旧的两份 createLogSink（N+1 写者）合并进内核单例——轮转/归档/保留清理都在内核里）。
+  const logging = loggingKernel({ home, files: { shell: logFile, webview: webviewLogFile } })
+  // save_desktop_settings 触发的保留清理回执（取走即清；#232 命令契约）
+  let lastLogCleanup: { removedFiles: number; bytesFreed: number } | null = null
+  const shellLog = logging.shellSink({
+    // #228：stdout 镜像直接写 stdout，不走 console——主进程的 console 已被 installShellConsoleTee
+    // 包了一层，再走 console 会让同一行在 shell.log 里写两遍（裸行 + [shell log] 裸行）。
+    stdout: (line) => process.stdout.write(`${line}\n`),
+    onRotateLine: (info) => console.log(`[shell] 日志已归档：${info.archive}`),
   })
   // 页面控制台另写一份（旧壳路径 `$DSH_HOME/dsh-desktop-webview.log`，不镜像到 stdout）。
-  const pageLog = createLogSink({ file: webviewLogFile, bufferMs: 100 })
+  const pageLog = logging.pageSink()
 
-  const log = (line: string): void => {
-    shellLog.line(line)
-    options.onLog?.(line)
+  // 调用点统一走分级方法（log.debug/info/warn/error），结构化参数在调用时格式化；
+  // 写路径不做任何行内前缀解析（用户拍板：重构而非包装）。options.onLog（跟随者/测试钩子）
+  // 收到「[来源] [级别] 消息」最终文本。
+  const forwardLog = (source: string): Logger => {
+    const inner = logging.logger(source)
+    const tap = (level: LogLevel, message: string, args: readonly unknown[]): void => {
+      inner[level](message, ...args)
+      options.onLog?.(`[${source}] ${LEVEL_TAGS[level]} ${formatMessage(message, args)}`, level)
+    }
+    return {
+      debug: (message, ...args) => tap('debug', message, args),
+      info: (message, ...args) => tap('info', message, args),
+      warn: (message, ...args) => tap('warn', message, args),
+      error: (message, ...args) => tap('error', message, args),
+    }
   }
+  const log = forwardLog('shell')
+  const pageShellLog = forwardLog('page')
+  // 各域日志通道：来源即模块身份（#228）。壳自己的杂事走 log（source=shell）；
+  // 有独立归属的域各拿一条通道——写路径不再解析行内前缀。
+  const notifyLog = forwardLog('notify')
+  const updateLog = forwardLog('update')
+  const keepAwakeLog = forwardLog('keepawake')
+  const proxyLog = forwardLog('proxy')
+  const laneLog = forwardLog('lane')
+  const settingsLog = forwardLog('settings')
+  const profileLog = forwardLog('profile')
+  const hostLog = forwardLog('host')
+  const downloadsLog = forwardLog('downloads')
+  const exitLog = forwardLog('exit')
   /** D6：运行时回退提示先记着，notifier 建好后补发（回退发生在 notifier 创建之前） */
   let pendingRuntimeNote: string | null = null
 
   // ---- 设置：壳自己的一份（desktop-settings.json，旧壳的 settings.yaml 只读迁移一次）----
-  const loaded = loadSettings({ home, log })
+  const loaded = loadSettings({ home, log: settingsLog })
   const settings = options.settings ?? loaded.settings
+  // #221：日志级别/保留策略进内核（首次落设置；阈值有变更时内核会立刻跑一次保留清理）
+  const initialCleanup = logging.applySettings({
+    logLevel: settings.logLevel,
+    logRetentionDays: settings.logRetentionDays,
+    logMaxTotalMb: settings.logMaxTotalMb,
+  })
+  if (initialCleanup !== null) settingsLog.info(`日志保留清理：删 ${String(initialCleanup.removedFiles)} 份归档、释放 ${String(initialCleanup.bytesFreed)} 字节`)
+  lastLogCleanup = initialCleanup
   const provenance = [
     loaded.created ? '首次启动已落盘' : '',
     loaded.migrated ? '已从 settings.yaml 迁移' : '',
     loaded.recovered ? '原文件损坏，已备份重建' : '',
   ].filter((entry) => entry !== '')
-  log(`设置：${settingsSummary(settings)}${provenance.length > 0 ? `（${provenance.join('；')}）` : ''}`)
+  settingsLog.info(`设置：${settingsSummary(settings)}${provenance.length > 0 ? `（${provenance.join('；')}）` : ''}`)
 
   // 运行时选中：设置里的偏好版本（dsh_runtime）在这里生效；
   // 旧壳的 DSH_MODE / DSH_SHELL_RUNTIME_DIR 覆盖仍在 layout 内部处理。
@@ -281,22 +320,22 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     preferred: settings.dshRuntime,
   })
   options.onStage?.('layout')
-  log(
-    `运行时 = ${paths.runtimeDir}（${paths.runtimeKind}${paths.runtimeVersion === null ? '' : ` ${paths.runtimeVersion}`}）| dist = ${paths.distDir} | profile = ${paths.profile} | home = ${paths.home}`
+  profileLog.info(
+    `运行时 = ${paths.runtimeDir}（${paths.runtimeKind}${paths.runtimeVersion === null ? '' : ` ${paths.runtimeVersion}`}）| dist = ${paths.distDir} | profile = ${paths.profile} | home = ${paths.home}`,
   )
 
   if (paths.runtimeNote !== null) {
-    log(`运行时回退：${paths.runtimeNote}`)
+    profileLog.warn(`运行时回退：${paths.runtimeNote}`)
     // D6：notifier 在下面才建好，先记下，建好后补发
     pendingRuntimeNote = paths.runtimeNote
   }
   // 回收站：上一次卸载留下的运行时目录到这时才真删（旧壳 #114：直接删会动到与运行树
   // 共享 hardlink 的 ctime，触发 dsh 插件 rebuilt → 白屏），所以只能在 spawn 之前清。
-  const purgedTrash = purgeRuntimeTrash(paths.appSupport, log)
-  if (purgedTrash > 0) log(`运行时回收站：清理 ${String(purgedTrash)} 项（上一次卸载的残留）`)
+  const purgedTrash = purgeRuntimeTrash(paths.appSupport, profileLog)
+  if (purgedTrash > 0) profileLog.info(`运行时回收站：清理 ${String(purgedTrash)} 项（上一次卸载的残留）`)
   // 安装中断留下的临时目录（.staging-*）：扫描看不见但占磁盘，同样在 spawn 之前清
-  const purgedStaging = purgeStagingDirs(paths.appSupport, log)
-  if (purgedStaging > 0) log(`运行时安装残留：清理 ${String(purgedStaging)} 项（上次装到一半没装完的）`)
+  const purgedStaging = purgeStagingDirs(paths.appSupport, profileLog)
+  if (purgedStaging > 0) profileLog.info(`运行时安装残留：清理 ${String(purgedStaging)} 项（上次装到一半没装完的）`)
 
   // ---- 运行时下载安装：面板点「下载」→ 单飞装树（命令表只调 downloader，不自己 spawn）----
   // pnpm.cjs 随内置树分发（prepare:bundle 按 builtin-runtime.json 声明物化，#16）；包管理器跑在**我们的 Bun** 上。
@@ -308,7 +347,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     builtinDir,
     appSupport: paths.appSupport,
   })
-  if (pnpmCjs === null) log('运行时下载：没找到 pnpm.cjs（可用 DSH_SHELL_PNPM 指定），面板点下载会失败')
+  if (pnpmCjs === null) downloadsLog.warn('运行时下载：没找到 pnpm.cjs（可用 DSH_SHELL_PNPM 指定），面板点下载会失败')
   const downloader = createRuntimeDownloader({
     // #97：signal 是取消信号——面板点取消 → downloader.cancel() abort 它 → installRuntime 树级停树
     install: async (version, onProgress, signal) => {
@@ -317,7 +356,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         appSupport: paths.appSupport,
         bunPath,
         hasNode: Bun.which('node') !== null,
-        log,
+        log: profileLog,
       })
       // #79：手动/系统代理注入 pnpm 安装环境（childProxy 在下方 connect 段定义，下载时才执行）；
       // off = null → 不传 env，继承壳环境原样（与宿主 spawn 同语义：不动用户自己设的代理变量）
@@ -331,7 +370,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         env: proxy === null ? undefined : proxyEnvRecord(proxy),
         onProgress,
         signal,
-        onLog: log,
+        onLog: profileLog,
       })
     },
     record: (version, source) => {
@@ -341,7 +380,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         installed_at: Date.now(),
       })
     },
-    log,
+    log: downloadsLog,
   })
 
   // 运行时下载的唯一通知出口（#115 收全通知面）：托盘（service.download）与面板（download_runtime）
@@ -365,14 +404,15 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         builtinDir: resolveBuiltinRuntimeDir(env, { repoRoot: paths.repoRoot, resourcesDir: paths.resourcesDir }),
         appSupport: paths.appSupport,
       }),
-      log,
+      log: profileLog,
     }) ?? undefined
 
   // ---- 页面 origin 端口：固定 + 被占顺延（origin 是 localStorage 的隔离键）----
   const readClaims = async (): Promise<string> => {
     try {
       return await Bun.file(claimsFile).text()
-    } catch {
+    } catch (error) {
+      proxyLog.warn(`端口台账读取失败，按空表继续：${String(error)}`)
       return '[]'
     }
   }
@@ -382,9 +422,10 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   const portFree = (port: number): boolean => {
     for (const hostname of ['127.0.0.1', '0.0.0.0']) {
       try {
-        const probe = Bun.listen({ hostname, port, socket: { data() {}, open() {}, close() {} } })
+        const probe = Bun.listen({ hostname, port, socket: { data() { }, open() { }, close() { } } })
         probe.stop(true)
-      } catch {
+      } catch (error) {
+        proxyLog.warn(`端口 ${String(port)} 探测失败：${String(error)}`)
         return false
       }
     }
@@ -398,6 +439,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       process.kill(pid, 0)
       return true
     } catch {
+      proxyLog.debug(`进程存活探测失败，pid ${String(pid)} 按存活处理`)
       return pid === process.pid
     }
   }
@@ -410,7 +452,10 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     lastClaimed: previous?.port,
     isFree: portFree,
   })
-  if (pagePort === null) throw new Error('页面 origin 端口池已耗尽')
+  if (pagePort === null) {
+    proxyLog.error(`页面 origin 端口池已耗尽（上限 ${String(PAGE_PORT_SPAN)}）`)
+    throw new Error('页面 origin 端口池已耗尽')
+  }
   // 上游/lane 固定端口（旧壳公式，用户口径：不做随机端口与顺延）：
   //   上游 = env DSH_DESKTOP_PORT > profile_ports >（web 的遗留 port）> 3080/3081/3082+fnv%512
   //   lane = env DSH_MOBILE_LANE_PORT > profile_lane_ports >（web 的遗留 lane_port）> 3092/3093/3094+fnv%512
@@ -426,7 +471,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   taken.add(lanePort)
   const upstreamPort: number = profilePort(settings, paths.profile, env, taken)
   taken.add(upstreamPort)
-  log(`端口：页面 origin ${String(pagePort)} | dsh 上游 ${String(upstreamPort)} | 手机 lane ${String(lanePort)}`)
+  proxyLog.info(`端口：页面 origin ${String(pagePort)} | dsh 上游 ${String(upstreamPort)} | 手机 lane ${String(lanePort)}`)
   options.onStage?.('ports')
   const token = `tok-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`
 
@@ -434,9 +479,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 本次壳起的宿主有看门狗（runtime/parent-watch.mjs）兜底；上一次壳被 SIGKILL/崩溃后留下的
   // 孤儿只能靠台账在启动时清掉——它会一直占着会话（实机复现过）。
   const hostRegistryFile = env.DSH_SHELL_HOST_REGISTRY ?? join(home, 'shell-hosts.json')
-  const swept = sweepStaleHosts({ file: hostRegistryFile, log })
+  const swept = sweepStaleHosts({ file: hostRegistryFile, log: hostLog })
   if (swept.killed.length > 0 || swept.pruned.length > 0) {
-    log(`宿主台账清扫：杀掉孤儿 ${String(swept.killed.length)} 个、清理过期条目 ${String(swept.pruned.length)} 个`)
+    hostLog.info(`宿主台账清扫：杀掉孤儿 ${String(swept.killed.length)} 个、清理过期条目 ${String(swept.pruned.length)} 个`)
   }
   // ---- 宿主：Bun 起 dsh，自己拿端口并上报 { url, injections } ----
   // GUI（Finder/LaunchServices）启动只继承 launchd 的最小 PATH（/usr/bin:/bin:/usr/sbin:/sbin），
@@ -444,9 +489,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 的环境；这里同语义做一遍，并把结果也落到壳自己的 process.env（后续 spawn 都受益）。
   const loginShell = await readLoginShellEnvironment(env, { timeoutMs: resolveLoginShellTimeoutMs(env) })
   if (loginShell.failures.length > 0) {
-    log(`登录 shell 环境读取失败：${loginShell.failures.map((failure) => `${failure.shell}(${failure.reason})`).join('、')}——沿用继承环境`)
+    profileLog.warn(`登录 shell 环境读取失败：${loginShell.failures.map((failure) => `${failure.shell}(${failure.reason})`).join('、')}——沿用继承环境`)
   }
-  log(`PATH = ${loginShell.environment.PATH ?? '(空)'}`)
+  profileLog.debug(`PATH = ${loginShell.environment.PATH ?? '(空)'}`)
   for (const [key, value] of Object.entries(loginShell.environment)) process.env[key] = value
   const childEnv = loginShell.environment
 
@@ -480,10 +525,13 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       // 动态 import 拿不到具名导出时静默退回（宿主脚本里还有同款兜底）
       void import(bootUrl).then((boot) => {
         boot.initProfile(profileDir, ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
-        log(`profile 初始化（dsh initProfile）：${profileDir}`)
-      }).catch(() => {})
+        profileLog.info(`profile 初始化（dsh initProfile）：${profileDir}`)
+      }).catch((error: unknown) => {
+        profileLog.error(`profile 初始化失败（dsh initProfile）：${String(error)}`)
+      })
     } catch {
       // 运行时树还没就绪等场景：宿主脚本启动时会再兜底一次
+      profileLog.warn(`profile 初始化跳过：运行时树未就绪（${layout.runtimeDir}）`)
     }
   }
 
@@ -494,7 +542,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       home: paths.home,
       profile,
       runtimeModules: `${paths.runtimeDir}/node_modules`,
-      onLog: log,
+      onLog: profileLog,
     })
   }
   ensureProfileInitialised(paths)
@@ -511,40 +559,40 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onBusy: (profile, busy) => {
       const changed = arbiter.setBusy(profile, busy, Date.now())
       if (changed) {
-        log(`防休眠：${profile} ${busy ? '开始' : '结束'}跑会话 → ${arbiter.shouldHold() ? '持有断言' : '可释放'}`)
+        keepAwakeLog.debug(`防休眠：${profile} ${busy ? '开始' : '结束'}跑会话 → ${arbiter.shouldHold() ? '持有断言' : '可释放'}`)
       }
     },
     onNotify: (payload) => {
       const scenarioId = NOTIFY_TYPE_SCENARIOS[payload.type]
       if (scenarioId === undefined) {
-        log(`通知口收到未知类型 ${payload.type}，已忽略`)
+        notifyLog.warn(`通知口收到未知类型 ${payload.type}，已忽略`)
         return
       }
       notifier.notify(scenarioId, payload.body)
     },
-    onLog: log,
+    onLog: notifyLog,
   })
-  const keepAwake = createKeepAwake({ arbiter, log })
+  const keepAwake = createKeepAwake({ arbiter, log: keepAwakeLog })
   if (settings.preventSleep ?? true) keepAwake.start()
-  else log('防休眠：设置里已关闭（prevent_sleep = false）')
+  else keepAwakeLog.debug(`防休眠：设置里已关闭（prevent_sleep = false）`)
 
   // ---- 通知：决策在 notify-policy，这里只做「场景 → 投递」与宿主事件映射 ----
   // 旧壳 70 个调用点收敛到场景 id；新壳先接已有的调用点（宿主事件 + 服务健康 + 启动受阻）。
   // 通知权限：macOS 走我们自己的 UN 桥（旧壳 notify_un.rs 的等价物）——能读真实授权状态、
   // 能主动申请；Electrobun 只暴露投递，拿不到状态（面板上那个写死的「已授权」就是这么来的）。
-  const notifyBridge = options.notifyBridge ?? createNativeNotify({ log, env, execPath: process.execPath })
+  const notifyBridge = options.notifyBridge ?? createNativeNotify({ log: notifyLog, env, execPath: process.execPath })
   const notifier =
     options.notifier ??
     createNotifier({
       notifications: settings.notifications,
       home,
-      onLog: log,
+      onLog: notifyLog,
       isFocused: () => options.isWindowFocused?.(paths.profile) ?? false,
       show: notifyBridge.available
         ? (payload) => {
-            const ok = notifyBridge.post({ title: payload.title, body: payload.body, sound: payload.silent !== true })
-            if (!ok) log(`[notify] 原生桥拒绝投递：${payload.title}`)
-          }
+          const ok = notifyBridge.post({ title: payload.title, body: payload.body, sound: payload.silent !== true })
+          if (!ok) notifyLog.warn(`原生桥拒绝投递：${payload.title}`)
+        }
         : undefined,
     })
   if (pendingRuntimeNote !== null) {
@@ -555,19 +603,19 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     notifyBridge.start()
     // start() 是异步的（原生层要等系统回调），第一行日志只能报「当时快照」；
     // 1.5s 后再报一次真实状态，诊断时一眼能看出到底是未决定还是被拒。
-    const announce = (): void => {
+    const announce = (level: 'debug' | 'info'): void => {
       const permission = notifyBridge.status()
-      log(
-        `[notify-un] 通知权限：${permissionLabel(permission)}（${permissionHint(permission, options.platform ?? process.platform)}；err=${String(notifyBridge.lastError())}）`
+      notifyLog[level](
+        `通知权限：${permissionLabel(permission)}（${permissionHint(permission, options.platform ?? process.platform)}；err=${String(notifyBridge.lastError())}）`,
       )
     }
-    log(`[notify-un] 原生通知桥已就绪：${String(notifyBridge.libPath)}（权限：${permissionLabel(notifyBridge.status())}）`)
-    announce()
-    setTimeout(announce, 1_500).unref?.()
+    notifyLog.info(`原生通知桥已就绪：${String(notifyBridge.libPath)}（权限：${permissionLabel(notifyBridge.status())}）`)
+    announce('info')
+    setTimeout(() => { announce('debug') }, 1_500).unref?.()
   }
   // ②b 应用更新（#220 决策 11）：旧壳没有这个能力，是新增件——包住框架 Updater。
   // 拿不到更新源（dev 构建 / 未配 release.baseUrl）时只记日志，面板里显示「为什么不可用」。
-  const updater = options.updater ?? createUpdater({ log, env })
+  const updater = options.updater ?? createUpdater({ log: updateLog, env })
   updater.start()
   // ② 插件：把桌面壳插件（+ 手机侧，若在）挂进 profile 模块池，并写 `--patch` 注入清单。
   const staged = stagePlugins({
@@ -579,11 +627,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     muxHeartbeatMs: settings.muxHeartbeatMs,
     desktopLayoutOnPhones: settings.desktopLayoutOnPhones,
     env,
-    log,
-    warn: (line) => {
-      console.warn(`[shell] ${line}`)
-      log(line)
-    },
+    log: profileLog,
   })
   let patchFiles = [staged.injectFile]
   // remote 视图 token（#47）：铸给 mobile-access 远程命令桥；守护器重启宿主时沿用同一枚
@@ -600,7 +644,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
    * 每次 spawn 现算——面板改完代理重启服务面就生效。
    */
   const childProxy = (): ProxyEnv | null =>
-    resolveProxyEnv(liveSettings, detectSystemProxy({ platform: process.platform, env: childEnv, log }))
+    resolveProxyEnv(liveSettings, detectSystemProxy({ platform: process.platform, env: childEnv, log: proxyLog }))
   // ---- 端口认领判定（旧壳 decide_claim：启动前判定，free 才自动拉起）----
   const upstreamOpen = await portOpen(upstreamPort)
   const oursAlive = readHostRecords(hostRegistryFile).some(
@@ -622,16 +666,15 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     shouldConnect = true
   } else if (decision === 'foreign-unknown') {
     blockedMessage = `端口 ${String(upstreamPort)} 被其他实例或程序占用（profile=${paths.profile}），已停止自动拉起；可在设置中调整该 profile 的端口后重试`
-    log(`[shell] ${blockedMessage}`)
+    proxyLog.warn(blockedMessage)
   } else {
     // 端口被占（本壳旧实例 / 外部 dsh web）：自动清场后由壳自拉（不再弹「兼容 / 高级」弹框）
-    const freed = await stopPortOwner({ port: upstreamPort, log })
+    const freed = await stopPortOwner({ port: upstreamPort, log: proxyLog })
     if (freed) {
-      log(`[shell] 已清理 127.0.0.1:${String(upstreamPort)} 上的旧实例，由壳重新拉起上游`)
+      proxyLog.info(`已清理 127.0.0.1:${String(upstreamPort)} 上的旧实例，由壳重新拉起上游`)
       shouldConnect = true
     } else {
       blockedMessage = `端口 ${String(upstreamPort)} 清理失败，仍被其他程序占用（profile=${paths.profile}）；可在设置中调整该 profile 的端口后重试`
-      log(`[shell] ${blockedMessage}`)
     }
   }
   options.onStage?.('cookie')
@@ -655,13 +698,13 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 页面 origin 的请求由壳自己的反代补 cookie，所以它不需要这里带。
   const downloads = createDownloadManager({
     home,
-    log,
+    log: downloadsLog,
     notify: (filename) => notifier.notify(SCENARIO.DOWNLOAD_COMPLETE, filename, '下载完成'),
     chooseDirectory: options.chooseDownloadDir,
     concurrency: liveSettings.downloadConcurrency,
     saveConcurrency: (value) => {
       // 注意：这条写路径绕过 saveSettings——新增「需即时生效」的开关键必须改走 saveSettings，否则壳侧裁决器/循环不同步。
-      liveSettings = updateSettings(home, { download_concurrency: value }, log)
+      liveSettings = updateSettings(home, { download_concurrency: value }, settingsLog)
     },
     cookieFor: (url) => {
       if (serverOptions.cookie === undefined || serverOptions.cookie === '') return null
@@ -669,6 +712,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         const origin = new URL(url).origin
         if (origin === serverOptions.upstreamOrigin) return serverOptions.cookie
       } catch {
+        downloadsLog.debug(`upstream URL 解析失败：${url}`)
         return null
       }
       return null
@@ -707,6 +751,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     // #128：聚合档位读内存单写者（saveSettings 每次重新赋值 liveSettings）——切档即时生效，热路径零磁盘 IO。
     aggregation: () => liveSettings.loopbackAggregation ?? DEFAULT_LOOPBACK_AGGREGATION,
     onLog: log,
+    // 上游转发域（代理/慢响应/跟随者）单独一条通道：消息保留自己的来源，不再靠行内前缀区分。
+    onProxyLog: proxyLog,
     onRpc: async (raw, grant) => {
       if (rpcRouter === null) return { status: 503, body: { ok: false, error: 'shell rpc not ready' } }
       return await dispatchRpc(
@@ -723,7 +769,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     cookie: () => serverOptions.cookie,
     openExternal: options.onOpenExternal,
     theme: () => readShellTheme(paths.home, paths.profile),
-    log,
+    log: hostLog,
   })
   options.onStage?.('server')
   // #101：从这里起 boot 载荷可写；宿主后续推送的注入清单经 supervisor onInjections 转交刷新（不丢）
@@ -731,7 +777,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 手机稳定接入点（旧壳 forwarder.rs #94）：监听遗留 lane 端口（laneForwarderPort > lanePort > 3091），
   // 新连接落本实例的 lane；外部 dsh 占了端口时退场（手机直连它即可）。多实例下只有先起的那份
   // 服务面拿得到转发器（同端口第二绑定必失败），index.ts 的焦点切换会找到它更新目标。
-  const forwarder = startLaneForwarder({ port: settings.laneForwarderPort ?? settings.lanePort ?? 3091, log })
+  const forwarder = startLaneForwarder({ port: settings.laneForwarderPort ?? settings.lanePort ?? 3091, log: laneLog })
   forwarder?.setTarget(lanePort)
   const pageUrl = `${server.origin}/${token}/`
 
@@ -821,11 +867,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       notify: { port: notifyServer.port, token: notifyServer.token },
       retryExisting: existsSync(`${paths.home}/profiles/${paths.profile}/package.json`),
     }),
-    log,
+    log: hostLog,
     notify: (scenario, body) => notifier.notify(scenario, body),
     onInjections: (rows) => {
       if (bootPayloadLive) bootPayload.injections = [...rows]
-      log(`[shell] 注入清单更新：injections = ${String(rows.length)}（宿主图重算，boot 载荷已刷新）`)
+      hostLog.info(`注入清单更新：injections = ${String(rows.length)}（宿主图重算，boot 载荷已刷新）`)
     },
     onHost: applyHost,
     onRestart: () => {
@@ -887,8 +933,15 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       port: state.notifyPort,
     },
     logs: {
-      shell: describeLogFile(logFile),
-      webview: describeLogFile(pageLogPath),
+      shell: logging.fileStat('shell'),
+      webview: logging.fileStat('webview'),
+      relay: logging.fileStat('relay'),
+      archive: (() => {
+        const rows = logging.archiveRows()
+        return { dir: logging.archiveDir, files: rows.length, bytes: rows.reduce((sum, row) => sum + row.bytes, 0) }
+      })(),
+      level: logging.level(),
+      health: logging.health(),
       tail: shellLog.tail(DIAG_TAIL_LINES),
     },
     process: {
@@ -907,21 +960,32 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   /** 页面控制台一条消息：写 `dsh-desktop-webview.log`；warn/error 另镜像一份到壳日志（旧壳同口径） */
   const logPageConsole = (input: { level: string; msg: string; pageUrl: string | null }): void => {
     const level = classifyLevel(input.level)
-    for (const line of pageLogLines({ level, msg: input.msg, pageUrl: input.pageUrl })) pageLog.write(`${line}\n`)
-    if (mirrorToShellLog(level)) log(`[page.${level}] ${input.msg.split('\n')[0] ?? ''}`)
+    pageLog.writeLines(pageLogLines({ level, msg: input.msg, pageUrl: input.pageUrl }), pageLevelToLogLevel(level))
+    if (mirrorToShellLog(level)) {
+      const mirrored = pageLevelToLogLevel(level)
+      if (mirrored === 'warn' || mirrored === 'error') pageShellLog[mirrored](input.msg.split('\n')[0] ?? '')
+    }
   }
 
   // #117：registerHost / supervise 跟着 ensureRunning 走了 —— 它们描述的是「宿主在跑」这件事，
   // 而 startService 现在只负责把服务面立起来。端口台账（writeClaim）与诊断快照仍在这里。
-  log(`端口台账：${JSON.stringify(claims)}`)
+  proxyLog.debug(`端口台账：${JSON.stringify(claims)}`)
   options.onStage?.('ready')
-// #117：'ready' 阶段不再在这里推 —— 它得等 DSH 真的就绪，由 ensureRunning() 推（启动界面据此收尾）。
+  // #117：'ready' 阶段不再在这里推 —— 它得等 DSH 真的就绪，由 ensureRunning() 推（启动界面据此收尾）。
 
 
   // 写设置的唯一路径：命令表（设置面板）与壳侧（托盘切运行时）都走它
   const saveSettings = (patch: Record<string, unknown>): DesktopSettings => {
     const before = liveSettings
-    liveSettings = updateSettings(home, patch, log)
+    liveSettings = updateSettings(home, patch, settingsLog)
+    // #221：日志级别/保留热切换（Decision 1/6）——阈值变更立刻触发一次保留清理，回执带给面板
+    const cleanup = logging.applySettings({
+      logLevel: liveSettings.logLevel,
+      logRetentionDays: liveSettings.logRetentionDays,
+      logMaxTotalMb: liveSettings.logMaxTotalMb,
+    })
+    if (cleanup !== null) settingsLog.info(`日志保留清理：删 ${String(cleanup.removedFiles)} 份归档、释放 ${String(cleanup.bytesFreed)} 字节`)
+    lastLogCleanup = cleanup
     // config.info（端口保存等低危信息）：只有真动了端口键才提示一句，普通保存不打扰。
     const changedPorts = changedPortKeys(before, liveSettings)
     if (changedPorts.length > 0) {
@@ -947,7 +1011,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       appSupport: paths.appSupport,
       runtimeRoot: paths.runtimeDir,
       env: childEnv,
-      log,
+      log: profileLog,
     })
     if (!result.ok) throw new Error(result.error)
     return `${profile}：依赖已重建`
@@ -965,12 +1029,12 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     const next = layout({ env, profile: paths.profile, preferred: liveSettings.dshRuntime })
     if (next.unresolved !== null) {
       supervisor.setStatus('failed', next.unresolved)
-      log(`运行时切换失败：${next.unresolved}（保持当前运行时不动）`)
+      profileLog.error(`运行时切换失败：${next.unresolved}（保持当前运行时不动）`)
       throw new Error(next.unresolved)
     }
     if (next.runtimeDir !== paths.runtimeDir) {
-      log(
-        `运行时切换：${paths.runtimeVersion ?? paths.runtimeDir} → ${next.runtimeVersion ?? next.runtimeDir}（${next.runtimeKind}）`
+      profileLog.info(
+        `运行时切换：${paths.runtimeVersion ?? paths.runtimeDir} → ${next.runtimeVersion ?? next.runtimeDir}（${next.runtimeKind}）`,
       )
     }
     Object.assign(paths, next)
@@ -1000,7 +1064,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     // 布局/运行时一个都解析不出来：没有可启动的宿主。服务面照样在，原因说清楚就行。
     if (paths.unresolved !== null) {
       supervisor.setStatus('failed', paths.unresolved)
-      log(`[shell] dsh 起不来：${paths.unresolved}`)
+      log.error(`dsh 起不来：${paths.unresolved}`)
       throw new Error(paths.unresolved)
     }
     supervisor.setStatus('starting')
@@ -1018,7 +1082,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       const reason = error instanceof Error ? error.message : String(error)
       dshStatusCode = 5
       supervisor.setStatus('failed', reason)
-      log(`[shell] dsh 未起来：${reason}（服务面仍在：托盘/设置/切换运行时/退出都可用）`)
+      log.error(`dsh 未起来：${reason}（服务面仍在：托盘/设置/切换运行时/退出都可用）`)
       throw error
     } finally {
       starting = null
@@ -1038,7 +1102,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // ---- #142：启动后那次后台更新检查 ----
   // 判定/去重/记账都在纯逻辑层（shared/update-notice-policy.ts + #138 的判定层），这里只接两路探针。
   // app-support/update-notice.json 是服务面自己的落点——它不在 desktop-settings.json 里（键名是契约红线）。
-  const updateNoticeStore = createUpdateNoticeStore(paths.appSupport, log)
+  const updateNoticeStore = createUpdateNoticeStore(paths.appSupport, updateLog)
 
   /**
    * 未下载候选的「装得上吗」闸门（#139 两次实机修）：目录说有 ≠ 装得上。
@@ -1056,7 +1120,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
    */
   const installableGate = async (candidates: readonly string[]): Promise<readonly string[] | null> => {
     if (candidates.length === 0) return null
-    return installableVersions(await runtimeInstallability({ versions: candidates, log }))
+    return installableVersions(await runtimeInstallability({ versions: candidates, log: updateLog }))
   }
   // 启动那次与托盘手动那次共用这份依赖；差别只有 trigger（#141）。
   const checkUpdates = async (trigger: 'startup' | 'manual'): Promise<UpdateNoticeCheckResult> => {
@@ -1074,7 +1138,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       probeRuntime: async () => {
         const snapshot = runtimeSnapshot()
         const source = liveSettings.runtimeSource ?? DEFAULT_CATALOG_SOURCE
-        const catalog = await fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log })
+        const catalog = await fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log: updateLog })
         const base = {
           running: snapshot.activeVersion,
           builtin: snapshot.builtinVersion,
@@ -1101,7 +1165,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         theme: readShellTheme(paths.home, paths.profile),
       }),
       open: open ?? (() => false),
-      log,
+      log: updateLog,
     })
   }
   // #139：提醒卡动作的依赖全部指向**已有**能力——壳下载走 updater，运行时下载走同一个单飞下载器，
@@ -1138,7 +1202,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     save: saveSettings,
     runtime: () => runtimeSnapshot(),
     fetchCatalog: (source) =>
-      fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log }),
+      fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log: updateLog }),
     downloadStatus: () => downloader.status(),
     download: downloadRuntimeNotified,
     // #97：托盘与面板共用同一个取消口，取消后两边都从轮询快照看到 cancelled 终态
@@ -1185,9 +1249,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
               runtimeRoot: paths.runtimeDir,
               env: childEnv,
               preferOffline: true,
-              log,
+              log: profileLog,
             }),
-          log,
+          log: profileLog,
           track: taskTracker,
         })
         options.onProfileOpApplied?.('migrate', target)
@@ -1200,7 +1264,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       }
     },
     onProfileOpApplied: (op, profile) => {
-      log(`[profile-op] ${op} ${profile} 完成`)
+      profileLog.info(`${op} ${profile} 完成`)
     },
     restartHost: async () => {
       // 设置面板切了运行时版本：这里重新解析选中项（同一个 paths 对象就地更新，
@@ -1236,15 +1300,17 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         // 插件链接要拆掉（item 9，旧壳 cleanup_desktop_plugin_links 的等价物）：
         // 不拆的话，用户回头用旧壳/别的安装时 profile 池里会留一份悬空 symlink。
         try {
-          cleanupStagedPlugins(staged.staged, log)
+          cleanupStagedPlugins(staged.staged, exitLog)
         } catch (error) {
-          log(`[exit] 清理插件链接失败：${String(error)}`)
+          exitLog.warn(`清理插件链接失败：${String(error)}`)
         }
         // 同样先重读：退出时只能摘掉自己那一行，别人的行要留着
         const next = releaseClaim(parseClaims(await readClaims()), claimProfile)
         try {
           await Bun.write(claimsFile, `${JSON.stringify(next, null, 2)}\n`)
-        } catch {}
+        } catch (error) {
+          proxyLog.error(`端口台账写入失败（端口认领可能丢失）：${String(error)}`)
+        }
       })()
       return await stopping
     },
@@ -1266,7 +1332,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       // 不静默回落成 restartHost——那正是本票要修的那个「以为重启了其实没重跑」的假象。
       restartApp: async () => {
         if (options.onRestartApp === undefined) {
-          log('[shell] 重启桌面应用：当前无壳层入口（无窗口模式），未执行')
+          log.warn(`重启桌面应用：当前无壳层入口（无窗口模式），未执行`)
           return { ok: false, reason: 'unavailable', message: '当前运行模式不支持自动重启桌面应用，请手动重启。' }
         }
         return options.onRestartApp()
@@ -1286,16 +1352,16 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         const command = systemDefaultSoundCommand(options.platform ?? process.platform)
         if (command === null) {
           // 没有后端就如实回 false：面板会提示「本机不支持」，不再假报成功（#74）
-          log('[notify] 系统默认提示音：本机没有可用播放后端，未出声')
+          notifyLog.warn(`系统默认提示音：本机没有可用播放后端，未出声`)
           return false
         }
         try {
           const child = Bun.spawn(command, { stdout: 'ignore', stderr: 'ignore' })
           child.unref?.()
-          log(`[notify] 试听系统提示音：${command.join(' ')}（pid = ${String(child.pid)}）`)
+          notifyLog.info(`试听系统提示音：${command.join(' ')}（pid = ${String(child.pid)}）`)
           return true
         } catch (error) {
-          log(`[notify] 系统音试听失败：${error instanceof Error ? error.message : String(error)}`)
+          notifyLog.warn(`系统音试听失败：${error instanceof Error ? error.message : String(error)}`)
           return false
         }
       },
@@ -1309,9 +1375,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       dshVersion: () => paths.runtimeVersion ?? basename(paths.runtimeDir),
       runtime: () => runtimeSnapshot(),
       fetchCatalog: (source) =>
-        fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log }),
+        fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log: updateLog }),
       removeRuntime: async (version) => {
-        trashInstalledRuntime(paths.appSupport, version, log)
+        trashInstalledRuntime(paths.appSupport, version, profileLog)
       },
       downloadRuntime: downloadRuntimeNotified,
       downloadStatus: () => downloader.status(),
@@ -1324,9 +1390,41 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
           home,
           snapshot,
           now: new Date(),
-          reveal: (path) => revealPath(path, log),
-          log,
+          reveal: (path) => revealPath(path, downloadsLog),
+          log: downloadsLog,
         }),
+      // #221 统一日志：三个日志管理命令的壳侧实现（内核就是上面的进程级单例）
+      logging: {
+        list: (reveal) => {
+          const rows = logging.archiveRows()
+          const snapshot = {
+            archive_dir: logging.archiveDir,
+            level: logging.level(),
+            archives: rows.map((row) => ({ name: row.name, source: row.source, day: row.day, seq: row.seq, bytes: row.bytes })),
+            active: (['shell', 'webview', 'relay'] as const).map((source) => ({ source, ...logging.fileStat(source) })),
+            health: { io_error_count: logging.health().ioErrorCount, last_io_error: logging.health().lastIoError },
+          }
+          if (reveal) revealPath(snapshot.archive_dir, downloadsLog)
+          return snapshot
+        },
+        exportRange: (args, destDir) => {
+          const range = resolveRangePreset(args.range, args.from, args.to, new Date())
+          const result = exportLogRange({ kernel: logging, destDir, range, now: new Date() })
+          return { path: result.path, bytes: result.bytes, approximations: result.approximations, archives_included: result.archivesIncluded }
+        },
+        clear: () => {
+          const receipt = logging.clearLogs()
+          return { removed_files: receipt.removedFiles, bytes_freed: receipt.bytesFreed }
+        },
+        takeCleanupReceipt: () => {
+          const receipt = lastLogCleanup
+          lastLogCleanup = null
+          return receipt === null ? null : { removed_files: receipt.removedFiles, bytes_freed: receipt.bytesFreed }
+        },
+        // 导出目标目录：沿用下载的「选目录 + 自动起名」既有范式（Electrobun 无保存对话框）
+        chooseDir: () => options.chooseDownloadDir?.(home) ?? Promise.resolve(null),
+        reveal: (path) => revealPath(path, downloadsLog),
+      },
       downloadDir: join(env.HOME ?? home, 'Downloads'),
       // ---- profile 运维与启动检查（旧壳 commands.rs 的对应命令）----
       startupChecked: () => startupChecked,
@@ -1370,9 +1468,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
               runtimeRoot: paths.runtimeDir,
               env: childEnv,
               preferOffline: true,
-              log,
+              log: profileLog,
             }),
-          log,
+          log: profileLog,
           track: taskTracker,
         })
         return next
@@ -1405,7 +1503,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       // #136：启动更新提醒的开关与拉黑列表（落 app-support/update-notice.json，不动设置键名）
       updateNotice: updateNoticeStore,
       // 面板展示与真实注入同源：一样走 scutil / 注册表 / 环境变量三级检测。
-      proxyEffective: () => resolveProxyEnv(liveSettings, detectSystemProxy({ platform: process.platform, env: childEnv, log })),
+      proxyEffective: () => resolveProxyEnv(liveSettings, detectSystemProxy({ platform: process.platform, env: childEnv, log: proxyLog })),
     }),
   )
   return service

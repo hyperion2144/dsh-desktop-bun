@@ -38,7 +38,9 @@ export const inject = [
 function installWebviewConsoleMirror(): void {
   // 壳 RPC 统一通道（#50）：官方桥/中继/同源 fetch 三选一，均不通则 no-op（保留原 console 行为）。
   const invoke = (cmd: CommandName, args: unknown): void => {
-    void shellRpc.invoke(cmd, args as Record<string, unknown>).catch(() => {})
+    void shellRpc.invoke(cmd, args as Record<string, unknown>).catch((error: unknown) => {
+      console.warn(`[dsh-desktop-tauriapp] 页面日志镜像通道不可用：${String(error)}`)
+    })
   }
   // 攒批上报（#54 数据面聚合）：多条 console 合并成一次 RPC（log_console_batch），壳侧
   // 逐条落盘路径不变；旧壳没有批量命令时（reject）自动退回逐条 log_console。
@@ -172,7 +174,9 @@ export function apply(ctx: ClientContext): void {
       .then((environment) => {
         if (environment !== undefined) applyAdvancedShell(ctx, environment)
       })
-      .catch(() => {})
+      .catch((error: unknown) => {
+        console.warn(`[dsh-desktop-tauriapp] 插件激活步骤失败（${step}）：${String(error)}`)
+      })
   } catch (error) {
     console.error(`[dsh-desktop-tauriapp] 插件激活失败于「${step}」`, error)
     throw error

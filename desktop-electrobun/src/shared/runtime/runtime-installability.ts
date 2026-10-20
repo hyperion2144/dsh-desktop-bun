@@ -19,6 +19,7 @@
  * 宁可静默，不承诺点不动的按钮。
  */
 import { NPM_PACKAGE } from './runtime-catalog.ts'
+import type { Logger } from '../logging/levels.ts'
 
 export const NPM_REGISTRY_ORIGIN = 'https://registry.npmjs.org'
 
@@ -39,7 +40,7 @@ export interface InstallabilityInput {
   timeoutMs?: number
   /** 全局在飞请求上限，默认 8。 */
   concurrency?: number
-  log?: (line: string) => void
+  log?: Logger
 }
 
 interface PackageDoc {
@@ -160,10 +161,10 @@ export async function runtimeInstallability(input: InstallabilityInput): Promise
   const settled = await Promise.all(versions.map(async (version) => [version, await verify(version)] as const))
   for (const [version, verdict] of settled) {
     verdicts.set(version, verdict)
-    input.log?.(
+    input.log?.debug(
       verdict.ok
-        ? `[update-notice] ${version} 的第一方依赖都齐了，可以装`
-        : `[update-notice] ${version} 先不提醒：${verdict.error ?? `上游还没发全（缺 ${verdict.missing.join('、')}）`}`,
+        ? `${version} 的第一方依赖都齐了，可以装`
+        : `${version} 先不提醒：${verdict.error ?? `上游还没发全（缺 ${verdict.missing.join('、')}）`}`,
     )
   }
   return verdicts

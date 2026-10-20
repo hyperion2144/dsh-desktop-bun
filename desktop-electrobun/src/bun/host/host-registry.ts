@@ -8,6 +8,7 @@
 // 语义：host-gone ⇒ 只清条目；shell-gone ⇒ 宿主是孤儿，杀掉再清条目。
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import type { Logger } from '../../shared/logging/levels.ts'
 
 export interface HostRecord {
   hostPid: number
@@ -79,14 +80,16 @@ export function readHostRecords(file: string): HostRecord[] {
 export function writeHostRecords(file: string, records: readonly HostRecord[]): void {
   try {
     writeFileSync(file, `${JSON.stringify(records, null, 2)}\n`)
-  } catch {}
+  } catch (error) {
+    console.error(`[shell] 宿主台账写入失败（孤儿宿主将无法回收）：${String(error)}`)
+  }
 }
 
 export interface SweepOptions {
   file: string
   isAlive?: (pid: number) => boolean
   kill?: (pid: number) => void
-  log?: (line: string) => void
+  log?: Logger
 }
 
 export interface SweepResult {
@@ -110,7 +113,7 @@ export function defaultIsAlive(pid: number): boolean {
 /** 启动时调用：杀掉上一次壳留下的孤儿宿主，清掉过期条目，写回台账。 */
 export function sweepStaleHosts(options: SweepOptions): SweepResult {
   const isAlive = options.isAlive ?? defaultIsAlive
-  const log = options.log ?? (() => {})
+  const log: Logger | undefined = options.log
   const records = readHostRecords(options.file)
   const stale = selectStaleHosts(records, isAlive)
   const killed: number[] = []
@@ -126,9 +129,9 @@ export function sweepStaleHosts(options: SweepOptions): SweepResult {
     try {
       ;(options.kill ?? ((pid: number) => process.kill(pid, 'SIGTERM')))(entry.record.hostPid)
       killed.push(entry.record.hostPid)
-      log(`清扫孤儿宿主：pid = ${String(entry.record.hostPid)}（壳 pid ${String(entry.record.shellPid)} 已不在）`)
+      log?.debug(`清扫孤儿宿主：pid = ${String(entry.record.hostPid)}（壳 pid ${String(entry.record.shellPid)} 已不在）`)
     } catch (error) {
-      log(`清扫孤儿宿主失败：pid = ${String(entry.record.hostPid)}（${String(error)}）`)
+      log?.warn(`清扫孤儿宿主失败：pid = ${String(entry.record.hostPid)}（${String(error)}）`)
     }
   }
   if (stale.length > 0) writeHostRecords(options.file, remaining)

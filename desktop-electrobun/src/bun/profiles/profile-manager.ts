@@ -33,6 +33,8 @@ import {
 import { parseSimpleYaml } from '../platform/settings-store.ts'
 import { profileDirOf } from './profile-scaffold.ts'
 import { ensureNodeShim, pickInstallerErrorTail, resolvePnpmCjs, tailLines } from '../runtime/runtime-install.ts'
+import type { Logger } from '../../shared/logging/levels.ts'
+import { NOOP_LOGGER } from '../../shared/app/noop-log.ts'
 
 export interface ProfileHealth extends StartupHealth {
   /** 目录在磁盘上的绝对路径（诊断/修复用）。 */
@@ -96,7 +98,7 @@ export interface InstallProfileInput {
   env?: Record<string, string | undefined>
   /** 迁移重建用 true（lockfile 常落后于 package.json）。 */
   preferOffline?: boolean
-  log?: (line: string) => void
+  log?: Logger
   timeoutMs?: number
 }
 
@@ -107,7 +109,7 @@ const INSTALL_TIMEOUT_MS = 15 * 60_000
  * 新壳的包管理器跑在我们的 Bun 上，#211 的结论）。CI=true 防交互挂起；必须显式关 frozen。
  */
 export async function installProfileDependencies(input: InstallProfileInput): Promise<InstallResult> {
-  const log = input.log ?? ((): void => {})
+  const log: Logger = input.log ?? NOOP_LOGGER
   const env = input.env ?? process.env
   const dir = profileDirOf(input.home, input.profile)
   // 新建 profile 时目录还不存在：`Bun.spawn` 的 cwd 指向不存在的目录会直接抛 ENOENT（旧壳先 mkdir）。
@@ -118,7 +120,10 @@ export async function installProfileDependencies(input: InstallProfileInput): Pr
     builtinDir: input.builtinDir ?? null,
     appSupport: input.appSupport,
   })
-  if (pnpmCjs === null) return { ok: false, error: '找不到 pnpm.cjs（可用 DSH_SHELL_PNPM 指定内置的那份）' }
+  if (pnpmCjs === null) {
+    log.error('profile 依赖重建：找不到 pnpm.cjs（可用 DSH_SHELL_PNPM 指定内置的那份）')
+    return { ok: false, error: '找不到 pnpm.cjs（可用 DSH_SHELL_PNPM 指定内置的那份）' }
+  }
   const bunPath = input.bunPath ?? process.execPath
   // pnpm 的构建脚本会找 PATH 上叫 node 的命令（node-pty 之类）：没有 node 就放 Bun 垫片
   const shimDir = ensureNodeShim({
@@ -132,7 +137,7 @@ export async function installProfileDependencies(input: InstallProfileInput): Pr
   if (existing !== '') pathParts.push(existing)
   const args = ['install', '--no-frozen-lockfile']
   if (input.preferOffline === true) args.push('--prefer-offline')
-  log(`profile 依赖重建：${dir}（pnpm = ${pnpmCjs}）`)
+  log.debug(`profile 依赖重建：${dir}（pnpm = ${pnpmCjs}）`)
   const started = Date.now()
   let child: Bun.Subprocess<'ignore', 'pipe', 'pipe'>
   try {
@@ -152,12 +157,12 @@ export async function installProfileDependencies(input: InstallProfileInput): Pr
     child.exited,
   ])
   if (code === 0) {
-    log(`profile 依赖重建完成：${input.profile}（${String(Math.round((Date.now() - started) / 1000))}s）`)
+    log.info(`profile 依赖重建完成：${input.profile}（${String(Math.round((Date.now() - started) / 1000))}s）`)
     return { ok: true, error: '' }
   }
   const tail = pickInstallerErrorTail(stderr, stdout)
   const message = tail === '' ? `${tailLines(stdout + stderr, 6)}` : tail
-  log(`profile 依赖重建失败：exit=${String(code)}｜${message}`)
+  log.error(`profile 依赖重建失败：exit=${String(code)}｜${message}`)
   return { ok: false, error: `依赖重建失败（内置 pnpm install）：${message}` }
 }
 
@@ -301,14 +306,14 @@ export interface MigrateProfileInput {
   /** 当前被本壳使用的 profile：等于 dest 时拒绝（旧壳行为）。 */
   activeProfile: string | null
   install: () => Promise<InstallResult>
-  log?: (line: string) => void
+  log?: Logger
   now?: () => number
   track?: TaskTracker
 }
 
 /** 迁移 profile（旧壳 `migrate_profile_inner`）。返回给页面的一句话总结。 */
 export async function migrateProfile(input: MigrateProfileInput): Promise<string> {
-  const log = input.log ?? ((): void => {})
+  const log: Logger = input.log ?? NOOP_LOGGER
   const track = input.track
   const fail = (message: string): never => {
     track?.finish(message, '')
@@ -370,7 +375,7 @@ export async function migrateProfile(input: MigrateProfileInput): Promise<string
     skipped: stats.skipped,
     backup,
   })
-  log(`[migrate] ${summary}`)
+  log.info(summary)
   track?.finish(null, summary)
   return summary
 }

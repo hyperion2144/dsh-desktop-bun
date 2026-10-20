@@ -24,6 +24,8 @@
 import { dlopen, FFIType } from 'bun:ffi'
 import type { Arbiter } from '../../shared/app/power-arbiter.ts'
 import { LEASE_STALE_MS } from '../../shared/app/power-arbiter.ts'
+import type { Logger } from '../../shared/logging/levels.ts'
+import { NOOP_LOGGER } from '../../shared/app/noop-log.ts'
 
 /** tick 周期：开关/忙状态变化到断言落地的最坏延迟（旧壳同值）。 */
 export const TICK_MS = 1_000
@@ -118,7 +120,7 @@ export interface AwakeChild {
 export interface KeepAwakeOptions {
   arbiter: Arbiter
   platform?: NodeJS.Platform
-  log?: (line: string) => void
+  log?: Logger
   tickMs?: number
   /** 壳自己的 pid（macOS `caffeinate -w` 用；缺省 `process.pid`）。 */
   pid?: number
@@ -178,7 +180,7 @@ function defaultWindowsAssert(): WindowsAssert {
 export function createKeepAwake(options: KeepAwakeOptions): KeepAwake {
   const arbiter = options.arbiter
   const platform = options.platform ?? process.platform
-  const log = options.log ?? ((): void => {})
+  const log: Logger = options.log ?? NOOP_LOGGER
   const tickMs = options.tickMs ?? TICK_MS
   const pid = options.pid ?? process.pid
   const now = options.now ?? ((): number => Date.now())
@@ -208,7 +210,7 @@ export function createKeepAwake(options: KeepAwakeOptions): KeepAwake {
     const flags = hold ? ES_CONTINUOUS | ES_SYSTEM_REQUIRED : ES_CONTINUOUS
     const ok = assert(flags)
     windowsFailed = !ok
-    if (!ok) log('[keepawake] SetThreadExecutionState 失败（Windows 上未实测过这条路径）')
+    if (!ok) log.warn('SetThreadExecutionState 失败（Windows 上未实测过这条路径）')
   }
 
   const hold = (): void => {
@@ -216,13 +218,13 @@ export function createKeepAwake(options: KeepAwakeOptions): KeepAwake {
       if (child !== null) return
       // `-i` 只挡系统空闲休眠；`-w <pid>` 让断言随壳进程消失自动释放。
       child = spawnCommand(['caffeinate', '-i', '-w', String(pid)])
-      log(`[keepawake] 持有断言（${ASSERTION_NAME}）：caffeinate pid = ${String(child.pid)}`)
+      log.info(`持有断言（${ASSERTION_NAME}）：caffeinate pid = ${String(child.pid)}`)
       return
     }
     if (platform === 'win32') {
       windowsHeld = true
       applyWindows(true)
-      log(`[keepawake] 持有断言（${ASSERTION_NAME}）：SetThreadExecutionState`)
+      log.info(`持有断言（${ASSERTION_NAME}）：SetThreadExecutionState`)
       return
     }
     if (platform === 'linux') {
@@ -233,7 +235,7 @@ export function createKeepAwake(options: KeepAwakeOptions): KeepAwake {
         const reason = linuxReason ?? LINUX_NO_BACKEND_REASON
         if (lastLinuxReasonLogged !== reason) {
           lastLinuxReasonLogged = reason
-          log(`[keepawake] Linux 拿不到防休眠通道：${reason}`)
+          log.warn(`Linux 拿不到防休眠通道：${reason}`)
         }
         return
       }
@@ -241,7 +243,7 @@ export function createKeepAwake(options: KeepAwakeOptions): KeepAwake {
         const spawned = spawnCommand(linuxInhibitCommand(backend, ASSERTION_NAME, pid))
         child = spawned
         linuxBackend = backend
-        log(`[keepawake] 持有断言（${ASSERTION_NAME}）：${backend} pid = ${String(spawned.pid)}`)
+        log.info(`持有断言（${ASSERTION_NAME}）：${backend} pid = ${String(spawned.pid)}`)
         // 秒退判定：只有「还是当前持有的那个子进程」才算意外退出——正常释放路径先置
         // child = null 再 kill，退出回调看到的 child 已经不是它。
         void spawned.exited?.then((code) => {
@@ -253,7 +255,7 @@ export function createKeepAwake(options: KeepAwakeOptions): KeepAwake {
           linuxReason = `${backend} 启动后立即退出（exit=${String(code)}）`
           if (lastLinuxReasonLogged !== linuxReason) {
             lastLinuxReasonLogged = linuxReason
-            log(`[keepawake] Linux 拿不到防休眠通道：${linuxReason}`)
+            log.warn(`Linux 拿不到防休眠通道：${linuxReason}`)
           }
         })
       } catch (error) {
@@ -264,14 +266,14 @@ export function createKeepAwake(options: KeepAwakeOptions): KeepAwake {
         linuxReason = `${backend} 启动失败（${String(error)}）`
         if (lastLinuxReasonLogged !== linuxReason) {
           lastLinuxReasonLogged = linuxReason
-          log(`[keepawake] Linux 拿不到防休眠通道：${linuxReason}`)
+          log.warn(`Linux 拿不到防休眠通道：${linuxReason}`)
         }
       }
       return
     }
     if (!warnedPlatform) {
       warnedPlatform = true
-      log(`[keepawake] 本平台（${platform}）暂无防休眠实现——旧壳同样只覆盖 macOS/Windows`)
+      log.warn(`本平台（${platform}）暂无防休眠实现——旧壳同样只覆盖 macOS/Windows`)
     }
   }
 
@@ -283,7 +285,7 @@ export function createKeepAwake(options: KeepAwakeOptions): KeepAwake {
       try {
         dying.kill()
       } catch {}
-      log('[keepawake] 释放断言')
+      log.info('释放断言')
     }
     if (windowsHeld) {
       windowsHeld = false
@@ -302,7 +304,7 @@ export function createKeepAwake(options: KeepAwakeOptions): KeepAwake {
     if (stale.join(',') !== lastStale.join(',')) {
       lastStale = stale
       if (stale.length > 0) {
-        log(`[keepawake] 租约陈旧（心跳 ${String(LEASE_STALE_MS / 1000)}s 未到，仍按旧壳口径继续持有）：${stale.join('、')}`)
+        log.debug(`租约陈旧（心跳 ${String(LEASE_STALE_MS / 1000)}s 未到，仍按旧壳口径继续持有）：${stale.join('、')}`)
       }
     }
     return child !== null || windowsHeld

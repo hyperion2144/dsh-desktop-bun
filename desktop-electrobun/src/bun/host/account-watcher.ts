@@ -15,6 +15,7 @@
  */
 import { isOpenableLoginUrl, loginUrlToOpen, platformLoginUrl } from '../../shared/app/account-login.ts'
 import type { ShellThemePreference } from '../../shared/settings/shell-theme.ts'
+import type { Logger } from '../../shared/logging/levels.ts'
 
 /** 官方 REMOTE_STREAM_MUX_PATH 的同一条路径。 */
 export const REMOTE_MUX_PATH = '/api/remote.mux'
@@ -35,7 +36,7 @@ export interface AccountWatcherOptions {
   openExternal?: (url: string) => void
   /** 当前主题偏好；system 不带 theme 参数。缺省跟着不改地址。 */
   theme?: () => ShellThemePreference
-  log: (line: string) => void
+    log: Logger
   /** 重连间隔（测试可调）；缺省 1s，与官方 desktop 的重连节奏一致。 */
   retryMs?: number
   /** 测试注入 socket 工厂。 */
@@ -94,7 +95,7 @@ export function createAccountWatcher(options: AccountWatcherOptions): AccountWat
     try {
       current = createSocket(url.href, { cookie, origin: hostOrigin })
     } catch (error) {
-      log(`[account] 连宿主账号流失败：${error instanceof Error ? error.message : String(error)}`)
+        log.debug(`连宿主账号流失败：${error instanceof Error ? error.message : String(error)}`)
       scheduleRetry()
       return
     }
@@ -124,12 +125,12 @@ export function createAccountWatcher(options: AccountWatcherOptions): AccountWat
       openedAttempt = next.openedAttempt
       if (next.url === null) return
       if (!isOpenableLoginUrl(next.url)) {
-        log('[account] 授权地址不是可打开的外链，忽略')
+          log.warn('授权地址不是可打开的外链，忽略')
         return
       }
       const target = options.theme === undefined ? next.url : platformLoginUrl(next.url, options.theme())
       options.openExternal?.(target)
-      log(`[account] 登录等待中：授权页转系统浏览器 ${target}`)
+        log.info(`登录等待中：授权页转系统浏览器 ${target}`)
     })
     current.addEventListener('error', () => {
       try {
@@ -146,7 +147,7 @@ export function createAccountWatcher(options: AccountWatcherOptions): AccountWat
     start(): void {
       if (started || stopped || options.openExternal === undefined) return
       started = true
-      log(`[account] 主进程账号 watcher 启动（宿主 ${options.hostOrigin() || '未就绪'}）`)
+          log.info(`主进程账号 watcher 启动（宿主 ${options.hostOrigin() || '未就绪'}）`)
       connect()
     },
     stop(): void {

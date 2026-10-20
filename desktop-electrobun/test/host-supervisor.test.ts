@@ -14,6 +14,7 @@ import {
   type HostSpec,
   type HostSnapshot,
 } from '../src/bun/host/host-supervisor.ts'
+import { recordingLogger } from './helpers/test-logger.ts'
 import type { HostSupervisorDeps } from '../src/bun/host/host-supervisor.ts'
 import type { HostHandle } from '../src/bun/host/host.ts'
 import type { RestartLedger, RestartDecision } from '../src/bun/host/supervisor.ts'
@@ -127,7 +128,7 @@ const makeHarness = (over: {
     probePort: over.probePort,
     readyInitially: over.readyInitially,
     watchdogIntervalMs: over.watchdogIntervalMs ?? 60_000,
-    log: (line) => events.push(`log:${line}`),
+      log: recordingLogger((_level, message) => events.push(`log:${message}`)),
     notify: (scenario, body) => {
       notifyCalls.push({ scenario, body })
     },

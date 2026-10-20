@@ -124,8 +124,6 @@ function NotificationSettingsPanel(): React.ReactElement {
   }, [])
 
   const logFail = (e: unknown): void => {
-    const w = window as unknown as { __xnlLogWarn?: (m: string) => void }
-    w.__xnlLogWarn?.(String(e))
     console.warn('[notifications] 保存失败', e)
   }
 
@@ -158,7 +156,9 @@ function NotificationSettingsPanel(): React.ReactElement {
     setBusy(true)
     invokeCommand('request_notification_permission_cmd')
       .then(() => refresh())
-      .catch(() => {})
+      .catch((error: unknown) => {
+        console.warn(`[notifications] 通知权限申请失败：${String(error)}`)
+      })
       .finally(() => setBusy(false))
   }
 

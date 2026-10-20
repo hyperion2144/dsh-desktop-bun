@@ -7,6 +7,8 @@
 
 import { Tray } from 'electrobun/bun'
 import { parseTrayAction, trayMenu, trayTitle, type TrayAction, type TrayState } from './tray-menu.ts'
+import type { Logger } from '../../shared/logging/levels.ts'
+import { NOOP_LOGGER } from '../../shared/app/noop-log.ts'
 
 export interface TrayHandle {
   setState: (state: TrayState) => void
@@ -20,23 +22,23 @@ export interface CreateTrayOptions {
   onAction: (action: TrayAction) => void
   /** 左键单击托盘图标（不带菜单动作）：旧壳 focus_last_or_main（tray.rs:265-285，#181）——聚焦最后活跃窗口 */
   onEmptyClick?: () => void
-  log?: (line: string) => void
+  log?: Logger
 }
 
 /** 托盘图标按 18pt 渲染（Retina 上原生层会取 2x；给太小会糊）。 */
 const TRAY_ICON_SIZE = 18
 
 export function createTray(options: CreateTrayOptions): TrayHandle | null {
-  const log = options.log ?? ((): void => {})
+  const log: Logger = options.log ?? NOOP_LOGGER
   let tray: Tray
   try {
     tray = new Tray({ image: options.image, template: false, width: TRAY_ICON_SIZE, height: TRAY_ICON_SIZE })
   } catch (error) {
-    log(`[shell] 托盘创建失败（继续无托盘运行）：${String(error)}`)
+    log.warn(`托盘创建失败（继续无托盘运行）：${String(error)}`)
     return null
   }
   if (!tray.visible) {
-    log('[shell] 托盘不可用（原生层没建成），继续无托盘运行')
+    log.warn('托盘不可用（原生层没建成），继续无托盘运行')
     return null
   }
 
@@ -51,7 +53,7 @@ export function createTray(options: CreateTrayOptions): TrayHandle | null {
       lastMenu = serialized
       tray.setMenu(menu)
     } catch (error) {
-      log(`[shell] 托盘菜单更新失败：${String(error)}`)
+      log.warn(`托盘菜单更新失败：${String(error)}`)
     }
   }
 
@@ -68,7 +70,7 @@ export function createTray(options: CreateTrayOptions): TrayHandle | null {
   })
 
   apply(options.state)
-  log(`[shell] 托盘已就绪（${trayTitle(options.state)}）`)
+  log.info(`托盘已就绪（${trayTitle(options.state)}）`)
 
   return {
     setState: apply,

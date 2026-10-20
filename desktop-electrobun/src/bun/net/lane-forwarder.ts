@@ -11,6 +11,7 @@
  * · 焦点切换只影响**新**连接。
  */
 import type { TCPSocket } from 'bun'
+import type { Logger } from '../../shared/logging/levels.ts'
 
 export interface LaneForwarder {
   /** 监听实际落在的端口（构造传入 0 时由系统分配）。 */
@@ -26,7 +27,7 @@ export interface LaneForwarderOptions {
   port: number
   /** 监听地址，缺省 127.0.0.1。 */
   hostname?: string
-  log?: (message: string) => void
+  log?: Logger
 }
 
 interface Pair {
@@ -37,7 +38,7 @@ interface Pair {
 
 export function startLaneForwarder(options: LaneForwarderOptions): LaneForwarder | null {
   const hostname = options.hostname ?? '127.0.0.1'
-  const log = options.log ?? (() => {})
+  const log: Logger | undefined = options.log
   let currentTarget = 0
   const pairs = new WeakMap<TCPSocket, Pair>()
 
@@ -75,7 +76,7 @@ export function startLaneForwarder(options: LaneForwarderOptions): LaneForwarder
       for (const chunk of pair.pending) outbound.write(chunk)
       pair.pending.length = 0
     } catch (error) {
-      log(`[forwarder] 连接目标 ${String(target)} 失败：${error instanceof Error ? error.message : String(error)}`)
+      log?.debug(`连接目标 ${String(target)} 失败：${error instanceof Error ? error.message : String(error)}`)
       socket.end()
     }
   }
@@ -112,18 +113,18 @@ export function startLaneForwarder(options: LaneForwarderOptions): LaneForwarder
     })
   } catch (error) {
     // 常见原因：外部 dsh 自身 lane 占了遗留端口——此时手机直连它即可，转发器退场。
-    log(`[forwarder] 端口 ${String(options.port)} 监听失败（${error instanceof Error ? error.message : String(error)}），lane 焦点跟随不可用`)
+    log?.warn(`端口 ${String(options.port)} 监听失败（${error instanceof Error ? error.message : String(error)}），lane 焦点跟随不可用`)
     return null
   }
 
-  log(`[forwarder] 手机稳定接入点 ${hostname}:${String(server.port)}（跟随焦点窗口）`)
+  log?.info(`手机稳定接入点 ${hostname}:${String(server.port)}（跟随焦点窗口）`)
 
   return {
     port: server.port,
     setTarget(port) {
       if (port === currentTarget) return
       currentTarget = port
-      log(`[forwarder] lane 目标 → ${String(port)}`)
+      log?.info(`lane 目标 → ${String(port)}`)
     },
     stop() {
       currentTarget = 0

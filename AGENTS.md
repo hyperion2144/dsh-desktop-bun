@@ -7,7 +7,7 @@
   changelog（桌面 `CHANGELOG.md` / 移动 `CHANGELOG-mobile.md`，各自独立维护）的 `## Unreleased`；PR 优先，未经维护者允许不合并。
 - worktree：read/edit/write 一律传 worktree 绝对路径（相对路径按会话根解析），bash 用 workdir；新 worktree 先 `bun install`，再从主仓复制 `.hutch`（符号链接会让 hutch 报 `InvalidProjectStatePath`），最后 `bun run prepare:bundle`。
 - 工具链：壳/插件的 typecheck/test 用 hutch Bun 1.4.0（`~/.hutch/toolchains/bun/1.4.0/macos-arm64/bun`）；系统 PATH 的 1.3.x 会造 FFI/PTC 假失败。
-- 壳日志：`$DSH_HOME/shell.log`（主进程 console 已 tee，`[shell log/warn/error]` 行都在）；页面日志同目录 `dsh-desktop-webview.log`。
+ - 壳日志：`$DSH_HOME/shell.log`，行格式 `<时间戳> [来源] [级别] 消息`；来源＝模块名小写短词（shell/host/page/relay/notify/update/proxy/lane/settings/profile/downloads/exit/guest/register…），级别＝debug/info/warn/error；调用点一律用分级 Logger 方法（`log.warn('… %o', err)`，shared/logging/levels.ts 的 Logger），禁止在消息串里拼 `[模块] `/`[级别]` 前缀；主进程 console 已 tee 按方法映射落盘；页面日志同目录 `dsh-desktop-webview.log`。
 - Electrobun 原生源码：GitHub `blackboardsh/electrobun` 对应 tag；本机 `~/.hutch/releases/electrobun/<ver>/`；符号用 `strings .../libNativeWrapper.dylib` 查。
 - 构建后跑 `bun run assert:artifact`：断言 CEF/native 载荷、内置 dsh、`launcher` 必须是原生 Mach-O（不是 exec shim）、`app/bun/index.js` 关键符号、`app/runtime/tray.png`。
 - 契约红线：设置文件键名、`/api` 与 `/plugins` 的 no-store、页面 token 路径前缀准入、
