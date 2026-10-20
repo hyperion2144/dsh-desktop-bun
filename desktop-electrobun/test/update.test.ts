@@ -173,7 +173,8 @@ describe('视图合成', () => {
       status: { status: 'error', details: { errorMessage: '磁盘满了' } },
     })
     expect(failed.phase).toBe('error')
-    expect(failed.error).toBe('磁盘满了')
+    // 错误文本进视图（壳侧给它加一句中文前缀，原文仍保留）
+    expect(failed.error).toContain('磁盘满了')
   })
 
   test('install 完成 ⇒ updateReady（按钮该变成「重启并安装」）', () => {
@@ -259,9 +260,11 @@ describe('开关解析', () => {
 function fakeUpdater(input: {
   local?: Record<string, unknown>
   info?: Record<string, unknown>
-  check?: () => void | Promise<void>
+  check?: (emit: (status: string, details?: StatusLike['details']) => void) => void | Promise<void>
   download?: () => void | Promise<void>
   apply?: () => void | Promise<void>
+  /** 框架式失败：发一条 error 状态并把错误写进 updateInfo（**不抛**）。 */
+  failWith?: { message: string; errorMessage?: string }
 }): { updater: UpdaterLike; calls: string[]; emit: (status: string, details?: StatusLike['details']) => void } {
   const calls: string[] = []
   let listener: ((entry: StatusLike) => void) | null = null
@@ -278,7 +281,18 @@ function fakeUpdater(input: {
       }),
       checkForUpdate: async () => {
         calls.push('check')
-        await input.check?.()
+        if (input.failWith !== undefined) {
+          // 框架式失败：**不抛**，只发一条 error 状态并把错误写进 updateInfo
+          info = { ...info, error: input.failWith.message }
+          listener?.({
+            status: 'error',
+            details: { errorMessage: input.failWith.errorMessage ?? input.failWith.message },
+          })
+          return info
+        }
+        await input.check?.((status, details) => {
+          listener?.({ status, details })
+        })
         return info
       },
       downloadUpdate: async () => {
@@ -432,5 +446,132 @@ describe('createUpdater（IO 外壳）', () => {
     fake.emit('error', { errorMessage: '停掉之后不该再记' })
     expect(updater.snapshot().view.phase).toBe('checking')
     expect(updater.snapshot().view.error).toBe('')
+  })
+})
+
+describe('失败语义：404 ⇒ 无更新（#216）', () => {
+  const log = (): void => {}
+  const base = {
+    available: true,
+    reason: '',
+    prefix: 'stable-macos-arm64',
+    local: { version: '0.1.0', channel: 'stable', baseUrl: 'https://example.com/r' },
+  }
+
+  /** 框架式失败：发一条 error 状态 + 写进 updateInfo，**不抛**。 */
+  const frameworkFailure = (message: string, errorMessage?: string) => ({
+    info: { updateAvailable: false, version: '' },
+    failWith: { message, errorMessage },
+  })
+
+  test('404 且这个通道没发过版 ⇒ 「暂未发布」（不是失败、也不是「已是最新」）', async () => {
+    const fake = fakeUpdater(
+      frameworkFailure('Failed to check for updates: HTTP 404', 'HTTP 404')
+    )
+    const updater = createUpdater({
+      log,
+      env: {},
+      importUpdater: async () => fake.updater,
+      probeRelease: async () => 'absent',
+    })
+    const snapshot = await updater.check()
+    expect(snapshot.view.phase).toBe('no-release')
+    expect(snapshot.view.label).toBe('暂未发布')
+    expect(snapshot.view.error).toBe('')
+    expect(snapshot.view.message).toContain('还没有发布过版本')
+    expect(snapshot.actions.hint).toContain('还没有发布过版本')
+    expect(snapshot.actions.canCheck).toBe(true)
+    expect(snapshot.actions.canDownload).toBe(false)
+  })
+
+  test('404 但确实有发布 ⇒ 报错（发布链路故障不能静默成「无更新」）', async () => {
+    const fake = fakeUpdater(
+      frameworkFailure('Failed to check for updates: HTTP 404', 'HTTP 404')
+    )
+    const updater = createUpdater({
+      log,
+      env: {},
+      importUpdater: async () => fake.updater,
+      probeRelease: async () => 'present',
+    })
+    const snapshot = await updater.check()
+    expect(snapshot.view.phase).toBe('error')
+    expect(snapshot.view.label).toBe('更新失败')
+    expect(snapshot.view.error).toContain('没有本平台的更新资产')
+  })
+
+  test('探不到（unknown）⇒ 仍按「暂未发布」处理', async () => {
+    const fake = fakeUpdater(
+      frameworkFailure('Failed to check for updates: HTTP 404', 'HTTP 404')
+    )
+    const updater = createUpdater({
+      log,
+      env: {},
+      importUpdater: async () => fake.updater,
+      probeRelease: async () => 'unknown',
+    })
+    expect((await updater.check()).view.phase).toBe('no-release')
+  })
+
+  test('HTTP 500 ⇒ 失败态，中文原因可见（不直出英文原文）', async () => {
+    const fake = fakeUpdater(
+      frameworkFailure('Failed to check for updates: HTTP 500', 'HTTP 500')
+    )
+    const updater = createUpdater({ log, env: {}, importUpdater: async () => fake.updater })
+    const snapshot = await updater.check()
+    expect(snapshot.view.phase).toBe('error')
+    expect(snapshot.view.error).toBe('更新源返回 HTTP 500')
+    expect(snapshot.view.message).not.toContain('Failed to check for updates')
+  })
+
+  test('网络中断 ⇒ 失败态，中文原因', async () => {
+    const fake = fakeUpdater(
+      frameworkFailure('Failed to check for updates: The network connection was lost.')
+    )
+    const updater = createUpdater({ log, env: {}, importUpdater: async () => fake.updater })
+    const snapshot = await updater.check()
+    expect(snapshot.view.phase).toBe('error')
+    expect(snapshot.view.error).toContain('网络')
+    expect(snapshot.view.error).not.toContain('network connection was lost')
+  })
+
+  test('清单非法 ⇒ 失败态（与 404 不同因）', async () => {
+    const fake = fakeUpdater(
+      frameworkFailure('Invalid update manifest: artifact.file must start with the platform prefix')
+    )
+    const updater = createUpdater({ log, env: {}, importUpdater: async () => fake.updater })
+    const snapshot = await updater.check()
+    expect(snapshot.view.phase).toBe('error')
+    expect(snapshot.view.error).toContain('清单无效')
+  })
+
+  test('纯逻辑层：error 传空串也不能短路掉状态里的错误文本', () => {
+    const view = updateView({
+      ...base,
+      error: '',
+      status: { status: 'error', details: { errorMessage: 'HTTP 500' } },
+    })
+    expect(view.phase).toBe('error')
+    expect(view.error).toBe('更新源返回 HTTP 500')
+  })
+
+  test('纯逻辑层：状态是历史遗留的 error 但没有错误文本 ⇒ 仍是「未检查」', () => {
+    const view = updateView({ ...base, status: { status: 'error' } })
+    expect(view.phase).toBe('idle')
+    expect(view.error).toBe('')
+  })
+
+  test('壳自己抛错（状态还停在 checking）⇒ 也是失败态，不是「正在检查…」', async () => {
+    const fake = fakeUpdater({
+      check: (emit) => {
+        emit('checking', {})
+        throw new Error('网络不通')
+      },
+    })
+    const updater = createUpdater({ log, env: {}, importUpdater: async () => fake.updater })
+    const snapshot = await updater.check()
+    expect(snapshot.view.phase).toBe('error')
+    expect(snapshot.view.error).toContain('网络不通')
+    expect(snapshot.actions.canCheck).toBe(true)
   })
 })
