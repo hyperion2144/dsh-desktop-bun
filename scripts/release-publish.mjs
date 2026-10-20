@@ -32,23 +32,27 @@
  *   node scripts/release-publish.mjs upload  --kind desktop --tag desktop/v0.1.0
  *   node scripts/release-publish.mjs publish --kind mobile  --tag mobile/v0.1.0
  *
+ * 发布正文：取各通道自己的 changelog（桌面 CHANGELOG.md、移动 CHANGELOG-mobile.md）
+ *   的 `## [<version>]` 整段，缺段回落内置一句话——提取逻辑见 scripts/lib/release-notes.mjs。
  * 凭据：GH_TOKEN 环境变量（CI 里是 job 级 `permissions: contents: write` 的 GITHUB_TOKEN）。
  */
 
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { extname, join, resolve } from 'node:path'
+import { extractReleaseNotesFromChangelog } from './lib/release-notes.mjs'
 import { fileURLToPath } from 'node:url'
 
 /** 仓根 = 脚本所在目录的上一级。Node 与 Bun 都要能跑（`import.meta.dir` 只有 Bun 有）。 */
 const repoRoot = resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
 
-/** 两条通道的差异都在这张表里：tag 命名空间、版本真源、latest 归属。 */
+/** 两条通道的差异都在这张表里：tag 命名空间、版本真源、changelog 文件、latest 归属。 */
 const KINDS = {
   desktop: {
     tagPrefix: 'desktop/v',
     versionFile: 'desktop-electrobun/electrobun.config.ts',
+    changelogFile: 'CHANGELOG.md',
     defaultArtifactDir: 'desktop-electrobun/artifacts',
     /** 桌面 stable 独占 latest：updater 的 baseUrl 写死 `releases/latest/download`。 */
     latest: true,
@@ -59,6 +63,7 @@ const KINDS = {
   mobile: {
     tagPrefix: 'mobile/v',
     versionFile: 'mobile/expo-app/app.json',
+    changelogFile: 'CHANGELOG-mobile.md',
     defaultArtifactDir: null,
     /** 移动端不夺 latest：它跟桌面 stable 共用一个仓库级 latest 指针。 */
     latest: false,
@@ -272,8 +277,29 @@ function latestReleaseTag() {
   return tag === '' ? null : tag
 }
 
+/**
+ * 发布正文：优先该通道 changelog 的 `## [<version>]` 整段（桌面 CHANGELOG.md /
+ * 移动 CHANGELOG-mobile.md，见 KINDS.changelogFile）；没找到就回落 KINDS.notes 的内置一句话。
+ * 返回 { notes, source } 供日志与 check 汇总。
+ */
+function releaseNotes(tag, kind, root) {
+  const spec = KINDS[kind]
+  const version = tag.slice(spec.tagPrefix.length)
+  let text = null
+  try {
+    text = readFileSync(join(root, spec.changelogFile), 'utf8')
+  } catch {
+    text = null
+  }
+  const extracted = text === null ? null : extractReleaseNotesFromChangelog(text, version)
+  if (extracted !== null) {
+    return { notes: extracted, source: `${spec.changelogFile} 的 [${version}] 段` }
+  }
+  return { notes: spec.notes, source: `内置一句话（${spec.changelogFile} 没有对应版本段）` }
+}
+
 /** 建（幂等）或复用 draft release。 */
-function ensureDraftRelease(tag, kind, dryRun) {
+function ensureDraftRelease(tag, kind, dryRun, root) {
   const spec = KINDS[kind]
   const existing = releaseView(tag)
   if (existing) {
@@ -290,20 +316,28 @@ function ensureDraftRelease(tag, kind, dryRun) {
     '--draft',
     '--title',
     `${spec.title} ${tag.slice(spec.tagPrefix.length)}`,
-    '--notes',
-    spec.notes,
   ]
   if (spec.prerelease) args.push('--prerelease')
+  const { notes, source } = releaseNotes(tag, kind, root)
+  log(`发布正文取自：${source}`)
+  const notesPath = join(tmpdir(), `dsh-release-notes-${kind}-${process.pid}.md`)
+  writeFileSync(notesPath, notes)
+  args.push('--notes-file', notesPath)
   if (dryRun) {
     log(`dry-run: gh ${args.join(' ')}`)
+    rmSync(notesPath, { force: true })
     return { isDraft: true, assets: [] }
   }
-  const result = gh(args, { allowFailure: true })
-  if (!result.ok) {
-    // 并发：桌面三平台矩阵同时建，同一个 tag 只应有一个建成功。
-    const again = releaseView(tag)
-    if (again) return again
-    fail(`建 release 失败：${result.stderr.trim() || result.stdout.trim()}`)
+  try {
+    const result = gh(args, { allowFailure: true })
+    if (!result.ok) {
+      // 并发：桌面三平台矩阵同时建，同一个 tag 只应有一个建成功。
+      const again = releaseView(tag)
+      if (again) return again
+      fail(`建 release 失败：${result.stderr.trim() || result.stdout.trim()}`)
+    }
+  } finally {
+    rmSync(notesPath, { force: true })
   }
   return releaseView(tag)
 }
@@ -485,10 +519,12 @@ function validate(options) {
 
 function commandCheck(options) {
   const { version, assets } = validate(options)
+  const notes = releaseNotes(options.tag, options.kind, options.root)
   const summary = {
     kind: options.kind,
     tag: options.tag,
     version,
+    notesSource: notes.source,
     assets: assets.map((asset) => ({ name: asset.name, role: asset.role, path: asset.path })),
   }
   console.log(JSON.stringify(summary, null, 2))
@@ -508,7 +544,7 @@ function commandUpload(options) {
     })
   }
   try {
-    ensureDraftRelease(options.tag, options.kind, options.dryRun)
+    ensureDraftRelease(options.tag, options.kind, options.dryRun, options.root)
     uploadAssets(options.tag, staged, options.dryRun)
   } finally {
     if (stagedDir !== null) rmSync(stagedDir, { recursive: true, force: true })

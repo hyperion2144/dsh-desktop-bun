@@ -143,6 +143,7 @@ jobs:
       # 移动端 release 是 prerelease 且不夺 latest：latest/download 恒指向桌面 stable。
       - name: 发布 Release 资产（仅 tag）
         if: startsWith(github.ref, 'refs/tags/mobile/v')
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
@@ -187,6 +188,7 @@ jobs:
       # #213：HAP 也传成 Release 资产（与 Android / iOS 同一个 release）。
       - name: 发布 Release 资产（仅 tag）
         if: startsWith(github.ref, 'refs/tags/mobile/v')
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
@@ -211,6 +213,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: 发布（draft → published，prerelease 且不夺 latest）
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}

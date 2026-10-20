@@ -1,10 +1,10 @@
 # Changelog
 
-格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号见包内 `version.json`。
+格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；本文件只记**桌面端**（移动端见 [CHANGELOG-mobile.md](CHANGELOG-mobile.md)）。
 
 ## [0.1.0] - 2026-10-20
 
-首个版本：DeepSeek Harness 的完整桌面与移动形态——把 dsh 装进系统托盘，也装进手机。桌面与移动端同版本号 0.1.0 一起首发。
+首个版本：DeepSeek Harness 的完整桌面形态——把 dsh 装进系统托盘，开箱即用。
 
 ### 桌面壳（macOS / Windows / Linux）
 
@@ -29,22 +29,11 @@
 - 内置运行时按声明供给，落盘/产物双对账。
 
 ### 桌面插件（dsh-desktop-bun）
-
 - 设置面板多卡：桌面设置、代理（连通性测试）、profile 端口、迁移、通知（场景/音效试听）、下载（进度/取消）、环境、更新提醒，深浅主题适配。
 - 面板按职责拆分 + 数据面 adapter：首屏一次取数、行为测试直跑。
 - 通知配置三端同源：「全屏时静默」等开关读写一致生效。
 - 壳↔页面 72 条命令以根 contracts/ 契约类型层对齐，invokeCommand 编译期校验。
 - 插件客户端资产本地服务：plugin 资产本地直出，不依赖远端。
-
-### 移动端（Android / iOS / HarmonyOS）
-
-- 三端原生壳：Android / iOS（Expo React Native）、鸿蒙（ArkTS + ArkWeb），共用配对逻辑层与设计令牌。
-- 配对：`dsh-mobile://pair` 深链、鸿蒙扫码（ScanKit）、手输地址 + 令牌；令牌一次一用，换设备需桌面重新生成。
-- dsh 页面加载：WebView / ArkWeb，手机布局由注入插件 dsh-mobile-nav 生效。
-- 会话守卫：弱网宽容、回前台不误探测、退避可配 `mobile_guard_backoff_ms`。
-- 运行时下载：按远程构建逐版本定位（CDN 探测，鸿蒙 npm 单包）；内置运行时跟随桌面 pin。
-- 配对与直连适配：重复 Cookie 放行、无 cookie 引导重载、安卓 cleartext、iOS Hermes 兼容与安全区适配。
-- CI 出包：Android / iOS 矩阵，鸿蒙 HAP 作业预留（自建 runner）。
 
 ### 工程与交付
 
@@ -54,6 +43,7 @@
 - CI 分流：push/PR 跑检查（壳+插件门禁+Windows 兜底），完整构建留 workflow_dispatch / tag / 每日兜底，job 超时兜底与产物断言（渲染器载荷/launcher/version.json）；壳主进程 console 默认 tee 进 shell.log。
 - CI 出包分流：桌面与移动端拆成两条流水线——`build.yml` 只跑桌面（tag 认 `desktop/v*`），`mobile.yml` 只跑移动端（tag 认 `mobile/v*`）。
 - CI 发版：推 `desktop/v*` / `mobile/v*` tag 时把安装包与自动更新清单发成 GitHub Release 资产（桌面 stable 独占 latest，移动端 prerelease 不夺 latest）。
+- 发版正文自动化：桌面与移动端 changelog 各自成册（`CHANGELOG.md` / `CHANGELOG-mobile.md`），Release 正文自动取对应版本整段。
 - 安装器链路快验 CI：假树 + stub 载荷分钟级验证 rcedit/NSIS/产物断言。
 - 壳架构深模块化：ProfileSession、命令契约 contracts/、共享 RPC core、面板数据 adapter、判定层 candidates、宿主监督器 HostSupervisor；源码按运行时域分层归位。
 - 架构文档：ADR 0001–0009 带索引、docs/research 调研入库、CONTEXT.md 领域词汇表。
