@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { extractReleaseNotesFromChangelog } from '../../scripts/lib/release-notes.mjs'
 
 // #213：CI 发布链路（tag → GitHub Release 资产）。
 //
@@ -24,6 +25,7 @@ type Step = {
   uses?: string
   run?: string
   if?: string
+  shell?: string
   with?: { name?: string }
 }
 
@@ -324,4 +326,59 @@ describe('CI 发布链路（#213）', () => {
     expect(result.status).toBe(0)
     expect(result.stdout).toContain('stable-macos-arm64-update.json')
   })
+
+    // 桌面与移动端各自一本 changelog（CHANGELOG.md / CHANGELOG-mobile.md），提取只认版本段。
+    const SAMPLE_DESKTOP_CHANGELOG = [
+        '# Changelog',
+        '',
+        '## [1.2.3] - 2026-10-20',
+        '',
+        '首个版本：介绍一句。',
+        '',
+        '- 桌面能力 A。',
+        '',
+        '### 工程与交付',
+        '',
+        '- CI 能力 B。',
+        '',
+        '## [1.2.2] - 2026-09-01',
+        '',
+        '旧版本说明。',
+    ].join('\n')
+
+    const SAMPLE_MOBILE_CHANGELOG = [
+        '# Changelog（移动端）',
+        '',
+        '## [1.2.3] - 2026-10-20',
+        '',
+        '- 移动能力 C。',
+    ].join('\n')
+
+    test('发布步骤显式 shell: bash——Windows 默认 pwsh 会把 "$TAG" 当 PowerShell 变量展开成空（run 39425440773 实证）', () => {
+        const desktop = readWorkflow('build.yml')
+        const mobile = readWorkflow('mobile.yml')
+        const steps = [...publishSteps(desktop), ...publishSteps(mobile)]
+        expect(steps.length).toBeGreaterThan(0)
+        for (const { step } of steps) expect(step.shell).toBe('bash')
+    })
+
+    test('CHANGELOG 发布正文提取：取 [版本] 整段，到下一个 ## 止（不吞其他版本）', () => {
+        const notes = extractReleaseNotesFromChangelog(SAMPLE_DESKTOP_CHANGELOG, '1.2.3')
+        expect(notes).toContain('首个版本：介绍一句。')
+        expect(notes).toContain('- 桌面能力 A。')
+        expect(notes).toContain('- CI 能力 B。')
+        expect(notes).not.toContain('# Changelog')
+        expect(notes).not.toContain('旧版本说明')
+    })
+
+    test('移动端 changelog 用同一个提取函数：各文件各取各段，互不串', () => {
+        const mobile = extractReleaseNotesFromChangelog(SAMPLE_MOBILE_CHANGELOG, '1.2.3')
+        expect(mobile).toContain('- 移动能力 C。')
+        expect(mobile).not.toContain('桌面能力')
+    })
+
+    test('CHANGELOG 没有对应版本段 → null（脚本回落内置一句话）', () => {
+        expect(extractReleaseNotesFromChangelog(SAMPLE_DESKTOP_CHANGELOG, '9.9.9')).toBeNull()
+        expect(extractReleaseNotesFromChangelog(SAMPLE_MOBILE_CHANGELOG, '9.9.9')).toBeNull()
+    })
 })

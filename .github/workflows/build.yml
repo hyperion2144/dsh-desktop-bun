@@ -536,6 +536,7 @@ jobs:
       # 「draft → published」交给下面的 release job，等三条腿都传完再统一做（半成品不对外可见）。
       - name: 发布 Release 资产（仅 tag）
         if: startsWith(github.ref, 'refs/tags/desktop/v')
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
@@ -563,6 +564,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: 发布（draft → published，latest 归桌面 stable）
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
