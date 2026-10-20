@@ -95,7 +95,7 @@ const makeFixture = (): string => {
 /** 桌面产物：清单 + 整包 + 安装包（清单决定整包名，装机包按清单里的 platform 选）。 */
 const writeDesktopArtifacts = (
   root: string,
-  options: { bundleName?: string; omitBundle?: boolean } = {},
+  options: { bundleName?: string; omitBundle?: boolean; alsoWin?: boolean } = {},
 ): void => {
   const dir = join(root, 'desktop-electrobun/artifacts')
   const prefix = 'stable-macos-arm64'
@@ -119,6 +119,30 @@ const writeDesktopArtifacts = (
   )
   if (options.omitBundle !== true) writeFileSync(join(dir, bundle), 'bundle-bytes')
   writeFileSync(join(dir, 'macos-arm64-DeepSeekHarnessDesktopBUN.dmg'), 'dmg-bytes')
+  if (options.alsoWin === true) {
+    // Windows 的 Electrobun os 词元是 `win`（run 39431630319 实证：清单 stable-win-x64-update.json）
+    const winPrefix = 'stable-win-x64'
+    const winBundle = `${winPrefix}-DeepSeekHarnessDesktopBUN.app.tar.zst`
+    writeFileSync(
+      join(dir, `${winPrefix}-update.json`),
+      `${JSON.stringify(
+        {
+          schemaVersion: 1,
+          identifier: 'com.hyperion.dsh-desktop-bun',
+          channel: 'stable',
+          version: '1.2.3',
+          hash: 'hash0123456789',
+          platform: 'win',
+          arch: 'x64',
+          artifact: { file: winBundle },
+        },
+        null,
+        2,
+      )}\n`,
+    )
+    writeFileSync(join(dir, winBundle), 'bundle-bytes')
+    writeFileSync(join(dir, 'win-x64-DeepSeekHarnessDesktopBUN-setup.exe'), 'setup-bytes')
+  }
 }
 
 const runScript = (args: string[]): { code: number; stdout: string; stderr: string } => {
@@ -233,6 +257,17 @@ describe('CI 发布链路（#213）', () => {
     expect(paths).toContain('scripts/**')
     expect(paths).toContain('.github/workflows/build.yml')
     expect(paths).toContain('.github/workflows/mobile.yml')
+  })
+
+  test('check 子命令：Windows 的 Electrobun os 词元是 win（stable-win-x64 清单照样收）', () => {
+    const root = makeFixture()
+    writeDesktopArtifacts(root, { alsoWin: true })
+    const result = runScript(['check', '--kind', 'desktop', '--tag', 'desktop/v1.2.3', '--root', root])
+    expect(result.code).toBe(0)
+    const summary = JSON.parse(result.stdout) as { assets: Array<{ name: string }> }
+    const names = summary.assets.map((asset) => asset.name)
+    expect(names).toContain('stable-win-x64-update.json')
+    expect(names).toContain('win-x64-DeepSeekHarnessDesktopBUN-setup.exe')
   })
 
   test('check 子命令：桌面资产集合由更新链清单驱动（清单 + 整包 + 安装包）', () => {
