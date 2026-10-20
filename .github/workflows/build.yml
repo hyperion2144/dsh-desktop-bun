@@ -44,8 +44,9 @@ on:
 # main 打包链由兜底持续验证，hutch/NSIS/runner 镜像漂移最迟次日暴露。
 # 移动端出包不在本文件里跑：Android / iOS / 鸿蒙在 mobile.yml（#212）。
 # 注：这里只做「构建 + 断言 + 存 CI 产物」。真正的发布（把安装包与 `<platformPrefix>-update.json` +
-# `<platformPrefix>-*.app.tar.zst` 作为 Release 资产传上去）还没接——自动更新的清单就是靠这两个资产名稳定地
-# 指到最新一版，缺了它们更新永远不可用。等允许打 tag 时再加一个 release job。
+# `<platformPrefix>-*.app.tar.zst` 作为 Release 资产传上去）由 #213 的发布步骤负责：推
+# `desktop/v*` tag 时，三平台各自把「清单 + 整包 + 安装包」传成同一个 release 的资产，
+# 等三条腿都传完再把 draft 翻成 published（桌面 stable 独占 latest）。
 
 permissions:
   contents: read
@@ -57,6 +58,10 @@ jobs:
     # 桌面全量留给 tag / dispatch / 每日兑底（不跟提交走，#200）
     if: inputs.mode != 'shots-only'
     runs-on: ${{ matrix.os }}
+    # #213：发布步骤要建 release / 传资产 ⇒ 这个 job 需要 contents: write。
+    # 只提这一个 job：workflow 级仍是 contents: read，其余作业不碰写权限。
+    permissions:
+      contents: write
     # hutch 首次构建要下载 cottontail/Electrobun/CEF/bun 四件套，下载器无超时（run 38493719636 实证挂 85 分钟）；
     # 全量正常 ~15 分钟，40 分钟兜底防挂死占 runner
     timeout-minutes: 40
@@ -525,9 +530,41 @@ jobs:
             desktop-electrobun/artifacts/linux-*.tar.gz
           if-no-files-found: error
 
+      # #213：tag push 时把本平台的更新链资产（清单 + 整包）与安装包传成 GitHub Release 资产。
+      # 只在 desktop/v* 的 tag 上跑：手动 dispatch 与每日兜底只构建、不发版。
+      # 三平台矩阵并发写同一个 release ⇒ 脚本内部做幂等建 release + 分平台上传，
+      # 「draft → published」交给下面的 release job，等三条腿都传完再统一做（半成品不对外可见）。
+      - name: 发布 Release 资产（仅 tag）
+        if: startsWith(github.ref, 'refs/tags/desktop/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          node scripts/release-publish.mjs upload --kind desktop --tag "$TAG"
+
   # #103 安装器 UI 真机出图入口：mode=shots-only 时转发到同提交的 installer-ui.yml
   # （stub 载荷，分钟级，不打真实桌面、不跑产品测试）
   installer-ui-shots:
     name: 安装器 UI 真机出图（stub 载荷）
     if: inputs.mode == 'shots-only'
     uses: ./.github/workflows/installer-ui.yml
+
+  # #213：等三平台矩阵都把资产传完，再把 draft 翻成 published。
+  # 桌面 stable 显式占 latest：updater 的 baseUrl 写死 releases/latest/download，
+  # 移动端 / canary 若夺了 latest，桌面自动更新的清单与整包会同时 404（且不回落到旧版）。
+  release:
+    name: 发布桌面 Release（占 latest）
+    if: startsWith(github.ref, 'refs/tags/desktop/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: 发布（draft → published，latest 归桌面 stable）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          node scripts/release-publish.mjs publish --kind desktop --tag "$TAG"
