@@ -98,7 +98,7 @@ function editableRootOf(node: EventTarget | null): HTMLElement | null {
 
 function trace(kind: string, payload: Record<string, unknown>): void {
   try {
-    console.info(`[input-guard] ${kind} ${JSON.stringify(payload)}`)
+    console.debug(`[input-guard] ${kind} ${JSON.stringify(payload)}`)
   } catch {
     /* 日志失败不影响页面 */
   }

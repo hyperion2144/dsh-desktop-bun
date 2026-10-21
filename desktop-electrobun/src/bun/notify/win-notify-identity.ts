@@ -17,6 +17,8 @@ import { dlopen, FFIType, ptr } from 'bun:ffi'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { APP_ID, APP_NAME } from '../../shared/app/app.ts'
+import { type Logger } from '../../shared/logging/levels.ts'
+import { NOOP_LOGGER } from '../../shared/app/noop-log.ts'
 import { shellProjectRoot } from '../runtime/runtime.ts'
 
 /** AUMID 注册表身份键根（HKCU，每用户，无需管理员；reg.exe 的键路径形态）。 */
@@ -114,7 +116,7 @@ export interface WindowsNotifyIdentityResult {
 
 export interface WindowsNotifyIdentityOptions {
   platform?: NodeJS.Platform
-  log?: (line: string) => void
+  log?: Logger
   env?: Record<string, string | undefined>
   /** 项目根（测试注入；缺省走 runtime.ts 的同一条解析链）。 */
   projectRoot?: string
@@ -134,7 +136,7 @@ export function ensureWindowsNotifyIdentity(
 ): WindowsNotifyIdentityResult | null {
   const platform = options.platform ?? process.platform
   if (platform !== 'win32') return null
-  const log = options.log ?? ((): void => {})
+  const log: Logger = options.log ?? NOOP_LOGGER
   const env = options.env ?? process.env
   const declare = options.declareAumid ?? defaultDeclareAumid()
   const runCommand = options.runCommand ?? defaultRunCommand
@@ -145,21 +147,21 @@ export function ensureWindowsNotifyIdentity(
     declareHresult = declare(APP_ID)
     declared = declareHresult === 0 // S_OK
   } catch (error) {
-    log(`[notify-identity] AUMID 声明抛错：${error instanceof Error ? error.message : String(error)}`)
+    log.error(`AUMID 声明抛错：${error instanceof Error ? error.message : String(error)}`)
   }
   if (!declared) {
     const code = declareHresult === null ? '抛错' : `HRESULT=0x${(declareHresult >>> 0).toString(16).padStart(8, '0')}`
-    log(`[notify-identity] 进程 AUMID 声明失败（${code}，SetCurrentProcessExplicitAppUserModelID）——通知仍走注册表身份`)
+    log.warn(`进程 AUMID 声明失败（${code}，SetCurrentProcessExplicitAppUserModelID）——通知仍走注册表身份`)
   }
 
   let iconUri: string | null = null
   try {
     iconUri = resolveNotifyIcon({ env, projectRoot: options.projectRoot, exists: options.exists })
   } catch (error) {
-    log(`[notify-identity] 图标解析抛错：${error instanceof Error ? error.message : String(error)}`)
+    log.error(`图标解析抛错：${error instanceof Error ? error.message : String(error)}`)
   }
   if (iconUri === null) {
-    log(`[notify-identity] 未找到应用图标（${NOTIFY_ICON_ENV} / resources / runtime 均无），身份只写显示名`)
+    log.warn(`未找到应用图标（${NOTIFY_ICON_ENV} / resources / runtime 均无），身份只写显示名`)
   }
 
   let registered = true
@@ -168,15 +170,15 @@ export function ensureWindowsNotifyIdentity(
     try {
       ok = runCommand(command)
     } catch (error) {
-      log(`[notify-identity] 身份注册抛错：${error instanceof Error ? error.message : String(error)}`)
+      log.error(`身份注册抛错：${error instanceof Error ? error.message : String(error)}`)
     }
     if (!ok) {
       registered = false
-      log(`[notify-identity] 身份注册命令失败：${command.join(' ')}`)
+      log.error(`身份注册命令失败：${command.join(' ')}`)
     }
   }
   if (registered) {
-    log(`[notify-identity] Windows 通知身份就绪：AUMID=${APP_ID}（「${APP_NAME}」${iconUri === null ? '，无图标' : ''}）`)
+    log.info(`Windows 通知身份就绪：AUMID=${APP_ID}（「${APP_NAME}」${iconUri === null ? '，无图标' : ''}）`)
   }
   return { declared, registered, iconUri }
 }

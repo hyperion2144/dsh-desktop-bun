@@ -17,6 +17,7 @@ import {
   insertRows,
   versionAtLeast,
 } from '../src/shared/profiles/inject-yml.ts'
+import { collectingLogger, recordingLogger } from './helpers/test-logger.ts'
 import { PROFILE_BUNDLES, profileFiles, profilePackageJson } from '../src/shared/profiles/profile-template.ts'
 import { profileExists, scaffoldProfile } from '../src/bun/profiles/profile-scaffold.ts'
 import { cleanupStagedPlugins, materializePoolPackage, stagePlugins } from '../src/bun/profiles/plugin-staging.ts'
@@ -209,8 +210,11 @@ describe('stagePlugins（端到端：池 + 注入清单）', () => {
       paths: { repoRoot, resourcesDir: null },
       runtimeVersion: '0.2.1-alpha.2',
       muxHeartbeatMs: 30000,
-      log: (line) => logs.push(line),
-      warn: (line) => warns.push(line),
+        // 日志通道按级别分流：warn/error 进警告通道，其余进普通通道（#228 通道合并成一条 Logger）
+        log: recordingLogger((level, message) => {
+            if (level === 'warn' || level === 'error') warns.push(message)
+            else logs.push(message)
+        }),
     })
 
     // 壳插件来自仓库根；手机访问来自 mobile/；移动布局（子模块没拉）缺包 → 跳过
@@ -226,12 +230,12 @@ describe('stagePlugins（端到端：池 + 注入清单）', () => {
     expect(yml).not.toContain('dsh-web-mobile')
     expect(logs.join('\n')).toContain('缺包跳过：dsh-web-mobile')
     // 警告通道：缺包不再纯静默——独立警告行点名缺的包与补救命令（#20）
-    expect(warns.join('\n')).toContain('警告')
+      expect(warns.join('\n')).toContain('插件缺包跳过')
     expect(warns.join('\n')).toContain('dsh-web-mobile')
     expect(warns.join('\n')).toContain('git submodule update --init')
     expect(warns).toHaveLength(1)
     // 通道分离：警告走 warn，不混进 log 通道
-    expect(logs.join('\n')).not.toContain('警告：')
+      expect(logs.join('\n')).not.toContain('插件缺包跳过：')
   })
 
   test('幂等：内容没变不重写（mtime 保留）；桌面布局设置会去掉移动布局行', () => {
@@ -244,7 +248,7 @@ describe('stagePlugins（端到端：池 + 注入清单）', () => {
     fakePackage(join(repoRoot, 'mobile', 'dsh-mobile-nav'), 'dsh-web-mobile')
 
     const firstWarns: string[] = []
-    const first = stagePlugins({ home, profile: 'web', appSupport, paths: { repoRoot, resourcesDir: null }, runtimeVersion: '0.2.1-alpha.2', muxHeartbeatMs: 0, warn: (line) => firstWarns.push(line) })
+      const first = stagePlugins({ home, profile: 'web', appSupport, paths: { repoRoot, resourcesDir: null }, runtimeVersion: '0.2.1-alpha.2', muxHeartbeatMs: 0, log: recordingLogger((level, message) => { if (level === 'warn' || level === 'error') firstWarns.push(message) }) })
     expect(first.staged).toHaveLength(3)
     // 三件套齐全 → 警告通道必须安静
     expect(firstWarns).toEqual([])
@@ -298,7 +302,9 @@ describe('stagePlugins（端到端：池 + 注入清单）', () => {
       appSupport,
       paths: { repoRoot, resourcesDir: null },
       runtimeVersion: '0.2.1-alpha.2',
-      warn: (line) => warns.push(line),
+        log: recordingLogger((level, message) => {
+            if (level === 'warn' || level === 'error') warns.push(message)
+        }),
       materialize: (_pool, linkName) => {
         if (linkName === 'dsh-mobile-access') throw new Error('EEXIST: 测试注入的失败')
       },
@@ -342,7 +348,7 @@ describe('退出时拆插件链接', () => {
     symlinkSync(foreignDir, foreignLink, 'dir')
 
     const lines: string[] = []
-    const cleaned = cleanupStagedPlugins(result.staged, (line) => lines.push(line))
+      const cleaned = cleanupStagedPlugins(result.staged, collectingLogger(lines))
     expect(cleaned.removed).toContain(own)
     expect(existsSync(own)).toBe(false)
     expect(existsSync(foreignLink)).toBe(true)

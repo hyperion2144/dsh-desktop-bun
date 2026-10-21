@@ -14,13 +14,15 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync, type D
 import { createDirLink, readDirLink } from '../../shared/profiles/dir-link.ts'
 import { profileDirOf } from './profile-scaffold.ts'
 import { basename, dirname, join, resolve, sep } from 'node:path'
+import type { Logger } from '../../shared/logging/levels.ts'
+import { NOOP_LOGGER } from '../../shared/app/noop-log.ts'
 
 export interface ReconcileInput {
   /** 运行时树的 node_modules，如 <runtime>/node_modules */
   runtimeModules: string
   /** 链接池的 node_modules；#13 起调用方传共享池 <DSH_HOME>/profiles/node_modules */
   profileModules: string
-  onLog?: (line: string) => void
+  onLog?: Logger
 }
 
 export interface ReconcileResult {
@@ -65,10 +67,10 @@ function repointDir(source: string, dest: string, result: ReconcileResult): void
 }
 
 export function reconcileProfileTree(input: ReconcileInput): ReconcileResult {
-  const onLog = input.onLog ?? (() => {})
+  const onLog: Logger = input.onLog ?? NOOP_LOGGER
   const result: ReconcileResult = { linked: 0, repointed: 0, kept: 0 }
   if (!existsSync(input.runtimeModules)) {
-    onLog(`[profile-tree] 运行时没有 node_modules，跳过 reconcile：${input.runtimeModules}`)
+    onLog.warn(`运行时没有 node_modules，跳过 reconcile：${input.runtimeModules}`)
     return result
   }
 
@@ -114,12 +116,12 @@ export function reconcileProfileTree(input: ReconcileInput): ReconcileResult {
       }
       result.kept += 1
     } catch (error) {
-      onLog(`[profile-tree] ${name} 处理失败：${error instanceof Error ? error.message : String(error)}`)
+      onLog.warn(`${name} 处理失败：${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
-  onLog(
-    `[profile-tree] 收 ${String(result.linked)} 个新链、${String(result.repointed)} 个重指、${String(result.kept)} 个保留（运行时 ${input.runtimeModules}）`,
+  onLog.debug(
+    `收 ${String(result.linked)} 个新链、${String(result.repointed)} 个重指、${String(result.kept)} 个保留（运行时 ${input.runtimeModules}）`,
   )
   return result
 }
@@ -139,7 +141,7 @@ function pathInside(p: string, root: string): boolean {
 export interface PruneLegacyPoolLinksInput {
   /** 旧落点：profile 专属池（`<DSH_HOME>/profiles/<name>/node_modules`），清理对象 */
   poolModules: string
-  onLog?: (line: string) => void
+  onLog?: Logger
 }
 
 export interface PruneLegacyPoolLinksResult {
@@ -161,7 +163,7 @@ export interface PruneLegacyPoolLinksResult {
  * - 真目录/文件是用户资产 → 一律不动（共享池里陌生条目的口径见票 #13 Q2：也不在此处）。
  */
 export function pruneLegacyPoolLinks(input: PruneLegacyPoolLinksInput): PruneLegacyPoolLinksResult {
-  const onLog = input.onLog ?? (() => {})
+  const onLog: Logger = input.onLog ?? NOOP_LOGGER
   const result: PruneLegacyPoolLinksResult = { removed: 0, kept: 0 }
   const scope = join(input.poolModules, '@deepseek-ai')
   let entries: Dirent[]
@@ -226,10 +228,10 @@ export function pruneLegacyPoolLinks(input: PruneLegacyPoolLinksInput): PruneLeg
     }
     rmSync(dest, { force: true })
     result.removed += 1
-    onLog(`[profile-tree] 迁移清理：${dest}（${removeReason}）`)
+    onLog.debug(`迁移清理：${dest}（${removeReason}）`)
   }
   if (result.removed > 0) {
-    onLog(`[profile-tree] 迁移清理完成：清 ${String(result.removed)} 条壳遗留链接、留 ${String(result.kept)} 条（池 ${input.poolModules}）`)
+    onLog.info(`迁移清理完成：清 ${String(result.removed)} 条壳遗留链接、留 ${String(result.kept)} 条（池 ${input.poolModules}）`)
   }
   return result
 }
@@ -240,7 +242,7 @@ export interface ReconcileProfileRuntimeTreeInput {
   profile: string
   /** 运行时树的 node_modules，如 `<runtime>/node_modules` */
   runtimeModules: string
-  onLog?: (line: string) => void
+  onLog?: Logger
 }
 
 export interface ReconcileProfileRuntimeTreeResult {
@@ -258,7 +260,7 @@ export interface ReconcileProfileRuntimeTreeResult {
  * per-profile 池继续承载 pnpm 依赖树与第三方包（碰撞策略不变）；插件 staging 池不在此处。
  */
 export function reconcileProfileRuntimeTree(input: ReconcileProfileRuntimeTreeInput): ReconcileProfileRuntimeTreeResult {
-  const onLog = input.onLog ?? (() => {})
+  const onLog: Logger = input.onLog ?? NOOP_LOGGER
   const sharedModules = join(input.home, 'profiles', 'node_modules')
   const profileModules = join(profileDirOf(input.home, input.profile), 'node_modules')
   // ① 迁移清理（幂等）：先清 per-profile 池的壳遗留运行时链接（近者优会遮蔽共享层）

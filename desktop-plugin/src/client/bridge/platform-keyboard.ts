@@ -337,7 +337,7 @@ class KeyboardEmitter {
   subscribe(listener: (input: DesktopShortcutInput) => void): () => void {
     this.listeners.add(listener)
     // dsh 拿到桥后会订阅原生按键输入；这条日志就是「桥接上了」的证据
-    console.info('[desktop][probe] dsh 订阅了原生按键输入')
+    console.debug('[desktop][probe] dsh 订阅了原生按键输入')
     return () => {
       this.listeners.delete(listener)
     }
@@ -616,7 +616,7 @@ export function installDesktopPlatformBridge(ctx: ClientContext): void {
   // 区分三种情况：桥没接上（service=null）、目录是空的（catalog=0）、dsh 没订阅（listeners=0）。
   setTimeout(() => {
     const catalog = currentCatalog(service)
-    console.info(
+    console.debug(
       '[desktop] 快捷键桥自检：' +
         JSON.stringify({
           service: service ? `${service.runtime ?? '?'}:${service.platform ?? '?'}` : null,

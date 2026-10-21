@@ -143,7 +143,7 @@ export function contextMenuScript(): string {
     `  const CONTEXT_MENU_METHOD = ${JSON.stringify(CONTEXT_MENU_METHOD)}`,
     // #128：官方 RPC 分发器（preload 最早期装）。永远返回 Promise，桥缺失时 reject 不抛同步异常。
     '  const call = (method, params) => (globalThis.__DSH_SHELL_RPC__ ?? {}).request?.(method, params) ?? Promise.reject(new Error("shell rpc unavailable"))',
-    '  const log = (msg) => console.info("[context-menu] " + msg)',
+    '  const log = (msg) => console.debug("[context-menu] " + msg)',
     '  document.addEventListener("contextmenu", (event) => {',
     '    const target = event.target',
     '    const anchor = target && target.closest ? target.closest("a[href]") : null',

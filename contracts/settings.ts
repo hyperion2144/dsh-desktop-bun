@@ -64,7 +64,11 @@ export interface SettingsCommands {
   /** 保存设置：patch 必须是对象，壳走原子写。 */
   save_desktop_settings: {
     args: { patch: Record<string, unknown> }
-    result: { settings: Record<string, unknown> }
+    result: {
+      settings: Record<string, unknown>
+      /** #221：patch 动了日志保留策略时，壳同步触发一次保留清理并带回回执；没动则缺省。 */
+      log_cleanup?: { removed_files: number; bytes_freed: number }
+    }
   }
 
   get_proxy_settings: { args: {}; result: ProxySnapshot }
@@ -96,6 +100,6 @@ export interface SettingsCommands {
   read_desktop_keybindings: { args: {}; result: string | null }
   write_desktop_keybindings: {
     args: { raw: string }
-    result: { }
+    result: {}
   }
 }

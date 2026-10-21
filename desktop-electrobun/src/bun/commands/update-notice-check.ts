@@ -20,6 +20,7 @@ import {
 } from '../../shared/notify/update-notice-policy.ts'
 import { topRuntimeUpdate, type RuntimeUpdateReport } from '../../shared/runtime/runtime-update.ts'
 import type { UpdateView } from '../../shared/runtime/update.ts'
+import type { Logger } from '../../shared/logging/levels.ts'
 import type { UpdateNoticeStore } from './update-notice-store.ts'
 
 /** 壳这一路的探测结果：`view` 为 null 表示压根没接上更新（dev 构建）。 */
@@ -43,7 +44,7 @@ export interface UpdateNoticeCheckDeps {
   context: () => Pick<UpdateNoticePayload, 'profile' | 'profiles' | 'baseline' | 'preference'>
   /** 开窗；返回 false 表示「没什么可提醒的」，没开窗 ⇒ 不记账。Promise 也认（#139：开窗前先等 rpc 挂好）。 */
   open: (payload: UpdateNoticePayload) => boolean | Promise<boolean>
-  log: (line: string) => void
+  log: Logger
   /** 单路探测的超时；超时按「没查成」处理（静默），不让它挂住整次检查。 */
   timeoutMs?: number
   /** 运行时那一路的超时（带安装可行性闸门，得比壳那一路宽）。 */
@@ -113,7 +114,7 @@ export async function runUpdateNoticeCheck(deps: UpdateNoticeCheckDeps): Promise
       // 开关关了就在**探针之前**返回：用户已经说过不要提醒，不该为一次不要的提醒付两次网络。
       if (!state.enabled) {
         const reason = '启动更新提醒已关闭'
-        deps.log(`[update-notice] 不提醒：${reason}`)
+        deps.log.debug(`不提醒：${reason}`)
         return { notify: false, reason, notified: [] }
       }
     }
@@ -130,7 +131,7 @@ export async function runUpdateNoticeCheck(deps: UpdateNoticeCheckDeps): Promise
       segments: [shellSegment(shell), runtimeSegment(runtime)],
     })
     if (!decision.notify) {
-      deps.log(`[update-notice] 不提醒：${decision.reason}`)
+      deps.log.debug(`不提醒：${decision.reason}`)
       return { notify: false, reason: decision.reason, notified: [] }
     }
     const kinds = new Set(decision.notified.map((segment) => segment.kind))
@@ -143,17 +144,17 @@ export async function runUpdateNoticeCheck(deps: UpdateNoticeCheckDeps): Promise
     })
     if (!opened) {
       const reason = '没什么可提醒的（窗没开）'
-      deps.log(`[update-notice] 不提醒：${reason}`)
+      deps.log.debug(`不提醒：${reason}`)
       return { notify: false, reason, notified: [] }
     }
     deps.store.markNotified(
       decision.notified.map((segment) => ({ kind: segment.kind, version: segment.version ?? '' })),
     )
-    deps.log(`[update-notice] ${decision.reason}，已弹窗并记账`)
+    deps.log.info(`${decision.reason}，已弹窗并记账`)
     return { notify: true, reason: decision.reason, notified: [...kinds] }
   } catch (error) {
     const reason = `检查失败：${error instanceof Error ? error.message : String(error)}`
-    deps.log(`[update-notice] ${reason}`)
+    deps.log.warn(reason)
     return { notify: false, reason, notified: [] }
   }
 }

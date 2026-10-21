@@ -15,6 +15,7 @@ import {
   shellNotificationCommand,
   type ShowNotificationOptions,
 } from '../src/bun/notify/notifications.ts'
+import { collectingLogger } from './helpers/test-logger.ts'
 import {
   decide,
   defaultScenarioConfig,
@@ -260,7 +261,7 @@ describe('notifications：投递层', () => {
       // 只验聚焦逻辑：回包的 silent 随平台（Win/Linux 的「系统默认音」由壳自己放 → 原生通知要闭嘴，见 #74），
       // 这里钉死 darwin 让回包确定；平台差异由 notifications.test.ts 的音档用例覆盖。
       platform: 'darwin',
-      onLog: (line) => lines.push(line),
+        onLog: collectingLogger(lines),
     })
     const blocked = notifier.notify(SCENARIO.TASK_COMPLETE, '会话跑完了')
     expect(blocked).toEqual({ deliver: false, silent: false, sound: { kind: 'silent' } })
@@ -279,7 +280,7 @@ describe('notifications：投递层', () => {
       home: '/tmp/none',
       show: () => {},
       isFocused: () => true,
-      onLog: (line) => lines.push(line),
+        onLog: collectingLogger(lines),
     })
     notifier.notify(SCENARIO.TASK_COMPLETE, '会话跑完了')
     expect(lines.some((line) => line.includes('未投递（总开关或场景关闭）'))).toBe(true)
@@ -295,7 +296,7 @@ describe('notifications：投递层', () => {
       home: '/tmp/none',
       show: () => {},
       isFocused: () => true,
-      onLog: (line) => lines.push(line),
+        onLog: collectingLogger(lines),
     })
     notifier.notify(SCENARIO.TASK_COMPLETE, '会话跑完了')
     expect(lines.some((line) => line.includes('未投递（总开关或场景关闭）'))).toBe(true)
@@ -344,7 +345,7 @@ describe('notifications：投递层', () => {
         played.push(path)
         return true
       },
-      onLog: (line) => logs.push(line),
+        onLog: collectingLogger(logs),
     })
 
     expect(notifier.soundPath('ok.wav')).toBe(join(dir, 'ok.wav'))

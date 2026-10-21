@@ -26,6 +26,7 @@ import {
   stripAnsi,
   type RegisterState,
 } from '../src/shared/app/register-cli.ts'
+import { collectingLogger } from './helpers/test-logger.ts'
 import { createRegisterCli, type RunResult } from '../src/bun/commands/register-cli.ts'
 
 describe('shim：位置 / 内容 / 判词', () => {
@@ -184,7 +185,7 @@ function harness(options: {
     return { status: options.runStatus ?? 0, stdout: '', stderr: options.runStderr ?? '' }
   }
   const cli = createRegisterCli({
-    log: (message) => logs.push(message),
+      log: collectingLogger(logs),
     appSupport: '/app-support',
     platform: options.platform ?? 'darwin',
     shellCommand: () => ['/bun', '/lib/bin.js'],

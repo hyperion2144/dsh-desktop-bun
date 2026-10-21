@@ -114,7 +114,9 @@ export function acceptShimScript(platform: CarrierPlatform): string {
       if (!raw) return
       const next = normalizeAcceptValue(raw, APPEND_ALL_FILES, MIME_MAP)
       if (next !== raw) input.setAttribute('accept', next)
-    } catch {}
+    } catch (error) {
+      console.debug('[accept-shim] MIME 归一化失败（' + raw + '）：' + String(error))
+    }
   }
   // 已在 DOM 里的先归一化一遍（类型下拉里的 MIME 项直接变成扩展名条目）
   try { document.querySelectorAll('input[type=file]').forEach(apply) } catch {}

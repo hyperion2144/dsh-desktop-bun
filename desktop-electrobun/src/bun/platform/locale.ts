@@ -56,7 +56,9 @@ export async function systemLocale(env: Record<string, string | undefined> = pro
         const normalized = normalizeLocale(proc.stdout.toString())
         if (normalized !== null) return normalized
       }
-    } catch {}
+    } catch (error) {
+      console.warn(`[shell] 系统语言探测失败：${String(error)}`)
+    }
   }
   const intl = normalizeLocale(Intl.DateTimeFormat().resolvedOptions().locale)
   return intl ?? FALLBACK_LOCALE

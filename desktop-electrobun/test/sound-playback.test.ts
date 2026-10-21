@@ -11,6 +11,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createNotifier } from '../src/bun/notify/notifications.ts'
+import { collectingLogger } from './helpers/test-logger.ts'
 import {
   createSoundProbe,
   resolveSoundBackend,
@@ -300,7 +301,7 @@ describe('#74 通知投递：Win/Linux 真的出声（不再静默、不再假�
           spawned.push(command)
           return true
         },
-        onLog: (line) => logs.push(line),
+          onLog: collectingLogger(logs),
       })
       expect(notifier.previewSound('tone.wav')).toBe(true)
       expect(spawned[0]).toEqual(['aplay', '-q', join(home, 'sounds', 'tone.wav')])
@@ -444,7 +445,7 @@ describe('#74 通知投递：Win/Linux 真的出声（不再静默、不再假�
           spawned.push(command)
           return true
         },
-        onLog: (line) => logs.push(line),
+          onLog: collectingLogger(logs),
       })
     try {
       notifier(() => true).notify(SCENARIO.TASK_COMPLETE, '完事')
@@ -473,7 +474,7 @@ describe('#74 通知投递：Win/Linux 真的出声（不再静默、不再假�
           spawned.push(command)
           return true
         },
-        onLog: (line) => logs.push(line),
+          onLog: collectingLogger(logs),
         show: (options) => {
           shown.push(options.silent)
         },

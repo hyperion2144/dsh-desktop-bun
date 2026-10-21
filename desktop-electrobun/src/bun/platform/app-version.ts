@@ -43,7 +43,9 @@ export function resolveAppVersion(input: {
       if (!exists(path)) continue
       const parsed = JSON.parse(read(path)) as { version?: unknown }
       if (typeof parsed.version === 'string' && parsed.version !== '') return parsed.version
-    } catch {}
+    } catch (error) {
+      console.warn(`[shell] 读取应用版本失败，回落 unknown：${String(error)}`)
+    }
   }
   return 'unknown'
 }

@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createCommandTable, type CommandDeps } from '../src/bun/commands/commands.ts'
+import { collectingLogger } from './helpers/test-logger.ts'
 import type { RpcContext } from '../src/bun/commands/rpc.ts'
 import { importSound, listSounds, type Notifier } from '../src/bun/notify/notifications.ts'
 import { systemDefaultSoundCommand } from '../src/bun/notify/sound-playback.ts'
@@ -44,7 +45,7 @@ function harness(overrides: Partial<CommandDeps> = {}): Harness {
     home,
     profile: 'desktop',
     platform: 'darwin',
-    log: (line) => calls.logs.push(line),
+      log: collectingLogger(calls.logs),
     settings: () => settings,
     save: (patch) => {
       settings = updateSettings(home, patch)

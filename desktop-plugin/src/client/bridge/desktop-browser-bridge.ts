@@ -212,11 +212,15 @@ function installTagObserver(): void {
           y: r.y,
           width: r.width,
           height: r.height,
-        }).catch(() => {})
+        }).catch((error: unknown) => {
+          console.warn(`[dsh-desktop-tauriapp] guest 控制失败（set_bounds）：${String(error)}`)
+        })
       }
       if (shouldShow !== m.shown) {
         m.shown = shouldShow
-        void invokeCommand('browser_guest_set_visible', { lease, visible: shouldShow }).catch(() => {})
+        void invokeCommand('browser_guest_set_visible', { lease, visible: shouldShow }).catch((error: unknown) => {
+          console.warn(`[dsh-desktop-tauriapp] guest 控制失败（set_visible）：${String(error)}`)
+        })
       }
     }
     const scheduleRect = (): void => {
@@ -257,7 +261,9 @@ function installTagObserver(): void {
         m.canGoBack = snap.canGoBack
         m.canGoForward = snap.canGoForward
       })
-      .catch(() => {})
+      .catch((error: unknown) => {
+        console.warn(`[dsh-desktop-tauriapp] guest 控制失败（guest_state）：${String(error)}`)
+      })
       .finally(() => {
         scheduleRect()
         recomputeOverlay()

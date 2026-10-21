@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createCommandTable, type CommandDeps } from '../src/bun/commands/commands.ts'
+import { silentLogger } from './helpers/test-logger.ts'
 import { createUpdateNoticeStore, type UpdateNoticeStore } from '../src/bun/commands/update-notice-store.ts'
 import { defaultSettings, type DesktopSettings } from '../src/shared/settings/settings.ts'
 import { loadSettings, saveSettings, updateSettings } from '../src/bun/platform/settings-store.ts'
@@ -24,7 +25,7 @@ function harness(overrides: Partial<CommandDeps> = {}): {
     home,
     profile: 'desktop',
     platform: 'darwin',
-    log: () => {},
+      log: silentLogger,
     settings: () => settings,
     save: (patch) => {
       settings = updateSettings(home, patch)

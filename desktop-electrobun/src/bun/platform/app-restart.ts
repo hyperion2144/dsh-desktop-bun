@@ -4,6 +4,8 @@
 // win32 回归「壳直接拉 launcher」的旧可靠路径，中继只留给 macOS；两路都写 relay 日志留痕。
 
 import { appendFileSync } from 'node:fs'
+import { loggingKernel } from '../logging/kernel.ts'
+import { type Logger } from '../../shared/logging/levels.ts'
 // 为什么不用框架 API：Electrobun 2.0.2 没有 relaunch/restart。
 // 核符号表里只有 `quitGracefully` / `forceExit` / `stopEventLoop` / `waitForShutdownComplete`
 // ——全是「怎么退」，没有「退之前把新实例拉起来」。`app` 面只有 `on` / `quit` / `isPackaged`
@@ -182,7 +184,7 @@ export function buildRelaySource(input: {
     `const logFile = ${JSON.stringify(input.logFile ?? '')};`,
     `const { appendFileSync, mkdirSync } = await import('node:fs');`,
     `const { dirname } = await import('node:path');`,
-    `const log = (message) => { try { if (logFile !== '') { mkdirSync(dirname(logFile), { recursive: true }); appendFileSync(logFile, new Date().toISOString() + ' [relay] ' + message + '\\n') } } catch {} };`,
+    `const log = (message) => { try { if (logFile !== '') { mkdirSync(dirname(logFile), { recursive: true }); appendFileSync(logFile, new Date().toISOString() + ' [relay] [info] ' + message + '\\n') } } catch (error) { try { process.stderr.write('[relay] 中继日志写入失败：' + String(error) + '\\n') } catch {} } };`,
     `log('中继启动：等 pid=' + parentPid + ' 退净后拉 ' + launcherExe + '（cefDir=' + (cefDir === '' ? '无' : cefDir) + '）');`,
     `const parentAlive = () => { try { process.kill(parentPid, 0); return true } catch { return false } };`,
     // 等旧壳进程退出（上限 pidWaitMs；ESRCH 即已退，EPERM 视为仍在）`,
@@ -260,11 +262,11 @@ export async function relaunchDesktopApp(input: {
   /** 平台分支（测试注入）；缺省取 process.platform */
   platform?: string
   spawn?: (argv: string[], env: Record<string, string>) => void
-  onLog?: (line: string) => void
+  onLog?: Logger
 }): Promise<RelaunchPlan> {
   const plan = planRelaunch({ isPackaged: input.isPackaged, launcherExe: input.launcherExe })
   if (!plan.ok) {
-    input.onLog?.(`[shell] 重启桌面应用：${plan.reason} —— ${plan.message}`)
+    input.onLog?.warn(`重启桌面应用：${plan.reason} —— ${plan.message}`)
     return plan
   }
   const env = { ...(input.env ?? process.env), [RELAUNCH_PID_ENV]: String(input.pid) }
@@ -279,11 +281,11 @@ export async function relaunchDesktopApp(input: {
     } catch (error) {
       const message = `拉起 launcher 失败：${error instanceof Error ? error.message : String(error)}`
       writeRelayLog(input.logFile, `直拉失败：${message}`)
-      input.onLog?.(`[shell] 重启桌面应用：spawn-failed —— ${message}`)
+      input.onLog?.error(`重启桌面应用：spawn-failed —— ${message}`)
       return { ok: false, reason: 'spawn-failed', message }
     }
     writeRelayLog(input.logFile, `Windows 直拉 launcher：${plan.exe}（旧壳 pid=${String(input.pid)} 由接班逻辑等待退净）`)
-    input.onLog?.(`[shell] 重启桌面应用：已直接拉起 launcher（Windows 直拉路径），本进程即将退出`)
+    input.onLog?.info('重启桌面应用：已直接拉起 launcher（Windows 直拉路径），本进程即将退出')
     return plan
   }
 
@@ -293,22 +295,33 @@ export async function relaunchDesktopApp(input: {
     launch(argv, env)
   } catch (error) {
     const message = `拉起中继进程失败：${error instanceof Error ? error.message : String(error)}`
-    input.onLog?.(`[shell] 重启桌面应用：spawn-failed —— ${message}`)
+    input.onLog?.error(`重启桌面应用：spawn-failed —— ${message}`)
     return { ok: false, reason: 'spawn-failed', message }
   }
-  input.onLog?.(`[shell] 重启桌面应用：已拉起中继（等 ${String(input.pid)} 退净后拉 ${plan.exe}），本进程即将退出`)
+  input.onLog?.info(`重启桌面应用：已拉起中继（等 ${String(input.pid)} 退净后拉 ${plan.exe}），本进程即将退出`)
   return plan
 }
 
 /** 壳侧 relay 日志（Windows 直拉路径；中继路径的日志由中继自己写）。写失败不影响重启。 */
 function writeRelayLog(logFile: string | undefined, message: string): void {
   if (logFile === undefined || logFile === '') return
+  const line = `${new Date().toISOString()} [relay] [info] ${message}\n`
+  // 壳侧写入口走统一内核（级别过滤不作用、写前巡检轮转、IO 失败进 health）；
+  // 中继子进程是独立生成脚本，不引内核，仍自写（Decision 10 边界）。
   try {
-    appendFileSync(logFile, `${new Date().toISOString()} [relay] ${message}\n`)
-  } catch {}
+    if (loggingKernel().files().relay === logFile) {
+      loggingKernel().writeRelayLine(line)
+      return
+    }
+  } catch { }
+  try {
+    appendFileSync(logFile, line)
+  } catch (error) {
+    console.error(`[shell] 中继日志写入失败：${String(error)}`)
+  }
 }
 
-function defaultSpawn(argv: string[], env: Record<string, string>, onLog?: (line: string) => void): void {
+function defaultSpawn(argv: string[], env: Record<string, string>, onLog?: Logger): void {
   const proc = Bun.spawn(argv, {
     env,
     stdin: 'ignore',

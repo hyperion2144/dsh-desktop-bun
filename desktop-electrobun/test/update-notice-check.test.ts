@@ -9,6 +9,7 @@ import {
   type UpdateNoticeRuntimeProbe,
   type UpdateNoticeShellProbe,
 } from '../src/bun/commands/update-notice-check.ts'
+import { silentLogger } from './helpers/test-logger.ts'
 import type { UpdateNoticePayload } from '../src/bun/windows/update-notice-dialog.ts'
 import { evaluateRuntimeUpdates, type RuntimeUpdateReport } from '../src/shared/runtime/runtime-update.ts'
 import type { UpdateView } from '../src/shared/runtime/update.ts'
@@ -87,7 +88,7 @@ function harness(readState: UpdateNoticeState = state()): Harness {
       opened.push(payload)
       return true
     },
-    log: () => {},
+      log: silentLogger,
   }
   return {
     run: (deps = {}) => runUpdateNoticeCheck({ ...base, ...deps }),

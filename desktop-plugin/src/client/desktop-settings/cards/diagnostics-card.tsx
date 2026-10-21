@@ -2,6 +2,7 @@
 // 自带挂载读一次 + 导出结果，不碰面板其它状态。
 import React, { useEffect, useState } from 'react'
 import { PfBtn, SectionBox, showToast } from '../chrome.tsx'
+import { LoggingSection } from './logging-controls.tsx'
 import { NOTE_STYLE } from '../styles.ts'
 import { invoke } from '../rpc.ts'
 
@@ -21,7 +22,9 @@ export function DiagnosticsCard(): React.ReactElement {
         const path = r.diagnostics?.logs?.shell?.path
         if (typeof path === 'string' && path !== '') setDiagLogPath(path)
       })
-      .catch(() => {})
+      .catch((error: unknown) => {
+        console.warn(`[dsh-desktop-tauriapp] 读取诊断快照失败：${String(error)}`)
+      })
     return () => {
       cancelled = true
     }
@@ -61,6 +64,8 @@ export function DiagnosticsCard(): React.ReactElement {
         </PfBtn>
       </div>
       {diagExport !== null && <div style={NOTE_STYLE}>上次导出：{diagExport}</div>}
-    </SectionBox>
-  )
+            {/* #221 统一日志管理：级别 / 保留与清理 / 导出（子区段共用本卡唯一 SectionBox，M1） */}
+            <LoggingSection />
+        </SectionBox>
+    )
 }

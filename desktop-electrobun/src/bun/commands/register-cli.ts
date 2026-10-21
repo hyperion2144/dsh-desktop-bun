@@ -39,6 +39,7 @@ import {
 } from '../../shared/app/register-cli.ts'
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import type { Logger } from '../../shared/logging/levels.ts'
 
 export interface RunResult {
   status: number
@@ -49,7 +50,7 @@ export interface RunResult {
 export type RunImpl = (argv: string[], options?: { env?: Record<string, string>; timeoutMs?: number }) => RunResult
 
 export interface RegisterCliOptions {
-  log: (message: string) => void
+    log: Logger
   appSupport: string
   /** 当前运行时的 dsh 启动命令（可执行 + 参数）；运行时切换后 shim 会按它重写 */
   shellCommand: () => readonly string[] | null
@@ -114,14 +115,14 @@ export function createRegisterCli(options: RegisterCliOptions): RegisterCli {
     // 入口路径没带标记注释，也不会被误判成「别人占位」（#62 PR 实测：旧 dsh.cmd 一直占着坑）。
     if (existing === expected) return { path: shimPath, verdict: 'ours' }
     if (verdict === 'foreign') {
-      options.log(`[register] shim 位置发现非本壳内容，按本壳目录回收重写：${shimPath}`)
+        options.log.warn(`shim 位置发现非本壳内容，按本壳目录回收重写：${shimPath}`)
     }
     try {
       writeText(shimPath, expected, 0o755)
-      options.log(`[register] shim 已${verdict === 'stale' ? '更新' : '写入'}：${shimPath} → ${argv.join(' ')}`)
+        options.log.info(`shim 已${verdict === 'stale' ? '更新' : '写入'}：${shimPath} → ${argv.join(' ')}`)
       return { path: shimPath, verdict: verdict === 'stale' ? 'stale' : 'ours' }
     } catch (error) {
-      options.log(`[register] shim 写入失败：${String(error)}`)
+        options.log.error(`shim 写入失败：${String(error)}`)
       return { path: shimPath, verdict: 'absent' }
     }
   }
@@ -152,14 +153,14 @@ export function createRegisterCli(options: RegisterCliOptions): RegisterCli {
       const first = out.status === 0 ? out.stdout.split(/\r?\n/).find((line) => line.trim() !== '') : undefined
       const hit = first !== undefined && first.trim() !== '' ? first.trim() : null
       if (hit !== null) {
-        options.log(`[register] where dsh → ${hit}（注册表用户 PATH 里没有本壳入口）`)
+          options.log.info(`where dsh → ${hit}（注册表用户 PATH 里没有本壳入口）`)
         return hit
       }
       if (parsed === null) {
-        options.log(`[register] 注册表用户 PATH 读取失败（exit ${String(query.status)}），按未注册处理`)
+          options.log.warn(`注册表用户 PATH 读取失败（exit ${String(query.status)}），按未注册处理`)
         return null
       }
-      options.log(`[register] 注册表用户 PATH 里没有本壳入口（${dirname(shimPath)}）且 where 落空，按未注册处理`)
+        options.log.warn(`注册表用户 PATH 里没有本壳入口（${dirname(shimPath)}）且 where 落空，按未注册处理`)
       return null
     }
     const shell = userShell()
@@ -208,7 +209,7 @@ export function createRegisterCli(options: RegisterCliOptions): RegisterCli {
       lastAt = now()
       const changed = next.kind !== cached.kind || next.resolved !== cached.resolved
       cached = next
-      if (changed) options.log(`[register] 注册状态：${describeRegisterState(next)}`)
+        if (changed) options.log.info(`注册状态：${describeRegisterState(next)}`)
       return cached
     })()
     inflight = task
@@ -251,7 +252,7 @@ export function createRegisterCli(options: RegisterCliOptions): RegisterCli {
     const changed = next.kind !== cached.kind || next.resolved !== cached.resolved
     if (!changed) return cached
     cached = next
-    options.log(`[register] 注册状态：${describeRegisterState(cached)}`)
+      options.log.info(`注册状态：${describeRegisterState(cached)}`)
     return cached
   }
 
@@ -304,7 +305,7 @@ export function createRegisterCli(options: RegisterCliOptions): RegisterCli {
       // 都会把菜单打回「未注册」；30s TTL 过后的下一次刷新如实重测，以注册表为准。
       cached = { kind: 'registered', resolved: shimPath, shimReady: true, at: now() }
       lastAt = now()
-      options.log(`[register] 注册状态：已注册（用户 PATH 写回成功，乐观置位）`)
+        options.log.info('注册状态：已注册（用户 PATH 写回成功，乐观置位）')
       return { ok: true, message: `已把 ${shimDir} 加进用户 PATH——已开的终端不会热更新，新开终端生效` }
     }
     if (platform !== 'darwin') {

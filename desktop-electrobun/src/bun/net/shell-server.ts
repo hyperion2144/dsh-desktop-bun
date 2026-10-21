@@ -25,7 +25,8 @@ import type { ViewGrant, ViewRegistry } from '../../shared/net/view-grant.ts'
 import { parseContextMenuRequest, type ContextMenuRequest } from '../windows/context-menu.ts'
 import { FOLLOWER_WAIT_MS, GetCoalescer, aggregationPolicy, type SharedGet } from './coalescing.ts'
 import { isWindowControlAction, type WindowControlAction, type WindowMaxState } from '../windows/window-max.ts'
-
+import type { Logger } from '../../shared/logging/levels.ts'
+import { NOOP_LOGGER } from '../../shared/app/noop-log.ts'
 
 /** 官方 web-document.ts 的同一行：index 会等异步的 Host 注入，先把 promise 挂上。 */
 export const BOOT_LINE = '<script>globalThis.__DSH_BOOT_READY__ = Promise.withResolvers()</script>'
@@ -80,7 +81,9 @@ export interface ShellServerOptions {
    */
   followerWaitMs?: () => number
   onRpc?: (raw: string, grant: ViewGrant | null) => Promise<{ status: number; body: Record<string, unknown> }>
-  onLog?: (line: string) => void
+    onLog?: Logger
+    /** 上游转发（proxy 域）的日志通道：与壳面命令通道分开，来源各自独立。 */
+    onProxyLog?: Logger
 }
 
 export interface ShellServer {
@@ -108,7 +111,8 @@ export function loopbackOrigin(port: number): string {
   return `http://127.0.0.1:${String(port)}`
 }
 export function startShellServer(options: ShellServerOptions): ShellServer {
-  const log = options.onLog ?? (() => {})
+    const log: Logger = options.onLog ?? NOOP_LOGGER
+    const proxyLog: Logger = options.onProxyLog ?? NOOP_LOGGER
   const startedAt = Date.now()
   // #168：origin/端口一律以**绑定后**的句柄为准。port 传 0 时端口由系统分配，
   // 用 options.port 算出来的 origin 会是「端口 0」而不可用；下面 Bun.serve 之后统一改写。
@@ -129,11 +133,11 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
     if (options.views === undefined) return { grant: null, deny: null }
     const grant = options.views.lookup(request.headers.get(VIEW_TOKEN_HEADER))
     if (grant === null) {
-      log(`[shell] 拒绝未登记视图的请求（${command ?? request.url}，token=${request.headers.get(VIEW_TOKEN_HEADER) ?? '无'}）`)
+        log.warn(`拒绝未登记视图的请求（${command ?? request.url}，token=${request.headers.get(VIEW_TOKEN_HEADER) ?? '无'}）`)
       return { grant: null, deny: new Response('shell view token required', { status: 403 }) }
     }
     if (command !== null && !isCommandAllowed(grant.kind, command)) {
-      log(`[shell] 拒绝命令：${denyReason(grant.kind, command)}（${grant.label}）`)
+        log.warn(`拒绝命令：${denyReason(grant.kind, command)}（${grant.label}）`)
       return { grant, deny: Response.json({ ok: false, error: denyReason(grant.kind, command) }, { status: 403 }) }
     }
     return { grant, deny: null }
@@ -211,7 +215,7 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
       // P1（旧壳 stream_proxy.rs:456 SLOW 口径）：任一段 ≥2s 记一条。ttfb=「发 fetch → 上游
       // 响应头」（读作上游慢或壳进程堵），total=整条响应（读作传输/排队慢）。
       if (input.ttfbMs >= 2_000 || totalMs >= 2_000) {
-        log(`[proxy] SLOW ttfb=${input.ttfbMs}ms total=${totalMs}ms ${input.method} ${input.pathname} -> ${input.status}`)
+          proxyLog.debug(`SLOW ttfb=${input.ttfbMs}ms total=${totalMs}ms ${input.method} ${input.pathname} -> ${input.status}`)
       }
     }
     const stream = new ReadableStream<Uint8Array>({
@@ -375,19 +379,19 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
         const shared = outcome.shared
         const totalMs = Math.round(performance.now() - t0)
         if (totalMs >= 2_000) {
-          log(`[proxy] SLOW ttfb=${totalMs}ms total=${totalMs}ms ${method} ${pathname} -> ${shared.status}（单飞跟随）`)
+            proxyLog.debug(`SLOW ttfb=${totalMs}ms total=${totalMs}ms ${method} ${pathname} -> ${shared.status}（单飞跟随）`)
         }
         return new Response(shared.body, { status: shared.status, headers: new Headers(shared.headers) })
       }
       if (outcome.kind === 'aborted') {
         // 页面自己断了：不再占资源，也不该替它去打上游（#144-1）。
-        log(`[proxy] 跟随者被页面取消，放弃 ${method} ${pathname}`)
+          proxyLog.debug(`跟随者被页面取消，放弃 ${method} ${pathname}`)
         return new Response(null, { status: 499 })
       }
       // unshared（领头失败/不可共享）或 timeout（等满上限掉队）⇒ 落回自己打一次。
       // 这一支安全的前提：这个请求从头到尾没发出去过，「自己再发一次」不产生重复副作用——
       // 也正是因此绝不给任何**已发出**的请求加自动重试（#54 拍板的架构口径）。
-      log(`[proxy] 跟随者${outcome.kind === 'timeout' ? '等满上限掉队' : '没拿到共享响应'}，自己打一次 ${method} ${pathname}`)
+        proxyLog.debug(`跟随者${outcome.kind === 'timeout' ? '等满上限掉队' : '没拿到共享响应'}，自己打一次 ${method} ${pathname}`)
     }
 
     inFlight += 1
@@ -410,12 +414,12 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
     } catch (error) {
       inFlight = Math.max(0, inFlight - 1)
       coalescer.settle(key, entry, null)
-      log(`[shell] 转发失败 ${method} ${pathname}: ${String(error)}`)
+        log.error(`转发失败 ${method} ${pathname}: ${String(error)}`)
       return new Response('upstream unreachable', { status: 502 })
     }
     const ttfbMs = Math.round(performance.now() - t0)
     const outHeaders = scrubResponseHeaders(upstream.headers, { pathname })
-    if (upstream.status >= 500) log(`[proxy] 上游 ${upstream.status} ${method} ${pathname}（ttfb=${ttfbMs}ms）`)
+      if (upstream.status >= 500) proxyLog.warn(`上游 ${upstream.status} ${method} ${pathname}（ttfb=${ttfbMs}ms）`)
 
     // 可共享判定：只合并「带 content-length 且 ≤256KB」的 GET——大响应与流式（SSE/chunked）
     // 一律不缓冲，避免内存膨胀与背压变化。
@@ -466,7 +470,7 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
       onSettled()
       const totalMs = Math.round(performance.now() - t0)
       if (ttfbMs >= 2_000 || totalMs >= 2_000) {
-        log(`[proxy] SLOW ttfb=${ttfbMs}ms total=${totalMs}ms ${method} ${pathname} -> ${shared.status}`)
+          proxyLog.debug(`SLOW ttfb=${ttfbMs}ms total=${totalMs}ms ${method} ${pathname} -> ${shared.status}`)
       }
       return new Response(shared.body, { status: shared.status, headers: new Headers(shared.headers) })
     }
@@ -507,7 +511,7 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
       })
 
       if (decision.kind === 'reject') {
-        log(`[shell] 拒绝跨站请求 ${url.pathname}（origin=${request.headers.get('origin') ?? '-'}）`)
+          log.warn(`拒绝跨站请求 ${url.pathname}（origin=${request.headers.get('origin') ?? '-'}）`)
         return new Response('forbidden', { status: decision.status ?? 403 })
       }
 
@@ -553,14 +557,17 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           if (options.onOpenExternal === undefined) return new Response('no window host', { status: 501 })
           const externalAuth = authorize(request, null)
           if (externalAuth.deny !== null) return externalAuth.deny
-          const body = (await request.json().catch(() => null)) as { url?: unknown } | null
+          const body = (await request.json().catch((error: unknown) => {
+              log.warn(`请求体解析失败（open-external）：${String(error)}`)
+            return null
+          })) as { url?: unknown } | null
           const target = typeof body?.url === 'string' ? body.url : ''
           if (target === '' || !isExternalUrl(target, origin)) {
-            log(`[shell] 拒绝外链 ${target}`)
+              log.warn(`拒绝外链 ${target}`)
             return new Response('not an external url', { status: 400 })
           }
           options.onOpenExternal(target)
-          log(`[shell] 外链转系统浏览器 ${target}`)
+            log.info(`外链转系统浏览器 ${target}`)
           return new Response(null, { status: 204 })
         }
         // 右键菜单：页面把上下文报过来，主进程弹原生菜单
@@ -573,7 +580,10 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           if (menuAuth.deny !== null) return menuAuth.deny
           // 字段归一化只有一份实现（#144-2）：与 commands.ts 的 show_context_menu 共用同一个解析器，
           // 改一边忘另一边导致的漂移就此消失。
-          options.onContextMenu(parseContextMenuRequest(await request.json().catch(() => null)))
+          options.onContextMenu(parseContextMenuRequest(await request.json().catch((error: unknown) => {
+              log.warn(`请求体解析失败（context-menu）：${String(error)}`)
+            return null
+          })))
           return new Response(null, { status: 204 })
         }
         // 单实例：第二个壳请已有实例把窗口带到前台（不占端口、不起宿主）
@@ -581,7 +591,7 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
           if (options.onActivate === undefined) return new Response('no window host', { status: 501 })
           options.onActivate()
-          log('[shell] 收到激活请求：窗口带到前台')
+            log.info('收到激活请求：窗口带到前台')
           return new Response(null, { status: 204 })
         }
         // 自绘窗口控制（A5）：最小化 / 最大化切换 / 关闭
@@ -633,7 +643,10 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           // 批量转发会替调用方打上游，叠鉴权（#130）；手机端走 lane 纯 TCP 转发，早已被同源闸门挡在外。
           const batchAuth = authorize(request, null)
           if (batchAuth.deny !== null) return batchAuth.deny
-          const parsed = (await request.json().catch(() => null)) as { requests?: unknown } | null
+          const parsed = (await request.json().catch((error: unknown) => {
+              log.warn(`请求体解析失败（batch）：${String(error)}`)
+            return null
+          })) as { requests?: unknown } | null
           const items = Array.isArray(parsed?.requests) ? (parsed as { requests: unknown[] }).requests : null
           if (items === null || items.length === 0) return new Response('bad batch', { status: 400 })
           if (items.length > BATCH_MAX_ITEMS) return new Response('batch too large', { status: 413 })
@@ -690,7 +703,9 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
       close(ws) {
         try {
           ws.data.upstream?.close()
-        } catch {}
+        } catch (error) {
+            log.warn(`上游 ws 关闭异常：${String(error)}`)
+        }
       },
     },
   })

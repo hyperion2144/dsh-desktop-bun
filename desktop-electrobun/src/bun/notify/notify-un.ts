@@ -13,6 +13,8 @@ import { FFIType, dlopen, ptr } from 'bun:ffi'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { permissionFromCode, type NotifyPermission } from '../../shared/notify/notify-permission.ts'
+import { type Logger } from '../../shared/logging/levels.ts'
+import { NOOP_LOGGER } from '../../shared/app/noop-log.ts'
 
 export const NOTIFY_LIB_NAME = 'libdsh-notify.dylib'
 
@@ -79,8 +81,8 @@ export function resolveNotifyLib(input: {
   return null
 }
 
-const UNKNOWN_BRIDGE = (log: (line: string) => void, reason: string): NativeNotify => {
-  log(`[notify-un] 原生通知桥不可用：${reason}（通知仍走 Electrobun 原生投递）`)
+const UNKNOWN_BRIDGE = (log: Logger, reason: string): NativeNotify => {
+  log.warn(`原生通知桥不可用：${reason}（通知仍走 Electrobun 原生投递）`)
   return {
     available: false,
     libPath: null,
@@ -94,7 +96,7 @@ const UNKNOWN_BRIDGE = (log: (line: string) => void, reason: string): NativeNoti
 }
 
 export interface NativeNotifyOptions {
-  log?: (line: string) => void
+  log?: Logger
   platform?: NodeJS.Platform
   env?: Record<string, string | undefined>
   libPath?: string | null
@@ -109,7 +111,7 @@ export function hasBundleIdentity(execPath: string): boolean {
 }
 
 export function createNativeNotify(options: NativeNotifyOptions = {}): NativeNotify {
-  const log = options.log ?? ((): void => {})
+  const log: Logger = options.log ?? NOOP_LOGGER
   const platform = options.platform ?? process.platform
   if (platform !== 'darwin') return UNKNOWN_BRIDGE(log, `平台 ${platform} 没有 UN 桥`)
   const execPath = options.execPath ?? process.execPath
@@ -157,7 +159,7 @@ export function createNativeNotify(options: NativeNotifyOptions = {}): NativeNot
       try {
         lib.symbols.dsh_un_start()
       } catch (error) {
-        log(`[notify-un] 初始化失败：${error instanceof Error ? error.message : String(error)}`)
+        log.error(`初始化失败：${error instanceof Error ? error.message : String(error)}`)
       }
     },
     status: () => {
@@ -172,14 +174,14 @@ export function createNativeNotify(options: NativeNotifyOptions = {}): NativeNot
       try {
         lib.symbols.dsh_un_refresh()
       } catch (error) {
-        log(`[notify-un] 刷新授权状态失败：${error instanceof Error ? error.message : String(error)}`)
+        log.warn(`刷新授权状态失败：${error instanceof Error ? error.message : String(error)}`)
       }
     },
     request: () => {
       try {
         lib.symbols.dsh_un_request()
       } catch (error) {
-        log(`[notify-un] 申请授权失败：${error instanceof Error ? error.message : String(error)}`)
+        log.error(`申请授权失败：${error instanceof Error ? error.message : String(error)}`)
         return 'unavailable'
       }
       return permissionFromCode(Number(lib.symbols.dsh_un_status()))
@@ -191,7 +193,7 @@ export function createNativeNotify(options: NativeNotifyOptions = {}): NativeNot
         keepAlive.length = 0
         return queued === 1
       } catch (error) {
-        log(`[notify-un] 投递失败：${error instanceof Error ? error.message : String(error)}`)
+        log.error(`投递失败：${error instanceof Error ? error.message : String(error)}`)
         return false
       }
     },

@@ -14,6 +14,8 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createDirLink, readDirLink } from '../../shared/profiles/dir-link.ts'
 import { dirname, join, resolve } from 'node:path'
+import type { Logger } from '../../shared/logging/levels.ts'
+import { NOOP_LOGGER } from '../../shared/app/noop-log.ts'
 
 import { injectYml, insertRows, type InsertRow } from '../../shared/profiles/inject-yml.ts'
 
@@ -111,14 +113,11 @@ export function stagePlugins(options: {
   muxHeartbeatMs?: number
   desktopLayoutOnPhones?: boolean
   env?: Record<string, string | undefined>
-  log?: (line: string) => void
-  /** 警告通道：缺包这类「供给断了但不致命」的事走这里（不传则回落 log） */
-  warn?: (line: string) => void
+  log?: Logger
   /** 测试注入口：换掉单包物化动作（缺省 materializePoolPackage），用于注入失败 */
   materialize?: (pool: string, linkName: string, dir: string) => void
 }): StageResult {
-  const log = options.log ?? ((): void => {})
-  const warn = options.warn ?? ((line: string): void => console.warn(line))
+  const log: Logger = options.log ?? NOOP_LOGGER
   const env = options.env ?? {}
   const pool = join(options.home, 'profiles', options.profile, 'node_modules')
   mkdirSync(pool, { recursive: true })
@@ -137,7 +136,7 @@ export function stagePlugins(options: {
     } catch (error) {
       // 单个插件物化失败不阻断启动（#78）：少一个插件 dsh 只是解析不到那个包，服务面照常起
       failed.push(name)
-      warn(`警告：插件物化失败跳过：${name}——${String(error)}`)
+      log.warn(`插件物化失败跳过：${name}——${String(error)}`)
       return
     }
     staged.push({ name, dir, link: join(pool, name) })
@@ -175,16 +174,16 @@ export function stagePlugins(options: {
   }
   if (!same) writeFileSync(injectFile, content)
 
-  log(
+  log.info(
     `插件物化：${staged.map((entry) => entry.name).join('、') || '（无）'}` +
-      (missing.length > 0 ? ` | 缺包跳过：${missing.join('、')}` : '') +
-      (failed.length > 0 ? ` | 物化失败：${failed.join('、')}` : '') +
-      ` | 注入清单 ${injectFile}`,
+    (missing.length > 0 ? ` | 缺包跳过：${missing.join('、')}` : '') +
+    (failed.length > 0 ? ` | 物化失败：${failed.join('、')}` : '') +
+    ` | 注入清单 ${injectFile}`,
   )
   // 缺包不再纯静默：单独发一条警告，点名缺的包与补救办法（#20）
   if (missing.length > 0) {
-    warn(
-      `警告：插件缺包跳过：${missing.join('、')}——缺的插件本次不注入；若来自子模块，先 git submodule update --init 拉取再启动`,
+    log.warn(
+      `插件缺包跳过：${missing.join('、')}——缺的插件本次不注入；若来自子模块，先 git submodule update --init 拉取再启动`,
     )
   }
   return { pool, injectFile, staged, missing, failed }
@@ -207,7 +206,7 @@ export interface CleanupResult {
 
 export function cleanupStagedPlugins(
   staged: readonly StagedPlugin[],
-  log: (line: string) => void = (): void => {},
+  log: Logger = NOOP_LOGGER,
 ): CleanupResult {
   const removed: string[] = []
   const kept: string[] = []
@@ -223,7 +222,7 @@ export function cleanupStagedPlugins(
     }
     const absolute = resolve(dirname(entry.link), target)
     if (absolute !== resolve(entry.dir)) {
-      log(`[exit] 跳过他实例的插件链接 ${entry.link} -> ${target}`)
+      log.debug(`跳过他实例的插件链接 ${entry.link} -> ${target}`)
       kept.push(entry.link)
       continue
     }
@@ -231,10 +230,10 @@ export function cleanupStagedPlugins(
       rmSync(entry.link, { force: true })
       removed.push(entry.link)
     } catch (error) {
-      log(`[exit] 清理插件链接失败 ${entry.link}：${String(error)}`)
+      log.warn(`清理插件链接失败 ${entry.link}：${String(error)}`)
       kept.push(entry.link)
     }
   }
-  if (removed.length > 0) log(`[exit] 已清理插件链接 ${removed.length} 个：${removed.join('、')}`)
+if (removed.length > 0) log.info(`已清理插件链接 ${removed.length} 个：${removed.join('、')}`)
   return { removed, kept }
 }

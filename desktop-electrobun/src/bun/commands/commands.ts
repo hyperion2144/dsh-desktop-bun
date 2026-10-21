@@ -20,8 +20,10 @@ import type { ShellUpdater } from '../platform/updater.ts'
 import type { UpdateNoticeStore, UpdateNoticeTarget } from './update-notice-store.ts'
 import type { ProxyEnv } from '../../shared/net/proxy-env.ts'
 import type { KeepAwakeCapability } from '../notify/keep-awake.ts'
-import type { CommandHandlers, RuntimeCatalogSnapshot } from '../../../../contracts/index.ts'
+import type { CommandArgs, CommandHandlers, CommandResult, RuntimeCatalogSnapshot } from '../../../../contracts/index.ts'
 import { evaluateRuntimeUpdates } from '../../shared/runtime/runtime-update.ts'
+import { pageLevelToLogLevel, type Logger } from '../../shared/logging/levels.ts'
+import { classifyLevel } from '../../shared/app/log-file.ts'
 
 /**
  * 壳 RPC 命令表：全部命令与参数/回执形状以根 contracts/ 为单一事实源。
@@ -39,11 +41,22 @@ export interface CommandDeps {
   profile: string | (() => string)
   /** 'darwin' | 'win32' | 'linux'（旧壳 `desktop_platform_tag()`） */
   platform: string
-  log: (line: string) => void
+    log: Logger
   /** 当前生效的设置（读自磁盘；服务面持有的是同一份文件的读写者） */
   settings: () => DesktopSettings
   /** 读改写设置（走 settings-store 的原子写） */
-  save: (patch: Record<string, unknown>) => DesktopSettings
+    save: (patch: Record<string, unknown>) => DesktopSettings
+    /** #221 统一日志：三个日志管理命令的壳侧实现（内核/目录选择/reveal 由服务面接好）；无窗口单测可不接。 */
+    logging?: {
+        list: (reveal: boolean) => CommandResult<'list_log_files'>
+        exportRange: (args: CommandArgs<'export_log_range'>, destDir: string) => CommandResult<'export_log_range'>
+        clear: () => CommandResult<'clear_logs'>
+        /** save_desktop_settings 触发的保留清理回执（取走即清；没触发过为 null）。 */
+        takeCleanupReceipt: () => CommandResult<'clear_logs'> | null
+        /** 原生目录选择器（导出目标；取消/无窗口回 null）。 */
+        chooseDir: () => Promise<string | null>
+        reveal: (path: string) => void
+    }
   /** dsh 服务面：重启（设置面板调；#60 起为壳级完整重启，缺省回落宿主级） */
   restartService?: () => Promise<void>
   /** #119：整应用退出 + 自动重启（B）。拉不起时必须带原因回传——dev 态要显式降级，禁止假装成功。 */
@@ -275,9 +288,11 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
         throw new Error('save_desktop_settings: patch 必须是对象')
       }
-      const next = deps.save(patch as Record<string, unknown>)
-      deps.log(`[rpc] 保存设置：${Object.keys(patch as Record<string, unknown>).join('、')}`)
-      return { settings: serializeSettings(next) }
+        const next = deps.save(patch as Record<string, unknown>)
+        deps.log.info(`rpc：保存设置：${Object.keys(patch as Record<string, unknown>).join('、')}`)
+        // #221：patch 动了日志保留策略时，壳同步触发过一次保留清理，回执随本次保存带回（#232 命令契约）
+        const logCleanup = deps.logging?.takeCleanupReceipt() ?? null
+        return { settings: serializeSettings(next), ...(logCleanup === null ? {} : { log_cleanup: logCleanup }) }
     },
 
     // 代理设置回显（旧壳 get_proxy_settings 的六字段）：凭据单独回吐（F3），effective 是对象
@@ -419,14 +434,14 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
         if (snapshot.builtinVersion === version) throw new Error(`${version} 是内置版本，不可删除`)
       }
       await deps.removeRuntime(version)
-      deps.log(`[rpc] 卸载运行时 dsh ${version}`)
+        deps.log.info(`rpc：卸载运行时 dsh ${version}`)
       return { ok: true, version }
     },
 
     // 设置面板切 dsh 来源 / profile 后的动作：重启服务（#60 起为壳级完整重启，与托盘同语义）
     restart_dsh_service: async () => {
       if (deps.restartService === undefined) throw new Error('restart_dsh_service: 服务面不可用')
-      deps.log('[rpc] 收到重启 dsh 服务请求')
+        deps.log.info('rpc：收到重启 dsh 服务请求')
       await deps.restartService()
       return {}
     },
@@ -437,9 +452,9 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
     // 失败（如 dev 构建不支持自拉起）**不抛**：把原因原样回传，让页面说人话，而不是假装成功。
     restart_desktop_app: async () => {
       if (deps.restartApp === undefined) throw new Error('restart_desktop_app: 桌面壳重启不可用')
-      deps.log('[rpc] 收到重启桌面应用请求')
+        deps.log.info('rpc：收到重启桌面应用请求')
       const result = await deps.restartApp()
-      deps.log(`[rpc] 重启桌面应用：${result.ok ? '已拉起新实例，本进程即将退出' : `${result.reason ?? 'unknown'} —— ${result.message ?? ''}`}`)
+        deps.log.info(`rpc：重启桌面应用：${result.ok ? '已拉起新实例，本进程即将退出' : `${result.reason ?? 'unknown'} —— ${result.message ?? ''}`}`)
       return result
     },
 
@@ -615,26 +630,26 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       const request = deps.notifyRequestPermission
       if (request === undefined) {
         // 没有桥（非 macOS / 没打包 / 库缺失）：如实说，不让面板以为我们申请过
-        deps.log('[notify] 本平台没有可用的授权申请通道（面板只显示状态）')
+          deps.log.warn('notify：本平台没有可用的授权申请通道（面板只显示状态）')
         return { granted: false, permission: deps.notifyPermission?.() ?? 'unavailable', prompted: false }
       }
       const before = deps.notifyPermission?.() ?? 'unavailable'
       const permission = request()
-      deps.log(`[notify] 申请通知权限：${before} → ${permission}（${permissionHint(permission)}）`)
+        deps.log.info(`notify：申请通知权限：${before} → ${permission}（${permissionHint(permission)}）`)
       return { granted: permission === 'granted', permission, prompted: permission !== before || permission === 'not_determined' }
     },
     // `custom:<名>`（或裸名）播 `$DSH_HOME/sounds/<名>`；客户端传的是 `{ sound }`。
     preview_notification_sound: (args) => {
       const raw = argString(args, 'sound') || argString(args, 'name')
       const sound = raw.startsWith('custom:') ? raw.slice('custom:'.length) : raw
-      deps.log(`[notify] 试听请求：sound = ${sound === '' ? '(空)' : sound}`)
+        deps.log.debug(`notify：试听请求：sound = ${sound === '' ? '(空)' : sound}`)
       if (sound === '' || sound === 'none') {
-        deps.log('[notify] 试听：none/空 ⇒ 不响')
+          deps.log.debug('notify：试听：none/空 ⇒ 不响')
         return { played: null, sound, audible: false }
       }
       if (sound === 'default') {
         const audible = deps.playSystemSound?.() === true
-        if (!audible) deps.log('[notify] 试听系统提示音：本机没有可用后端，未出声')
+          if (!audible) deps.log.warn('notify：试听系统提示音：本机没有可用后端，未出声')
         return { played: 'default', sound, audible }
       }
       const audible = deps.playSound?.(sound) === true
@@ -655,11 +670,11 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
     // 客户端契约是 `{ level, msg, pageUrl }`（旧壳 `commands.rs:139`）：写
     // `$DSH_HOME/dsh-desktop-webview.log`，warn/error 另镜像到壳日志。
     log_console: (args) => {
-      const level = argString(args, 'level', 'log')
+        const level = classifyLevel(argString(args, 'level', 'log'))
       const msg = argString(args, 'msg', '')
       const pageUrl = argString(args, 'pageUrl', '')
       if (deps.logPageConsole !== undefined) deps.logPageConsole({ level, msg, pageUrl })
-      else deps.log(`[page.${level}] ${msg}`)
+      else deps.log[pageLevelToLogLevel(level)](`page：${msg}`)
       return {}
     },
     // 批量版（#54 数据面聚合）：client 攒批后一次调用，壳侧逐条走与 log_console 完全相同的
@@ -669,16 +684,16 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       for (const item of items) {
         if (typeof item !== 'object' || item === null) continue
         const row = item as Record<string, unknown>
-        const level = argString(row, 'level', 'log')
+          const level = classifyLevel(argString(row, 'level', 'log'))
         const msg = argString(row, 'msg', '')
         const pageUrl = argString(row, 'pageUrl', '')
         if (deps.logPageConsole !== undefined) deps.logPageConsole({ level, msg, pageUrl })
-        else deps.log(`[page.${level}] ${msg}`)
+        else deps.log[pageLevelToLogLevel(level)](`page：${msg}`)
       }
       return { count: items.length }
     },
     log_diag: (args) => {
-      deps.log(`[diag] ${argString(args, 'msg', '(empty)')}`)
+        deps.log.debug(`诊断：${argString(args, 'msg', '(empty)')}`)
       return {}
     },
     // 诊断快照 / 导出（#220「日志与诊断」）：一个 JSON 回答「哪版、哪个 profile、端口/pid、日志在哪」
@@ -692,7 +707,23 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       if (snapshot === null || deps.exportDiagnostics === undefined) throw new Error('壳未接诊断导出')
       const result = deps.exportDiagnostics(snapshot)
       return { path: result.path, bytes: result.bytes }
-    },
+      },
+
+      // ---- #221 统一日志：列清单 / 按范围导出 / 一键清理（三命令显式不进远程/访客白名单） ----
+      list_log_files: (args) => {
+          if (deps.logging === undefined) throw new Error('list_log_files：当前运行模式没有日志内核')
+          return deps.logging.list(args.reveal === true)
+      },
+      export_log_range: async (args) => {
+          if (deps.logging === undefined) throw new Error('export_log_range：当前运行模式没有日志内核')
+          const dir = await deps.logging.chooseDir()
+          if (dir === null) throw new Error('export_log_range：未选择导出目录')
+          return deps.logging.exportRange(args, dir)
+      },
+      clear_logs: () => {
+          if (deps.logging === undefined) throw new Error('clear_logs：当前运行模式没有日志内核')
+          return deps.logging.clear()
+      },
 
     // ---- #128：页面注入脚本（preload）——原先打壳自答 HTTP 端点，现走官方 RPC 显式方法 ----
     // 两条都只依赖注入的 deps，boot 就绪判定沿用 HTTP 路由的 503 语义（throw ⇒ 命令面报错）。

@@ -13,6 +13,7 @@ import {
   UPDATE_NOTICE_FILE,
   writeUpdateNoticeState,
 } from '../src/bun/commands/update-notice-store.ts'
+import { collectingLogger } from './helpers/test-logger.ts'
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'dsh-update-notice-'))
@@ -171,7 +172,7 @@ describe('createUpdateNoticeStore：拉黑与记账', () => {
       // appSupport 指到一个「文件/子目录」上 ⇒ mkdirSync 与 rename 都会失败，模拟磁盘不可写。
       writeFileSync(join(dir, 'blocker'), 'x')
       const logs: string[] = []
-      const store = createUpdateNoticeStore(join(dir, 'blocker', 'app-support'), (line) => logs.push(line))
+        const store = createUpdateNoticeStore(join(dir, 'blocker', 'app-support'), collectingLogger(logs))
       const state = store.markNotified([{ kind: 'shell', version: '0.3.0' }])
       // 记账结果照样返回（下次启动会再提醒一次），但失败进了日志而不是消失了。
       expect(state.lastNotified.shell).toBe('0.3.0')

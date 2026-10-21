@@ -8,6 +8,8 @@ import { buildChildEnv, assertChildEnv } from '../../shared/app/child-env.ts'
 import type { ShellLayout } from '../runtime/runtime.ts'
 import type { ProxyEnv } from '../../shared/net/proxy-env.ts'
 import { createPlatformProbe, startTreeSampler, stopProcessTree, type TreeSampler } from './process-tree.ts'
+import type { Logger } from '../../shared/logging/levels.ts'
+import { NOOP_LOGGER } from '../../shared/app/noop-log.ts'
 
 export interface HostReady {
   url: string
@@ -24,7 +26,7 @@ export interface StartHostInput {
   mode?: 'existing' | 'fresh'
   /** dsh 子进程的环境；缺省用壳继承的 process.env（GUI 启动时是 launchd 的最小集） */
   env?: Record<string, string | undefined>
-  onLog?: (line: string) => void
+  onLog?: Logger
   /** #101 运行期通道：宿主 client-module 图重算后，经 stdout `HOST-INJECTIONS {json}` 行上报新注入清单 */
   onInjections?: (injections: unknown[]) => void
   timeoutMs?: number
@@ -75,7 +77,7 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
   const { layout } = input
   const profile = input.profile ?? layout.profile
   const bunBin = input.bunBin ?? process.execPath
-  const onLog = input.onLog ?? (() => {})
+  const onLog: Logger = input.onLog ?? NOOP_LOGGER
   const onInjections = input.onInjections ?? (() => {})
   const env = buildChildEnv({
     base: input.env ?? process.env,
@@ -111,7 +113,7 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
     profile,
     input.mode ?? 'existing',
   ]
-  onLog(`[shell] spawn host: ${args.slice(1).join(' ')}`)
+  onLog.debug(`spawn host: ${args.slice(1).join(' ')}`)
   const child = Bun.spawn(args, {
     cwd: layout.home, // GUI 启动时 cwd 不是家目录（CHILD_RESOURCE_CONDITIONS.cwdIsHome）
     env,
@@ -125,17 +127,55 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
 
   // 退出信号：守护器（supervisor）与 stop() 都盯着它；这里只记一条日志。
   const exited = child.exited.then((code) => {
-    onLog(`[shell] 宿主退出：pid = ${String(child.pid)} code = ${String(code)}`)
+    onLog.info(`宿主退出：pid = ${String(child.pid)} code = ${String(code)}`)
     treeSampler.stop()
     return code
   })
 
   const stderrPump = (async () => {
     const decoder = new TextDecoder()
+    // #228：宿主 stderr 是 shell.log 里量最大的一路——按 stderr 语义定 error 级（#224 拍板
+    // stderr⇒error、stdout⇒info），并做「连续重复折叠 + 每 10 秒窗口限流」：stderr 是排障
+    // 关键，不整段丢；但一次崩溃也不能把 shell.log 冲爆。
+    const STDERR_WINDOW_MS = 10_000
+    const STDERR_WINDOW_MAX = 50
+    let windowStart = Date.now()
+    let windowLines = 0
+    let windowSuppressed = 0
+    let lastLine = ''
+    let lastCount = 0
+    const flushRepeats = (): void => {
+      if (lastCount > 1) onLog.error(`（上一行连续重复 ${String(lastCount)} 次）`)
+      lastCount = 1
+    }
     for await (const chunk of child.stderr as ReadableStream<Uint8Array>) {
       const text = decoder.decode(chunk).trimEnd()
-      if (text !== '') for (const line of text.split('\n')) onLog(`[host stderr] ${line}`)
+      if (text === '') continue
+      for (const line of text.split('\n')) {
+        if (line === lastLine) {
+          lastCount += 1
+          continue
+        }
+        flushRepeats()
+        lastLine = line
+        lastCount = 1
+        const now = Date.now()
+        if (now - windowStart >= STDERR_WINDOW_MS) {
+          if (windowSuppressed > 0) onLog.error(`（上一个 10 秒窗口抑制了 ${String(windowSuppressed)} 行）`)
+          windowStart = now
+          windowLines = 0
+          windowSuppressed = 0
+        }
+        if (windowLines >= STDERR_WINDOW_MAX) {
+          windowSuppressed += 1
+          continue
+        }
+        windowLines += 1
+        onLog.error(line)
+      }
     }
+    flushRepeats()
+    if (windowSuppressed > 0) onLog.error(`（本次抑制了 ${String(windowSuppressed)} 行）`)
   })()
 
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS
@@ -167,11 +207,12 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
                 const update = JSON.parse(line.slice(INJECTIONS_PREFIX.length)) as { injections?: unknown[] }
                 if (Array.isArray(update.injections)) onInjections(update.injections)
               } catch (error) {
-                onLog(`[host] HOST-INJECTIONS 解析失败：${error instanceof Error ? error.message : String(error)}`)
+                onLog.error(`HOST-INJECTIONS 解析失败：${error instanceof Error ? error.message : String(error)}`)
               }
               continue
             }
-            if (line.trim() !== '') onLog(`[host] ${line}`)
+            // 宿主 stdout 逐行：高频例行输出（#228）——落 debug 级，默认档不再刷屏。
+            if (line.trim() !== '') onLog.debug(line)
             at = buffer.indexOf('\n')
           }
         }
@@ -211,9 +252,11 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
         onLog,
       })
       if (result.survivors.length > 0) {
-        onLog(`[shell] 宿主树停止超时，放行幸存进程：${result.survivors.join(', ')}（不阻塞重启）`)
+        onLog.warn(`宿主树停止超时，放行幸存进程：${result.survivors.join(', ')}（不阻塞重启）`)
       }
-      await stderrPump.catch(() => {})
+      await stderrPump.catch((error: unknown) => {
+        onLog.debug(`宿主 stderr 泵结束异常：${String(error)}`)
+      })
     },
   }
 }

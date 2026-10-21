@@ -12,6 +12,7 @@
  * 单测里给假视图），历史与几何走 `native-webview.ts` 的原生核。
  */
 
+import type { Logger } from '../../shared/logging/levels.ts'
 import {
   EMPTY_GUEST_STATE,
   GUEST_DEFAULT_URL,
@@ -52,7 +53,7 @@ export interface GuestCaller {
 }
 
 export interface GuestManagerOptions {
-  log: (line: string) => void
+    log: Logger
   /** 原生核；null = 拿不到（几何与历史降级成一条日志，guest 仍可创建/导航） */
   core: NativeWebviewCore | null
   /** 建视图；窗口不在了返回 null */
@@ -121,7 +122,7 @@ export function createGuestManager(options: GuestManagerOptions): GuestCommands 
   const degrade = (what: string): void => {
     if (degradedLogged) return
     degradedLogged = true
-    options.log(`[guest] ${what}：原生核不可用，几何与历史按钮降级（其余功能不受影响）`)
+      options.log.warn(`${what}：原生核不可用，几何与历史按钮降级（其余功能不受影响）`)
   }
 
   const refreshHistory = (entry: GuestEntry): void => {
@@ -134,7 +135,7 @@ export function createGuestManager(options: GuestManagerOptions): GuestCommands 
       entry.state.canGoBack = options.core.canGoBack(entry.view.id)
       entry.state.canGoForward = options.core.canGoForward(entry.view.id)
     } catch (error) {
-      options.log(`[guest] 读历史失败：${error instanceof Error ? error.message : String(error)}`)
+        options.log.warn(`读历史失败：${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -171,7 +172,7 @@ export function createGuestManager(options: GuestManagerOptions): GuestCommands 
       if (live === undefined) return
       if (!live.state.loading || live.loadToken !== token) return
       live.state.loading = false
-      options.log(`[guest] 加载超时判失败：${live.lease}`)
+        options.log.warn(`加载超时判失败：${live.lease}`)
       push(live, 'failed')
     }, loadTimeoutMs)
   }
@@ -217,7 +218,7 @@ export function createGuestManager(options: GuestManagerOptions): GuestCommands 
       if (url === '') return
       if (nativeAllowsNavigation(detail) === false) return
       if (guestNavigationAllowed(url, { appHosts: options.appHosts?.() ?? [] })) return
-      options.log(`[guest] 导航被策略拒绝：${url}`)
+        options.log.warn(`导航被策略拒绝：${url}`)
       view.loadURL(GUEST_DEFAULT_URL)
     })
     view.on('new-window-open', (event) => {
@@ -229,14 +230,14 @@ export function createGuestManager(options: GuestManagerOptions): GuestCommands 
             ? String((detail as { url: string }).url)
             : ''
       if (url === '') return
-      options.log(`[guest] 新窗口请求交回 dsh：${url}`)
+        options.log.info(`新窗口请求交回 dsh：${url}`)
       options.pushToHost(entry.caller, hostOpenRequestedScript(entry.lease, url))
     })
     view.on('host-message', (event) => {
       applyReport(entry, event.data?.detail)
     })
     view.on('download-started', () => {
-      options.log('[guest] guest 内下载请求（旧壳一律拒绝；Electrobun 无取消 API，仅记录）')
+        options.log.info('guest 内下载请求（旧壳一律拒绝；Electrobun 无取消 API，仅记录）')
     })
   }
 
@@ -255,7 +256,7 @@ export function createGuestManager(options: GuestManagerOptions): GuestCommands 
     try {
       entry.view.remove()
     } catch (error) {
-      options.log(`[guest] 移除视图失败：${error instanceof Error ? error.message : String(error)}`)
+        options.log.warn(`移除视图失败：${error instanceof Error ? error.message : String(error)}`)
     }
     push(entry, kind)
     entries.delete(entry.lease)
@@ -295,12 +296,12 @@ export function createGuestManager(options: GuestManagerOptions): GuestCommands 
         // 等不到就丢掉重建一次（视图还没显示过，不必推 gone）。
         const ready = await waitReady(entry)
         if (!ready) {
-          options.log(`[guest] 分区 ${partition} 首次创建未就绪，重建视图（CEF 请求上下文预热）`)
+            options.log.debug(`分区 ${partition} 首次创建未就绪，重建视图（CEF 请求上下文预热）`)
           if (entry.timer !== null) clearTimer(entry.timer)
           try {
             entry.view.remove()
           } catch (error) {
-            options.log(`[guest] 丢弃未就绪视图失败：${error instanceof Error ? error.message : String(error)}`)
+              options.log.warn(`丢弃未就绪视图失败：${error instanceof Error ? error.message : String(error)}`)
           }
           entries.delete(entry.lease)
           entry = build()
@@ -308,13 +309,13 @@ export function createGuestManager(options: GuestManagerOptions): GuestCommands 
         }
         warmPartitions.add(partition)
       }
-      options.log(`[guest] acquire：lease=${lease} workspace=${workspaceKey} view=${entry.view.id} partition=${partition}`)
+          options.log.debug(`acquire：lease=${lease} workspace=${workspaceKey} view=${entry.view.id} partition=${partition}`)
       return { lease, partition }
     },
     release(args, caller) {
       const entry = requireEntry(args, caller)
       drop(entry, 'gone')
-      options.log(`[guest] release：lease=${entry.lease}`)
+        options.log.debug(`release：lease=${entry.lease}`)
       return { ok: true }
     },
     navigate(args, caller) {
@@ -390,7 +391,7 @@ export function createGuestManager(options: GuestManagerOptions): GuestCommands 
         drop(entry, 'gone')
         released += 1
       }
-      options.log(`[guest] release_all：${caller.label} 回收 ${released} 个`)
+        options.log.info(`release_all：${caller.label} 回收 ${released} 个`)
       return { ok: true, released }
     },
     releaseHost(label) {

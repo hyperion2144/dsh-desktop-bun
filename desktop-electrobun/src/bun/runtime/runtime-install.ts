@@ -18,6 +18,7 @@ import { isRuntimeTreeValid, runtimeDirOf, runtimeStagingDirOf, runtimesDir } fr
 import { SCENARIO } from '../../shared/notify/notify-policy.ts'
 import type { RuntimeSource } from '../../shared/settings/settings.ts'
 import { createPlatformProbe, stopProcessTree } from '../host/process-tree.ts'
+import type { Logger } from '../../shared/logging/levels.ts'
 
 
 /**
@@ -104,7 +105,7 @@ export interface EnsureShimDirInput {
   hasNode: boolean
   /** 内置 pnpm.cjs（#70 宿主 PATH 垫片）；null/缺省 = 只管 node 垫片（旧通道语义） */
   pnpmCjs?: string | null
-  log?: (line: string) => void
+  log?: Logger
 }
 
 /**
@@ -131,21 +132,21 @@ export function ensureShimDir(input: EnsureShimDirInput): string | null {
       // 系统里有 node 就不插手：让构建脚本用它最稳（我们不改用户的工具链）。
       writeFileSync(join(dir, 'node'), nodeShimScript(input.bunPath), { mode: 0o755 })
       writeFileSync(join(dir, 'node.cmd'), shimCmdScript(input.bunPath), { mode: 0o755 })
-      input.log?.(`垫片：PATH 上没有 node，已用 Bun 垫片（${join(dir, 'node')}）`)
+      input.log?.debug(`垫片：PATH 上没有 node，已用 Bun 垫片（${join(dir, 'node')}）`)
     }
     if (wantsPnpm && input.pnpmCjs) {
       writeFileSync(join(dir, 'pnpm'), pnpmShimScript(input.bunPath, input.pnpmCjs), { mode: 0o755 })
       writeFileSync(join(dir, 'pnpm.cmd'), shimCmdScript(input.bunPath, input.pnpmCjs), { mode: 0o755 })
-      input.log?.(`垫片：内置 pnpm 已进宿主 PATH（${dir}）`)
+      input.log?.debug(`垫片：内置 pnpm 已进宿主 PATH（${dir}）`)
     }
     if (cleanPnpm) {
       rmSync(join(dir, 'pnpm'), { force: true })
       rmSync(join(dir, 'pnpm.cmd'), { force: true })
-      input.log?.(`垫片：pnpm.cjs 解析不到，已清掉陈旧 pnpm 垫片（${dir}）`)
+      input.log?.debug(`垫片：pnpm.cjs 解析不到，已清掉陈旧 pnpm 垫片（${dir}）`)
     }
     return wantsNode || wantsPnpm ? dir : null
   } catch (error) {
-    input.log?.(`垫片目录创建失败（${error instanceof Error ? error.message : String(error)}）`)
+    input.log?.warn(`垫片目录创建失败（${error instanceof Error ? error.message : String(error)}）`)
     return null
   }
 }
@@ -229,7 +230,7 @@ export interface InstallRuntimeInput {
   env?: Record<string, string | undefined>
   timeoutMs?: number
   onProgress?: (progress: PnpmProgress) => void
-  onLog?: (line: string) => void
+  onLog?: Logger
   /** #97：取消信号。到达后树级停止安装进程树 + 清半成品，并以 RuntimeInstallCancelledError 收场 */
   signal?: AbortSignal
   /** #97：树级停止实现（默认 process-tree.stopProcessTree；单测注入假实现，不真杀进程） */
@@ -264,7 +265,7 @@ export async function installRuntime(input: InstallRuntimeInput): Promise<void> 
     env.PATH = `${input.nodeShimDir}${delimiter}${env.PATH ?? ''}`
   }
   const spawn = input.spawnImpl ?? ((command: string[], options: Record<string, unknown>) => Bun.spawn(command, options as never))
-  input.onLog?.(`运行时安装：${input.bunPath} ${input.pnpmCjs} add ${NPM_PACKAGE}@${input.version}（cwd = ${dir}）`)
+  input.onLog?.debug(`运行时安装：${input.bunPath} ${input.pnpmCjs} add ${NPM_PACKAGE}@${input.version}（cwd = ${dir}）`)
   // `--reporter=default`：非 TTY 下 pnpm 默认走 append-only，**不打 Progress 行**（本机实测），
   // 面板的进度就永远是 0；显式要 default reporter 才有进度可读（旧壳没带这个旗标，一直读不到）。
   const proc = spawn([input.bunPath, input.pnpmCjs, 'add', '--reporter=default', `${NPM_PACKAGE}@${input.version}`], {
@@ -291,29 +292,29 @@ export async function installRuntime(input: InstallRuntimeInput): Promise<void> 
         rootPid,
         rootExited,
         probe: createPlatformProbe(),
-        onLog: (line) => {
-          input.onLog?.(line)
-        },
+        onLog: input.onLog,
       })
     })
   const procPid = typeof proc.pid === 'number' ? proc.pid : 0
   const stopInstallTree = (): void => {
     if (procPid > 0) {
       void stopTree({ rootPid: procPid, rootExited: proc.exited }).catch((error: unknown) => {
-        input.onLog?.(`运行时安装：安装进程树停止失败：${error instanceof Error ? error.message : String(error)}`)
+        input.onLog?.warn(`运行时安装：安装进程树停止失败：${error instanceof Error ? error.message : String(error)}`)
       })
       return
     }
     // 拿不到 pid（自定义 spawnImpl / 平台不给）：退化为停单进程，好过放任它跑完。
     try {
       proc.kill?.()
-    } catch {}
+    } catch (error) {
+      input.onLog?.error(`运行时安装：终止安装进程失败（pid ${String(procPid)}）：${error instanceof Error ? error.message : String(error)}`)
+    }
   }
   let cancelled = false
   const onAbort = (): void => {
     cancelled = true
     stopInstallTree()
-    input.onLog?.(`运行时安装：收到取消信号，正在停止安装进程树（dsh ${input.version}）`)
+    input.onLog?.info(`运行时安装：收到取消信号，正在停止安装进程树（dsh ${input.version}）`)
   }
   if (input.signal !== undefined) {
     if (input.signal.aborted) onAbort()
@@ -371,7 +372,7 @@ export async function installRuntime(input: InstallRuntimeInput): Promise<void> 
   // 发布：同盘 rename 是原子的。清掉可能残留的无效旧目录（POSIX 下 rename 到非空目录会失败）。
   rmSync(finalDir, { recursive: true, force: true })
   renameSync(dir, finalDir)
-  input.onLog?.(`运行时安装：已发布到 ${finalDir}`)
+  input.onLog?.info(`运行时安装：已发布到 ${finalDir}`)
 }
 
 /** 面板轮询读到的下载状态（旧壳 `runtime_download_status` 同形状 + #97 的 cancelled）。 */
@@ -399,7 +400,7 @@ export interface DownloaderDeps {
   install: (version: string, onProgress: (progress: PnpmProgress) => void, signal: AbortSignal) => Promise<void>
   /** 装成功后记进 installed.json */
   record: (version: string, source: string) => void
-  log?: (line: string) => void
+  log?: Logger
 }
 
 export function createRuntimeDownloader(deps: DownloaderDeps): RuntimeDownloader {
@@ -425,19 +426,19 @@ export function createRuntimeDownloader(deps: DownloaderDeps): RuntimeDownloader
         // #79：成功终态把 downloaded 对齐 resolved——pnpm 的最后一条 Progress 行往往停在下载中段
         // （linking 阶段不再打进度），原样保留就成了「86% 定格」的假活；装成了就是全部拉完。
         status = { active: false, version, resolved: status.resolved, downloaded: status.resolved, added: status.added, error: '', cancelled: false }
-        deps.log?.(`运行时安装完成：dsh ${version}（来源 ${source}）`)
+        deps.log?.info(`运行时安装完成：dsh ${version}（来源 ${source}）`)
         return { ok: true as const, version }
       } catch (error) {
         // #97：取消是独立终态——error 留空，面板读到 cancelled 才显示「已取消」；失败才带 error。
         if (controller.signal.aborted || error instanceof RuntimeInstallCancelledError) {
           status = { active: false, version, resolved: status.resolved, downloaded: status.downloaded, added: status.added, error: '', cancelled: true }
-          deps.log?.(`运行时安装已取消：dsh ${version}`)
+          deps.log?.info(`运行时安装已取消：dsh ${version}`)
           throw error
         }
         const message = error instanceof Error ? error.message : String(error)
         // #79：失败终态原样保留最后进度快照 + error——面板靠 error 判定失败、靠数字展示「拉到哪断的」。
         status = { active: false, version, resolved: status.resolved, downloaded: status.downloaded, added: status.added, error: message, cancelled: false }
-        deps.log?.(`运行时安装失败：dsh ${version} —— ${message}`)
+        deps.log?.error(`运行时安装失败：dsh ${version} —— ${message}`)
         throw error
       } finally {
         inflight = null
@@ -446,7 +447,7 @@ export function createRuntimeDownloader(deps: DownloaderDeps): RuntimeDownloader
     cancel: async () => {
       const task = inflight
       if (task === null || !status.active) return { cancelled: false, version: '' }
-      deps.log?.(`运行时安装取消中：dsh ${task.version}`)
+      deps.log?.info(`运行时安装取消中：dsh ${task.version}`)
       task.controller.abort()
       // 终态（cancelled 标记 + 半成品清理）由安装收尾路径落状态，面板从轮询快照读到；这里只
       // 回报「取消已受理」——官方通道 120s 上限会把长回包丢掉，面板不能等这个 Promise 收尾。

@@ -9,6 +9,7 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import type { Logger } from '../../shared/logging/levels.ts'
 import {
   DEFAULT_GITHUB_REPO,
   INSTALLED_MANIFEST,
@@ -28,9 +29,7 @@ import {
   type InstalledRuntime,
 } from '../../shared/runtime/runtime-catalog.ts'
 
-export interface RuntimeStoreLogger {
-  (message: string): void
-}
+export type RuntimeStoreLogger = Logger
 
 export function runtimesDir(appSupport: string): string {
   return join(appSupport, RUNTIMES_DIR)
@@ -70,7 +69,7 @@ export function purgeStagingDirs(appSupport: string, log?: RuntimeStoreLogger): 
       rmSync(target, { recursive: true, force: true })
       removed += 1
     } catch (error) {
-      log?.(`安装残留清理失败：${target}（${error instanceof Error ? error.message : String(error)}）`)
+      log?.warn(`安装残留清理失败：${target}（${error instanceof Error ? error.message : String(error)}）`)
     }
   }
   return removed
@@ -163,9 +162,9 @@ export function trashInstalledRuntime(appSupport: string, version: string, log?:
   if (existsSync(dir)) {
     const target = join(trash, `${String(Date.now())}-${version}`)
     renameSync(dir, target)
-    log?.(`运行时 dsh ${version} 已移入回收站（下次启动清理）：${target}`)
+    log?.info(`运行时 dsh ${version} 已移入回收站（下次启动清理）：${target}`)
   } else {
-    log?.(`运行时 dsh ${version} 目录不存在，只清理清单`)
+    log?.info(`运行时 dsh ${version} 目录不存在，只清理清单`)
   }
   forgetInstalledRuntime(appSupport, version)
 }
@@ -181,7 +180,7 @@ export function purgeRuntimeTrash(appSupport: string, log?: RuntimeStoreLogger):
       rmSync(target, { recursive: true, force: true })
       removed += 1
     } catch (error) {
-      log?.(`回收站清理失败：${target}（${error instanceof Error ? error.message : String(error)}）`)
+      log?.warn(`回收站清理失败：${target}（${error instanceof Error ? error.message : String(error)}）`)
     }
   }
   return removed
@@ -223,7 +222,7 @@ export async function fetchRuntimeCatalog(input: FetchCatalogInput): Promise<Cat
     return { entries: parseGithubCatalog(await response.json()) }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    input.log?.(`[runtime] 版本目录拉取失败（降级为仅本地已装）：${message}`)
+    input.log?.warn(`版本目录拉取失败（降级为仅本地已装）：${message}`)
     return { entries: [], error: message }
   } finally {
     clearTimeout(timeout)

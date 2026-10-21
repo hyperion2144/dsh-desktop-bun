@@ -27,6 +27,7 @@ export type { UpdateNoticeKind, UpdateNoticeTarget } from '../../shared/notify/u
 export { updateNoticeKey } from '../../shared/notify/update-notice-policy.ts'
 
 import { updateNoticeKey, type UpdateNoticeKind, type UpdateNoticeTarget } from '../../shared/notify/update-notice-policy.ts'
+import type { Logger } from '../../shared/logging/levels.ts'
 
 export interface UpdateNoticeState {
   /** 总开关，默认开（#136 的设置面板改它）。 */
@@ -107,7 +108,7 @@ export interface UpdateNoticeStore {
 }
 
 /** 一个 appSupport 一个实例；多 profile 的服务面共用同一份状态（去重不能各算各的）。 */
-export function createUpdateNoticeStore(appSupport: string, log?: (line: string) => void): UpdateNoticeStore {
+export function createUpdateNoticeStore(appSupport: string, log?: Logger): UpdateNoticeStore {
   const read = (): UpdateNoticeState => readUpdateNoticeState(appSupport)
   const write = (state: UpdateNoticeState): UpdateNoticeState => {
     try {
@@ -115,7 +116,7 @@ export function createUpdateNoticeStore(appSupport: string, log?: (line: string)
       return state
     } catch (error) {
       // 写不动就只丢这次记账：宁可多提醒一次，也不要让提醒功能整体炸掉。
-      log?.(`[update-notice] 写 ${UPDATE_NOTICE_FILE} 失败：${String(error)}`)
+      log?.warn(`写 ${UPDATE_NOTICE_FILE} 失败：${String(error)}`)
       return state
     }
   }

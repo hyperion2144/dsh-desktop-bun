@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { COMMAND_NAMES, type CommandName } from '../../contracts/index.ts'
 import { createCommandTable } from '../src/bun/commands/commands.ts'
+import { silentLogger } from './helpers/test-logger.ts'
 import { defaultSettings } from '../src/shared/settings/settings.ts'
 import { loadSettings, saveSettings, updateSettings } from '../src/bun/platform/settings-store.ts'
 
@@ -29,7 +30,7 @@ describe('#190 命令契约：COMMAND_NAMES 与壳命令表一致', () => {
         home,
         profile: 'desktop',
         platform: 'darwin',
-        log: () => {},
+          log: silentLogger,
         settings: () => settings,
         save: (patch) => (settings = updateSettings(home, patch)),
       })

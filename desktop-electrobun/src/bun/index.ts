@@ -9,7 +9,7 @@ import { systemLocale } from './platform/locale.ts'
 import { installApplicationMenu } from './windows/menu.ts'
 import { deriveMaximized, toggleWindowMaximize, windowMaxState, type WindowMaxState } from './windows/window-max.ts'
 import { pickWorkArea } from './windows/screen-work-area.ts'
-import { installShellConsoleTee, resolveShellLogFile, shellLogLine } from './platform/shell-log.ts'
+import { installShellConsoleTee, resolveShellLogFile } from './platform/shell-log.ts'
 import { bootPreloadScript } from './preload.ts'
 import { attachShellRpc } from './commands/rpc-bridge.ts'
 import { startService, type ServiceOptions, type ShellService } from './host/service.ts'
@@ -79,9 +79,24 @@ import { dirname, join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { createRegisterCli } from './commands/register-cli.ts'
 import { registerTrayLabel } from '../shared/app/register-cli.ts'
+import { loggingKernel } from './logging/kernel.ts'
 
 // 打包态主进程 stdout 无人接：把 console.* 同时 tee 进 shell.log（#80 取证缺口）。
 installShellConsoleTee()
+
+/**
+ * #228：带级别的日志转发。注入进来的回调（通知身份 / guest 管理器 / register CLI /
+ * 整应用重启 / 原生通知桥 / 通知投递）现在直接收 Logger：调用点按级别选方法，
+ * 级别与结构化参数在调用时定稿，写路径不再解析行内前缀。
+ *
+ * 源（source）就是模块身份：shell / guest / notify / register。路径口径与 service.ts 一致
+ * （DSH_SHELL_LOG 优先，兜 $DSH_HOME/shell.log）——内核是进程级单例，先到先锁。
+ */
+const logging = loggingKernel({ home: dshHome(process.env), files: { shell: resolveShellLogFile(process.env) } })
+const shellLog = logging.logger('shell')
+const guestLog = logging.logger('guest')
+const notifyLog = logging.logger('notify')
+const registerLog = logging.logger('register')
 
 /** 客户端版本标识：dsh 0.2.1-alpha.2 的 telemetry/product-analytics 插件把它当必填项。 */
 const CLIENT_VERSION = '0.1.0'
@@ -122,7 +137,7 @@ const platform = process.platform === 'darwin' ? 'darwin' : process.platform ===
 if (platform === 'darwin') installApplicationMenu(ApplicationMenu, APP_NAME)
 // Windows 通知身份（#107）：抢在任何能发通知的环节之前声明 AUMID 并注册身份，
 // 通知横幅才显示应用名与图标（缺了就显示进程名「BUN」）。失败只降级不阻断启动。
-if (platform === 'win32') ensureWindowsNotifyIdentity({ log: (line) => console.log(line) })
+if (platform === 'win32') ensureWindowsNotifyIdentity({ log: notifyLog })
 // 系统语言：CEF 默认 en-US，页面语言跟着错；旧壳（WKWebView）是天然跟随系统的。
 const locale = await systemLocale()
 // 页面外链与右键菜单都要主进程出面：CEF 不会自己弹菜单，也不接管 window.open。
@@ -160,9 +175,9 @@ if (devToolsPlan.reason === 'enabled-by-setting') {
 } else if (devToolsPlan.reason === 'port-invalid') {
   console.error(`[shell] 开发者工具：${DEVTOOLS_PORT_OVERRIDE_ENV} 非法（需要 1-65535 整数），按未开启处理`)
 } else if (devToolsPlan.reason === 'dev-build') {
-  console.log('[shell] 开发者工具：dev 构建，DevTools 菜单恒可见（打包态才吃 dev_tools 开关）')
+  console.debug('[shell] 开发者工具：dev 构建，DevTools 菜单恒可见（打包态才吃 dev_tools 开关）')
 } else {
-  console.log('[shell] 开发者工具：未开启（设置 dev_tools）——不监听调试口、不出菜单')
+  console.debug('[shell] 开发者工具：未开启（设置 dev_tools）——不监听调试口、不出菜单')
 }
 let tray: TrayHandle | null = null
 // 每视图授权台账（#220 决策 12）：每个窗口一枚 token，页面桥带回来，壳按视图种类放行命令。
@@ -174,13 +189,13 @@ const nativeCore = await loadNativeWebviewCore({
   importDir: import.meta.dir,
   env: process.env,
 })
-console.log(
-  nativeCore.core === null
-    ? `[guest] 原生核不可用：${nativeCore.error ?? '未知原因'}`
-    : `[guest] 原生核就绪：${nativeCore.libPath}`
-)
+if (nativeCore.core === null) {
+  console.warn(`[guest] 原生核不可用：${nativeCore.error ?? '未知原因'}`)
+} else {
+  console.log(`[guest] 原生核就绪：${nativeCore.libPath}`)
+}
 const guests = createGuestManager({
-  log: (line) => console.log(line),
+  log: guestLog,
   core: nativeCore.core,
   // guest 挂在发起调用的那个窗口上（多窗口下天然跟随宿主窗口）。
   createView: ({ partition, caller }) => {
@@ -230,7 +245,9 @@ const sessions = createProfileSessions({
     // 主窗已出画面：拆掉启动界面（页面自己也等 __DSH_BOOT_READY__，这里只负责别让两个窗口并存）
     try {
       splash?.close()
-    } catch {}
+    } catch (error) {
+      console.warn(`[shell] 启动界面关闭失败（冷启动）：${String(error)}`)
+    }
     splash = null
     windowVisible = true
   },
@@ -318,7 +335,7 @@ function restoreWindowFrame(profile: string = instanceProfile): WindowFrame {
       return repaired
     }
   }
-  console.log(`[shell] 还原窗口位置：${String(saved.x)},${String(saved.y)} ${String(saved.width)}×${String(saved.height)}`)
+  console.debug(`[shell] 还原窗口位置：${String(saved.x)},${String(saved.y)} ${String(saved.width)}×${String(saved.height)}`)
   return saved
 }
 
@@ -366,9 +383,7 @@ function ensureCatalog(): void {
       if (result.error === undefined) catalogCache = { at: Date.now(), entries: result.entries }
       else console.warn(`[shell] 拉运行时版本目录失败：${result.error}`)
     })
-    .catch((error: unknown) => {
-      console.warn(`[shell] 拉运行时版本目录失败：${String(error)}`)
-    })
+    .catch(() => { })
     .finally(() => {
       catalogPending = false
       tray?.setState(trayState())
@@ -467,7 +482,7 @@ function refreshTray(): void {
   ensureCatalog()
   // 窗口集合可能变了：重跑一次窗口图标（幂等、有缓存，覆盖后建的主窗/弹窗；#203 二轮）
   if (!noWindow && process.platform === 'win32') {
-    applyWindowsIcon(shellLogLine, windowIconCandidates(dirname(process.execPath)))
+    applyWindowsIcon(shellLog, windowIconCandidates(dirname(process.execPath)))
   }
   // 注册状态同理：TTL 内直接用缓存，绝不在菜单构建里同步 spawn 登录 shell
   void registerCli.refresh().then(() => {
@@ -555,12 +570,12 @@ function serviceOptionsFor(profile: string): ServiceOptions {
       // win＝点击后壳发合成 F12（与物理按键同路径弹原生 DevTools 窗），复制地址形态已废弃。
       const items = contextMenuItems(request, linkIsExternal, { devTools: devToolsMenuOn })
       // 「挂不上也要出声」：菜单内容进日志，实机排查时能看出是哪一档
-      console.log(`[shell] 右键菜单：${items.map((item) => item.label ?? item.role ?? item.type ?? '?').join(' | ')}`)
+      console.debug(`[shell] 右键菜单：${items.map((item) => item.label ?? item.role ?? item.type ?? '?').join(' | ')}`)
       ContextMenu.showContextMenu(items as unknown[])
     },
     onStage: (stage) => {
       lastStage = stage
-      console.log(`[shell] 启动阶段：${stageLabel(stage)}（${String(stagePercent(stage))}%）`)
+      console.debug(`[shell] 启动阶段：${stageLabel(stage)}（${String(stagePercent(stage))}%）`)
       pushStage()
     },
     // #142：服务面在后台判定完就把提醒窗开出来（没得提醒时它自己返回 false）
@@ -795,7 +810,10 @@ async function restartDsh(): Promise<void> {
     )
     // ---- 阶段二：全新服务面（新宿主、新 token）；重启前开着的窗口原样重开 ----
     for (const profile of restartProfiles) {
-      const fresh = await sessions.ensureService(profile).catch(() => null)
+      const fresh = await sessions.ensureService(profile).catch((error: unknown) => {
+        console.error(`[shell] 完整重启：拉服务面失败（${profile}）：${String(error)}`)
+        return null
+      })
       if (fresh === null) {
         console.error(`[shell] 完整重启：重启服务面失败（${profile}）`)
         continue
@@ -829,7 +847,9 @@ async function restartDsh(): Promise<void> {
     if (showSplash) {
       try {
         splash?.close()
-      } catch {}
+      } catch (error) {
+        console.warn(`[shell] 启动界面关闭失败（重启路径）：${String(error)}`)
+      }
       splash = null
       splashReady = false
     }
@@ -865,7 +885,10 @@ async function recheckDevToolsPort(): Promise<string | null> {
  * 拉不起来（dev 构建 / 探测不到 launcher）**不退出、不假报成功**，把原因原样回给页面。
  */
 async function restartDesktopApp(): Promise<{ ok: boolean; reason?: string; message?: string }> {
-  const warning = await recheckDevToolsPort().catch(() => null)
+  const warning = await recheckDevToolsPort().catch((error: unknown) => {
+    console.warn(`[shell] 开发者工具：重启前复查调试口失败：${String(error)}`)
+    return null
+  })
   const resolution = resolveLauncherForRelaunch()
   const plan = await relaunchDesktopApp({
     isPackaged: build.isPackaged,
@@ -877,7 +900,7 @@ async function restartDesktopApp(): Promise<{ ok: boolean; reason?: string; mess
     // 中继全程日志落盘（stdio 全 ignore，Windows 排障全靠它，#209）：与 shell.log 同目录（dsh home，
     // 用户实际找得到的地方）；appSupportDir 下的 Library 目录在 Windows 自定义安装时不存在。
     logFile: join(dirname(resolveShellLogFile(process.env)), 'shell-relay.log'),
-    onLog: (line) => console.log(line),
+    onLog: shellLog,
   })
   if (!plan.ok) {
     console.error(
@@ -1055,7 +1078,7 @@ function onTrayAction(action: TrayAction): void {
       else showMainWindow()
       return
     case 'quit':
-      console.log('[shell] 托盘：退出')
+      console.debug('[shell] 托盘：退出')
       void shutdown()
       return
     case 'restart-app':
@@ -1126,7 +1149,7 @@ function openProfileOpDialog(kind: ProfileOpDialogKind): void {
     .catch((error: unknown) => {
       // 通道挂不上时**仍然开窗**：页面会把「壳桥不可用」显示成红字，比「点了没反应」强——
       // 那正是本票要根治的失败形态。
-      console.log(`[shell] profile 操作通道挂不上，弹窗降级：${String(error)}`)
+      console.warn(`[shell] profile 操作通道挂不上，弹窗降级：${String(error)}`)
       return null
     })
     .then((rpc) => {
@@ -1209,7 +1232,7 @@ const INPUT_CONFIRM_TIMEOUT_MS = 180_000
 async function confirmModal(flow: string, title: string, body: string): Promise<boolean> {
   const win = focusedWindow() ?? bootSession()?.window ?? null
   if (win === null || bootSession()?.state().ready !== true) {
-    console.log('[input] 主窗口不可用，确认弹窗直接按取消处理')
+    console.warn('[input] 主窗口不可用，确认弹窗直接按取消处理')
     return false
   }
   const promise = new Promise<string>((resolve) => {
@@ -1219,7 +1242,7 @@ async function confirmModal(flow: string, title: string, body: string): Promise<
   try {
     win.webview?.executeJavascript(confirmModalScript({ flow, title, body }))
   } catch (error) {
-    console.log(`[input] 确认弹窗注入失败：${String(error)}`)
+    console.error(`[input] 确认弹窗注入失败：${String(error)}`)
     pendingInput = null
     return false
   }
@@ -1264,7 +1287,7 @@ async function registerDshCliFromTray(): Promise<void> {
     )
   } catch (error) {
     // 通知挂了不能连累托盘刷新——「出错了但没有日志、菜单不更新」的嫌疑路径（#62 实测）
-    console.log(`[register] 通知投递失败：${error instanceof Error ? error.message : String(error)}`)
+    console.error(`[register] 通知投递失败：${error instanceof Error ? error.message : String(error)}`)
   }
   // 菜单只走 setState 更新：refreshTray 内部已有「异步刷新完再 setState」的延时更新，
   // 这里不再额外 await/重复刷——菜单开着时多余的动作会把它顶掉（用户口径：拒绝所有菜单重建）
@@ -1283,7 +1306,8 @@ const relaunchParent = relaunchParentPid(process.env)
 if (relaunchParent !== null) {
   console.log(`[shell] 重启接班：等待上一个实例（pid ${String(relaunchParent)}）退出`)
   const gone = await awaitParentExit({ pid: relaunchParent, isAlive: defaultIsAlive })
-  console.log(gone ? `[shell] 重启接班：上一个实例已退出` : `[shell] 重启接班：等待超时（${String(relaunchParent)} 仍在），照常启动`)
+  if (gone) console.log(`[shell] 重启接班：上一个实例已退出`)
+  else console.warn(`[shell] 重启接班：等待超时（${String(relaunchParent)} 仍在），照常启动`)
 }
 const instance = acquireInstance(instanceFile, instanceProfile, {
   // 接班窗口的兜底：即便上面的等待超时了，也不把刚退未退净的旧实例当成「已有实例」。
@@ -1329,7 +1353,9 @@ const pushStage = (): void => {
   if (splash === null || !splashReady) return
   try {
     splash.webview?.executeJavascript(splashStageScript(lastStage))
-  } catch {}
+  } catch (error) {
+    console.warn(`[shell] 启动阶段进度注入失败：${String(error)}`)
+  }
 }
 
 
@@ -1346,9 +1372,9 @@ const startupTray = (): void => {
   // 无窗口模式（CI/黑盒）不建托盘——那里没有窗口可隐藏，托盘只会碍事
   if (noWindow) return
   const image = trayImagePath()
-  shellLogLine(`[shell] 托盘图标：${image ?? '（未找到）'}`)
+  shellLog.debug(`托盘图标：${image ?? '（未找到）'}`)
   if (image === null) {
-    shellLogLine('[shell] 找不到托盘图标（resources/tray.png / runtime/tray.png），本次不建托盘')
+    shellLog.warn('找不到托盘图标（resources/tray.png / runtime/tray.png），本次不建托盘')
   } else {
     tray = createTray({
       image,
@@ -1365,7 +1391,7 @@ const startupTray = (): void => {
           void openProfileWindow(instanceProfile)
         }
       },
-      log: (line) => shellLogLine(line),
+      log: shellLog,
     })
     // 菜单保鲜（#62）：状态每 5s 走一次 fs 级快探测（不 spawn）。Electrobun 的 Tray 只有
     // tray-clicked 一个事件、拿不到「菜单即将打开」的钩子，所以保鲜靠轮询而不是打开时现查；
@@ -1381,7 +1407,7 @@ const startupTray = (): void => {
   }
   // macOS Dock 图标被点（无可见窗口时）：把主窗带回来
   app.on('reopen', () => {
-    console.log('[shell] Dock 再激活：显示主窗')
+    console.debug('[shell] Dock 再激活：显示主窗')
     showMainWindow()
   })
 }
@@ -1417,7 +1443,7 @@ const startupSplash = (): BrowserWindow | null => {
 // dsh 系统命令注册（旧壳 `register/`）：shim 指向当前运行时，探测走用户真实登录 shell，
 // 状态缓存起来供托盘用（菜单重建很频繁，**绝不在这里同步 spawn shell**）。
 const registerCli = createRegisterCli({
-  log: (message) => console.log(message),
+  log: registerLog,
   appSupport: appSupportDir(),
   shellCommand: () => {
     const paths = uiService().paths
@@ -1435,7 +1461,7 @@ const registerCli = createRegisterCli({
 // 通知：决策在壳里（notify-policy）；macOS 上投递走我们自己的 UN 桥（旧壳 `notify_un.rs` 的路子：
 // 进程自己就有 bundle 身份、状态可查、授权可申请），桥不可用或投递失败再退回 Electrobun 的原生通道。
 // 裸 dev 进程没有 bundle id，UN 会硬崩——所以只在 available 时才调。
-const notifyBridge = createNativeNotify({ log: (line) => console.log(line) })
+const notifyBridge = createNativeNotify({ log: notifyLog })
 const notifier: Notifier = createNotifier({
   notifications: bootSettings.notifications,
   home: dshHome(),
@@ -1458,7 +1484,7 @@ const notifier: Notifier = createNotifier({
   isFullscreen: () => bootSession()?.window?.isFullScreen() ?? false,
   // #115：壳级通知（启动失败 / 服务健康 / 托盘提示）没有 profile 归属，任一 DSH 窗口在前台就不打扰
   isFocused: () => anyWindowInFront(),
-  onLog: (line) => console.log(line),
+  onLog: notifyLog,
 })
 let bootService: ShellService
 try {
@@ -1476,7 +1502,7 @@ try {
 splash = startupSplash()
 // #203：第一个窗口（启动界面）一出就设窗口图标 —— 现存窗口 WM_SETICON 立即生效，
 // 窗口类默认改写让主窗/后续弹窗不再走系统白框回退；失败只记日志不拖累启动。
-if (!noWindow) applyWindowsIcon(shellLogLine, windowIconCandidates(dirname(process.execPath)))
+if (!noWindow) applyWindowsIcon(shellLog, windowIconCandidates(dirname(process.execPath)))
 startupTray()
 
 // DSH。就这一步失败也**不退出**：托盘已经在了，状态行摆着原因，
@@ -1495,7 +1521,9 @@ try {
   if (splash !== null && splashReady) {
     try {
       splash.webview?.executeJavascript(splashFailScript(`${message}\n\n托盘已就绪：在托盘里换运行时版本或退出。`))
-    } catch {}
+    } catch (error) {
+      console.warn(`[shell] 启动失败提示注入失败：${String(error)}`)
+    }
   }
 }
 if (dshStarted) {
@@ -1506,7 +1534,7 @@ if (dshStarted) {
   if ((process.env.DSH_DESKTOP_AUTO_QUIT ?? '') !== '') {
     const delayMs = Number(process.env.DSH_DESKTOP_AUTO_QUIT) > 0 ? Number(process.env.DSH_DESKTOP_AUTO_QUIT) : 3_000
     setTimeout(() => {
-      console.log('[shell] DSH_DESKTOP_AUTO_QUIT 触发自动退出')
+      console.debug('[shell] DSH_DESKTOP_AUTO_QUIT 触发自动退出')
       void shutdown()
     }, delayMs).unref?.()
   }
@@ -1538,11 +1566,11 @@ async function openDevToolsWindow(port: number): Promise<void> {
   }
   // 旧原生入口留下的 inspector target 先回收（新窗口的前端此时尚未创建）
   if (await closeDevToolsTarget(port)) {
-    shellLogLine('[shell] 开发者工具：已回收旧的 inspector target')
+    shellLog.debug('开发者工具：已回收旧的 inspector target')
   }
   const url = await resolveDevToolsInspectorUrl(port)
   if (url === null) {
-    shellLogLine(`[shell] 开发者工具：CDP 口 ${port} 没有可用的页面目标`)
+    shellLog.debug(`开发者工具：CDP 口 ${port} 没有可用的页面目标`)
     return
   }
   const win = new BrowserWindow({
@@ -1554,11 +1582,11 @@ async function openDevToolsWindow(port: number): Promise<void> {
   devToolsWindow = win
   // DevTools 窗口也是 launcher.exe 进程的顶层窗口，同样吃白框回退（#203 三轮）；
   // 立即补图标（applyWindowsIcon 幂等带缓存，不依赖下一次 refreshTray 才覆盖）。
-  if (process.platform === 'win32') applyWindowsIcon(shellLogLine, windowIconCandidates(dirname(process.execPath)))
+  if (process.platform === 'win32') applyWindowsIcon(shellLog, windowIconCandidates(dirname(process.execPath)))
   win.on('close', () => {
     if (devToolsWindow !== win) return
     devToolsWindow = null
-    shellLogLine('[shell] 开发者工具：DevTools 窗口已关闭，前端已销毁')
+    shellLog.debug('开发者工具：DevTools 窗口已关闭，前端已销毁')
   })
 }
   ContextMenu.on('context-menu-clicked', (event) => {
@@ -1584,7 +1612,7 @@ async function openDevToolsWindow(port: number): Promise<void> {
       return
     }
     if (action === SHELL_MENU_ACTIONS.openExternal && url !== undefined) {
-      if (!Utils.openExternal(url)) console.warn(`[shell] 系统浏览器没接住外链：${url}`)
+      Utils.openExternal(url)
       return
     }
     if (action === SHELL_MENU_ACTIONS.copyLink && url !== undefined) {
@@ -1641,6 +1669,8 @@ process.on('exit', () => {
       for (const session of sessions.list()) {
         if (session.service !== null) void session.service.stop()
       }
-    } catch {}
+    } catch (error) {
+      console.warn(`[shell] 退出清理异常：${String(error)}`)
+    }
   }
 })

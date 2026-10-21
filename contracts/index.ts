@@ -15,6 +15,7 @@ import type { RuntimeCommands } from './runtime.ts'
 import type { DownloadCommands } from './downloads.ts'
 import type { NotificationCommands } from './notifications.ts'
 import type { DiagnosticsCommands } from './diagnostics.ts'
+import type { LoggingCommands } from './logging.ts'
 import type { ProfileCommands } from './profiles.ts'
 import type { BrowserGuestCommands } from './guests.ts'
 import type { UpdateCommands } from './updates.ts'
@@ -47,6 +48,12 @@ export type {
 } from './notifications.ts'
 export type { DiagnosticsCommands } from './diagnostics.ts'
 export type {
+  LogArchiveRow,
+  LogActiveFile,
+  LogHealth,
+  LoggingCommands,
+} from './logging.ts'
+export type {
   ProfilePortRow,
   ProfileDependencyRow,
   TaskSnapshot,
@@ -71,16 +78,17 @@ export type {
   UpdateCommands,
 } from './updates.ts'
 
-/** 壳服务的全部命令（72 条），按域拼装；域之间不允许重复键。 */
+/** 壳服务的全部命令（75 条），按域拼装；域之间不允许重复键。 */
 export interface Commands
   extends SettingsCommands,
-    RuntimeCommands,
-    DownloadCommands,
-    NotificationCommands,
-    DiagnosticsCommands,
-    ProfileCommands,
-    BrowserGuestCommands,
-    UpdateCommands {}
+  RuntimeCommands,
+  DownloadCommands,
+  NotificationCommands,
+  DiagnosticsCommands,
+  LoggingCommands,
+  ProfileCommands,
+  BrowserGuestCommands,
+  UpdateCommands { }
 
 /** 命令名（= Commands 的键；COMMAND_NAMES 是它的运行时清单，拼写錨在类型上）。 */
 export type CommandName = keyof Commands
@@ -138,6 +146,10 @@ export const COMMAND_NAMES: readonly CommandName[] = [
   'log_diag',
   'get_diagnostics',
   'export_diagnostics',
+  // logging
+  'list_log_files',
+  'export_log_range',
+  'clear_logs',
   'get_boot_payload',
   'show_context_menu',
   'open_external',

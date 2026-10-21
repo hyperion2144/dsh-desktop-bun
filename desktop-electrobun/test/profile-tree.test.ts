@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import { createDirLink } from '../src/shared/profiles/dir-link.ts'
+import { collectingLogger } from './helpers/test-logger.ts'
 import { dirLinksEqual, pruneLegacyPoolLinks, reconcileProfileRuntimeTree, reconcileProfileTree, runtimePackageNames } from '../src/bun/profiles/profile-tree.ts'
 
 const tempDir = (): string => mkdtempSync(join(tmpdir(), 'dsh-profile-tree-'))
@@ -95,7 +96,7 @@ describe('reconcileProfileTree（#1：坏 symlink 与 runtimeOwned 占位）', (
     preLink(join(profileModules, 'no-such-target'), dest)
 
     const logs: string[] = []
-    const result = reconcileProfileTree({ runtimeModules, profileModules, onLog: (l) => logs.push(l) })
+      const result = reconcileProfileTree({ runtimeModules, profileModules, onLog: collectingLogger(logs) })
 
     expect(result.repointed).toBe(1)
     expect(existsSync(dest)).toBe(true)

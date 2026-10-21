@@ -12,6 +12,7 @@
 
 import type { ShellLayout } from '../runtime/runtime.ts'
 import type { ProxyEnv } from '../../shared/net/proxy-env.ts'
+import type { Logger } from '../../shared/logging/levels.ts'
 import { createRestartLedger, type RestartLedger } from './supervisor.ts'
 import { createWatchdogState, tickWatchdog, WATCHDOG_INTERVAL_MS } from '../../shared/watchdog.ts'
 import { readHostRecords, upsertHostRecord, writeHostRecords } from './host-registry.ts'
@@ -76,7 +77,7 @@ export interface HostSupervisorDeps {
   ledger?: RestartLedger
   now?: () => number
   watchdogIntervalMs?: number
-  log: (line: string) => void
+    log: Logger
   /** 场景通知（give-up / 自动重启 / watchdog 线） */
   notify: (scenario: string, body: string) => void
   /** 宿主上报新注入清单（HOST-INJECTIONS）：本模块存档后原样转交（服务面刷 boot 载荷） */
@@ -169,15 +170,15 @@ export function createHostSupervisor(deps: HostSupervisorDeps): HostSupervisor {
           const auth = await fetch(`${upstream}/?token=${token}`, { redirect: 'manual' })
           const setCookies = (auth.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? []
           cookie = setCookies[0]?.split(';')[0] ?? ''
-          deps.log(`[remote] 换 cookie：auth ${String(auth.status)} | cookie = ${cookie === '' ? '(none)' : `${cookie.slice(0, 18)}…`}`)
+            deps.log.debug(`remote：换 cookie：auth ${String(auth.status)} | cookie = ${cookie === '' ? '(none)' : `${cookie.slice(0, 18)}…`}`)
         } catch (error) {
-          deps.log(`[remote] 换 cookie 失败（照常继续，由 dsh 展示鉴权页）：${error instanceof Error ? error.message : String(error)}`)
+            deps.log.warn(`remote：换 cookie 失败（照常继续，由 dsh 展示鉴权页）：${error instanceof Error ? error.message : String(error)}`)
         }
       } else {
-        deps.log('[remote] 地址里没有 ?token=（旧格式 host:port），按老版 dsh 直连（新版会 401）')
+          deps.log.warn('remote：地址里没有 ?token=（旧格式 host:port），按老版 dsh 直连（新版会 401）')
       }
       hostOrigin = upstream
-      deps.log(`[remote] 数据面上游 = ${remoteDisplay(remoteAddr)} | 页面文档仍由本机 dist 出`)
+        deps.log.info(`remote：数据面上游 = ${remoteDisplay(remoteAddr)} | 页面文档仍由本机 dist 出`)
       activeSpec = s
       return
     }
@@ -213,13 +214,13 @@ export function createHostSupervisor(deps: HostSupervisorDeps): HostSupervisor {
     }
     hostOrigin = new URL(host.ready.url).origin
     hostInjections = host.ready.injections
-    deps.log(`host ready | dsh = ${hostOrigin} | injections = ${String(hostInjections.length)}`)
+      deps.log.info(`host ready | dsh = ${hostOrigin} | injections = ${String(hostInjections.length)}`)
 
     // ---- 取 cookie：303 + set-cookie（官方 authenticateWebHost 语义，不解析 stdout 的 token 行）----
     const auth = await fetch(host.ready.url, { redirect: 'manual' })
     const setCookies = (auth.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? []
     cookie = setCookies[0]?.split(';')[0] ?? ''
-    deps.log(`auth: ${String(auth.status)} ${auth.headers.get('location') ?? ''} | cookie = ${cookie === '' ? '(none)' : `${cookie.slice(0, 18)}…`}`)
+      deps.log.debug(`auth: ${String(auth.status)} ${auth.headers.get('location') ?? ''} | cookie = ${cookie === '' ? '(none)' : `${cookie.slice(0, 18)}…`}`)
     if (cookie === '') {
       await host.stop()
       throw new Error('没拿到 dsh 会话 cookie（303 + set-cookie 流程失败）')
@@ -253,7 +254,7 @@ export function createHostSupervisor(deps: HostSupervisorDeps): HostSupervisor {
     if (stopping) return
     deps.onCrash()
     const decision = ledger.decide(now())
-    deps.log(`宿主 ${String(host?.pid ?? 0)} 意外退出（code = ${String(code)}）：${decision.reason}`)
+      deps.log.warn(`宿主 ${String(host?.pid ?? 0)} 意外退出（code = ${String(code)}）：${decision.reason}`)
     if (!decision.restart) {
       // 放弃重启 = 宿主没了而且不会再有：跟 stop() 同一个原则，把终态发布出去（#215）。
       // 不发的话托盘还拿着死 PID 说「运行中」，ensureRunning 又因 status==='running' 早退——
@@ -273,14 +274,14 @@ export function createHostSupervisor(deps: HostSupervisorDeps): HostSupervisor {
     await Bun.sleep(decision.delayMs)
     const treeLeftovers = await treeSweep
     if (treeLeftovers.length > 0) {
-      deps.log(`[shell] 伴生进程清扫超时，放行：${treeLeftovers.join(', ')}（不阻塞自愈）`)
+        deps.log.warn(`伴生进程清扫超时，放行：${treeLeftovers.join(', ')}（不阻塞自愈）`)
     }
     if (stopping) return
     try {
       await connect()
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
-      deps.log(`守护器重启宿主失败：${reason}`)
+        deps.log.error(`守护器重启宿主失败：${reason}`)
       // 重启失败 = 宿主没了（旧的已死，新的没起来）：同样把终态发布出去（#215）。
       host = undefined
       status = 'failed'
@@ -291,7 +292,7 @@ export function createHostSupervisor(deps: HostSupervisorDeps): HostSupervisor {
     }
     setRestarting(false)
     publish()
-    deps.log(`守护器已重启宿主：pid = ${String(host?.pid ?? 0)} | injections = ${String(hostInjections.length)}`)
+      deps.log.info(`守护器已重启宿主：pid = ${String(host?.pid ?? 0)} | injections = ${String(hostInjections.length)}`)
     deps.notify(SCENARIO.SERVICE_HEALTH, `dsh 服务已自动重启（${(activeSpec ?? deps.spec()).layout.profile}）`)
     deps.onRestart(snapshot())
     void supervise()
@@ -319,7 +320,7 @@ export function createHostSupervisor(deps: HostSupervisorDeps): HostSupervisor {
       now: now(),
     })
     if (verdict.kind === 'healthy') {
-      if (verdict.reset) deps.log('[watchdog] 连续健康 ≥2 分钟，自愈计数已重置')
+        if (verdict.reset) deps.log.debug('watchdog：连续健康 ≥2 分钟，自愈计数已重置')
       return
     }
     if (verdict.kind === 'remote-down') {
@@ -329,21 +330,23 @@ export function createHostSupervisor(deps: HostSupervisorDeps): HostSupervisor {
     // 兼容复用已移除（地图 #2）：壳不再认领「外部实例」；此裁决仅在宿主交接窗口瞬时可达，跳过本轮即可
     if (verdict.kind === 'external-down') return
     if (verdict.kind === 'gave-up') {
-      deps.log('[watchdog] 连续自动恢复失败 3 次，停止自愈')
+        deps.log.warn('watchdog：连续自动恢复失败 3 次，停止自愈')
       deps.notify(SCENARIO.SERVICE_HEALTH, 'dsh 服务异常：连续自动恢复失败，请手动重启')
       return
     }
-    deps.log(`[watchdog] dsh 不可达（TCP 探测失败），自动重启（第 ${String(verdict.attempt)} 次）`)
+      deps.log.warn(`watchdog：dsh 不可达（TCP 探测失败），自动重启（第 ${String(verdict.attempt)} 次）`)
     deps.notify(SCENARIO.SERVICE_HEALTH, `dsh 服务异常，正在自动重启（第 ${String(verdict.attempt)} 次）`)
     if (host !== undefined) {
       // 交给退出事件那条路：守护器杀旧拉新，watchdog 的封顶比它的退避更严
-      void host.stop().catch(() => {})
+      void host.stop().catch((error: unknown) => {
+          deps.log.warn(`守护器停止旧宿主失败：${String(error)}`)
+      })
     } else if (remoteAddr !== null) {
       try {
         await connect()
         publish()
       } catch (error) {
-        deps.log(`[watchdog] 远程重连失败：${String(error)}`)
+          deps.log.warn(`watchdog：远程重连失败：${String(error)}`)
       }
     }
   }
@@ -368,7 +371,9 @@ export function createHostSupervisor(deps: HostSupervisorDeps): HostSupervisor {
     })()
     // 清理链吞掉自身的 rejection（connect 失败时 starting 本体会 reject，由调用方处理；
     // 这条派生链不能再生第二个 unhandled rejection）
-    void starting.catch(() => {}).then(() => {
+    void starting.catch((error: unknown) => {
+        deps.log.warn(`守护器启动链失败：${String(error)}`)
+    }).then(() => {
       starting = null
     })
     return starting

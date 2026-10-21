@@ -25,6 +25,8 @@ import {
   soundsDir,
   type NotifyDecision,
 } from '../../shared/notify/notify-policy.ts'
+import { type Logger } from '../../shared/logging/levels.ts'
+import { NOOP_LOGGER } from '../../shared/app/noop-log.ts'
 import {
   createSoundProbe,
   resolveSoundBackend,
@@ -67,7 +69,7 @@ export interface NotifierOptions {
   /** 当前本地时刻；缺省 `new Date()`。 */
   now?: () => Date
   platform?: NodeJS.Platform
-  onLog?: (line: string) => void
+  onLog?: Logger
 }
 
 export interface Notifier {
@@ -149,10 +151,10 @@ export function importSound(home: string, source: string): string {
 
 
 export function createNotifier(options: NotifierOptions): Notifier {
-  const log = options.onLog ?? ((): void => {})
+  const log: Logger = options.onLog ?? NOOP_LOGGER
   const platform = options.platform ?? process.platform
   if (options.show === undefined) {
-    log('[notify] 未接原生通知（服务面 / 无窗口模式，或平台没有原生通道）')
+    log.warn('未接原生通知（服务面 / 无窗口模式，或平台没有原生通道）')
   }
   const appName = options.appName ?? 'DSH'
   const now = options.now ?? ((): Date => new Date())
@@ -164,19 +166,19 @@ export function createNotifier(options: NotifierOptions): Notifier {
       // 点横幅开错应用，见旧壳 notify_un.rs 头注释）。新壳同理：没接原生投递就只落日志，
       // 由调用方去接 Electrobun 原生投递 / notify_un 桥。
       if (platform === 'darwin') {
-        log(`[notify] macOS 未接原生投递，本条只落日志：${payload.title}：${payload.body}`)
+        log.warn(`macOS 未接原生投递，本条只落日志：${payload.title}：${payload.body}`)
         return
       }
       const command = shellNotificationCommand(platform, payload.title, payload.body)
       if (command === null) {
-        log(`[notify] ${payload.title}：${payload.body}（本平台暂无投递实现）`)
+        log.warn(`${payload.title}：${payload.body}（本平台暂无投递实现）`)
         return
       }
       try {
         const child = Bun.spawn(command, { stdout: 'ignore', stderr: 'ignore' })
         child.unref?.()
       } catch (error) {
-        log(`[notify] 投递失败：${error instanceof Error ? error.message : String(error)}`)
+        log.error(`投递失败：${error instanceof Error ? error.message : String(error)}`)
       }
     })
 
@@ -203,7 +205,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
         watchdog.unref?.()
         return true
       } catch (error) {
-        log(`[notify] 播放自定义音失败：${error instanceof Error ? error.message : String(error)}`)
+        log.warn(`播放自定义音失败：${error instanceof Error ? error.message : String(error)}`)
         return false
       }
     })
@@ -212,12 +214,12 @@ export function createNotifier(options: NotifierOptions): Notifier {
   const playDefault = (path: string): boolean => {
     const extension = soundExtension(path)
     if (extension === null) {
-      log(`[notify] 音效扩展名不在白名单，未播放：${basename(path)}`)
+      log.debug(`音效扩展名不在白名单，未播放：${basename(path)}`)
       return false
     }
     const backend = resolveSoundBackend(platform, extension, probe())
     if (backend === null) {
-      log(`[notify] 本机无法播放（${capability().formats[extension]?.reason ?? '没有可用播放后端'}）：${basename(path)}`)
+      log.warn(`本机无法播放（${capability().formats[extension]?.reason ?? '没有可用播放后端'}）：${basename(path)}`)
       return false
     }
     return spawnSound(backend.command(path))
@@ -230,11 +232,12 @@ export function createNotifier(options: NotifierOptions): Notifier {
    */
   const playSystemTone = (tone: SystemTone | null): boolean => {
     if (tone === null) {
-      log('[notify] 系统默认提示音：本机没有可用播放后端，壳不播也未出声（是否响由通知通道决定）')
+      log.warn('系统默认提示音：本机没有可用播放后端，壳不播也未出声（是否响由通知通道决定）')
       return false
     }
     const played = spawnSound(tone.command)
-    log(played ? `[notify] 系统默认提示音：${tone.label}` : '[notify] 系统默认提示音没能起播')
+    if (played) log.info(`系统默认提示音：${tone.label}`)
+    else log.warn('系统默认提示音没能起播')
     return played
   }
 
@@ -243,21 +246,21 @@ export function createNotifier(options: NotifierOptions): Notifier {
 
   const soundPath = (name: string): string | null => {
     if (!isValidSoundName(name)) {
-      log(`[notify] 音效文件名不合法，已忽略：${name}`)
+      log.debug(`音效文件名不合法，已忽略：${name}`)
       return null
     }
     if (!hasAllowedSoundExtension(name)) {
-      log(`[notify] 音效格式不在白名单（wav/mp3/ogg）：${name}`)
+      log.debug(`音效格式不在白名单（wav/mp3/ogg）：${name}`)
       return null
     }
     const path = join(soundsDir(options.home), name)
     if (!existsSync(path)) {
-      log(`[notify] 音效文件不存在：${path}`)
+      log.warn(`音效文件不存在：${path}`)
       return null
     }
     const size = statSync(path).size
     if (size > MAX_SOUND_BYTES) {
-      log(`[notify] 音效文件超过 ${String(MAX_SOUND_BYTES / 1024 / 1024)}MB，已忽略：${name}`)
+      log.warn(`音效文件超过 ${String(MAX_SOUND_BYTES / 1024 / 1024)}MB，已忽略：${name}`)
       return null
     }
     return path
@@ -285,7 +288,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
       const focused = focusNow()
       const decision = decideFor(scenarioId, focused)
       if (!decision.deliver) {
-        log(`[notify] ${scenarioId} 未投递（${suppressLabel(scenarioId, focused)}）`)
+        log.debug(`${scenarioId} 未投递（${suppressLabel(scenarioId, focused)}）`)
         return decision
       }
       const heading = title ?? appName
@@ -303,16 +306,16 @@ export function createNotifier(options: NotifierOptions): Notifier {
         const path = soundPath(decision.sound.name)
         if (path !== null) {
           const played = playCustom(path)
-          log(
+          log.info(
             played
-              ? `[notify] 播放自定义音：${decision.sound.name}`
-              : `[notify] 自定义音未出声（本机没有可用播放后端）：${decision.sound.name}`,
+              ? `播放自定义音：${decision.sound.name}`
+              : `自定义音未出声（本机没有可用播放后端）：${decision.sound.name}`,
           )
         }
       } else if (selfTone) {
         playSystemTone(tone)
       }
-      log(`[notify] ${scenarioId}：${body}${decision.silent ? '（静默）' : ''}`)
+      log.info(`${scenarioId}：${body}${decision.silent ? '（静默）' : ''}`)
       return decision
     },
     soundPath,
@@ -322,7 +325,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
       const path = soundPath(name)
       if (path === null) return false
       const played = playCustom(path)
-      log(played ? `[notify] 试听音效：${name}` : `[notify] 试听未出声（本机没有可用播放后端）：${name}`)
+      log.info(played ? `试听音效：${name}` : `试听未出声（本机没有可用播放后端）：${name}`)
       return played
     },
   }

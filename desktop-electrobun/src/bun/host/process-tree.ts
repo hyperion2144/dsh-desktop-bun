@@ -13,6 +13,9 @@
 //   编排      stopProcessTree（宿主停止）/ sweepProcessRemnants（崩溃后孤儿清扫）
 //             startTreeSampler（宿主生前树快照，崩溃路径定位孤儿用）
 
+import type { Logger } from '../../shared/logging/levels.ts'
+import { NOOP_LOGGER } from '../../shared/app/noop-log.ts'
+
 export interface ProcessTableEntry {
   pid: number
   ppid: number
@@ -105,7 +108,9 @@ async function readCommandTable(command: string[], timeoutMs = TABLE_READ_TIMEOU
   const timer = setTimeout(() => {
     try {
       child.kill('SIGKILL')
-    } catch {}
+    } catch (error) {
+      console.warn(`[tree] 强制结束进程失败（pid ${String(child.pid)}）：${error instanceof Error ? error.message : String(error)}`)
+    }
   }, timeoutMs)
   try {
     const text = await new Response(child.stdout as ReadableStream<Uint8Array>).text()
@@ -170,7 +175,7 @@ export interface StopProcessTreeInput {
   confirmTimeoutMs?: number
   signalFn?: (pid: number, signal: NodeJS.Signals) => void
   aliveFn?: (pid: number) => boolean
-  onLog?: (line: string) => void
+  onLog?: Logger
 }
 
 export interface StopProcessTreeResult {
@@ -196,7 +201,7 @@ export async function stopProcessTree(input: StopProcessTreeInput): Promise<Stop
   const confirmTimeoutMs = input.confirmTimeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS
   const signalFn = input.signalFn ?? ((pid, signal) => process.kill(pid, signal))
   const aliveFn = input.aliveFn ?? isProcessAlive
-  const onLog = input.onLog ?? (() => {})
+  const onLog: Logger = input.onLog ?? NOOP_LOGGER
   const { rootPid } = input
 
   // 1. 杀前枚举：只有这一刻整棵树还挂着宿主的 ppid。
@@ -204,7 +209,7 @@ export async function stopProcessTree(input: StopProcessTreeInput): Promise<Stop
   try {
     descendants = collectDescendants(await input.probe.list(), rootPid)
   } catch (error) {
-    onLog(`[tree] 进程表枚举失败，退化为停单进程：${error instanceof Error ? error.message : String(error)}`)
+    onLog.warn(`进程表枚举失败，退化为停单进程：${error instanceof Error ? error.message : String(error)}`)
   }
   const targets = [rootPid, ...descendants]
 
@@ -215,7 +220,7 @@ export async function stopProcessTree(input: StopProcessTreeInput): Promise<Stop
   const escalation = setTimeout(() => {
     const stuck = targets.filter(aliveFn)
     if (stuck.length === 0) return
-    onLog(`[tree] 宿主树 ${String(graceMs)}ms 未退场（${String(stuck.length)} 个），升级 SIGKILL：${stuck.join(', ')}`)
+    onLog.warn(`宿主树 ${String(graceMs)}ms 未退场（${String(stuck.length)} 个），升级 SIGKILL：${stuck.join(', ')}`)
     signalPids(stuck, 'SIGKILL', signalFn)
   }, graceMs)
 
@@ -233,7 +238,7 @@ export async function stopProcessTree(input: StopProcessTreeInput): Promise<Stop
   // 4. 确认树灭（有界）：到点仍活着的补一发 SIGKILL，再等一小轮，然后放行。
   let survivors = await waitAllDead(descendants, aliveFn, confirmTimeoutMs, CONFIRM_POLL_MS)
   if (survivors.length > 0) {
-    onLog(`[tree] 确认窗口内仍有 ${String(survivors.length)} 个未退场，补发 SIGKILL：${survivors.join(', ')}`)
+    onLog.warn(`确认窗口内仍有 ${String(survivors.length)} 个未退场，补发 SIGKILL：${survivors.join(', ')}`)
     signalPids(survivors, 'SIGKILL', signalFn)
     survivors = await waitAllDead(survivors, aliveFn, Math.min(confirmTimeoutMs, 1_000), CONFIRM_POLL_MS)
   }
@@ -249,7 +254,7 @@ export interface SweepRemnantsInput {
   confirmTimeoutMs?: number
   signalFn?: (pid: number, signal: NodeJS.Signals) => void
   aliveFn?: (pid: number) => boolean
-  onLog?: (line: string) => void
+  onLog?: Logger
 }
 
 export const SWEEP_GRACE_MS = 1_500
@@ -264,16 +269,16 @@ export async function sweepProcessRemnants(input: SweepRemnantsInput): Promise<n
   const confirmTimeoutMs = input.confirmTimeoutMs ?? SWEEP_CONFIRM_TIMEOUT_MS
   const signalFn = input.signalFn ?? ((pid, signal) => process.kill(pid, signal))
   const aliveFn = input.aliveFn ?? isProcessAlive
-  const onLog = input.onLog ?? (() => {})
+  const onLog: Logger = input.onLog ?? NOOP_LOGGER
 
   const live = input.pids.filter(aliveFn)
   if (live.length === 0) return [] // 无树可清：零开销路径
-  onLog(`[tree] 清理已亡宿主的伴生进程（树快照）：${live.join(', ')}`)
+  onLog.debug(`清理已亡宿主的伴生进程（树快照）：${live.join(', ')}`)
 
   signalPids(live, 'SIGTERM', signalFn)
   let survivors = await waitAllDead(live, aliveFn, graceMs, CONFIRM_POLL_MS)
   if (survivors.length > 0) {
-    onLog(`[tree] 伴生 ${String(graceMs)}ms 未退场，升级 SIGKILL：${survivors.join(', ')}`)
+    onLog.warn(`伴生 ${String(graceMs)}ms 未退场，升级 SIGKILL：${survivors.join(', ')}`)
     signalPids(survivors, 'SIGKILL', signalFn)
     survivors = await waitAllDead(survivors, aliveFn, confirmTimeoutMs, CONFIRM_POLL_MS)
   }
@@ -297,7 +302,7 @@ export function startTreeSampler(
   probe: TreeProbe,
   rootPid: number,
   intervalMs: number,
-  onLog?: (line: string) => void,
+  onLog?: Logger,
   aliveFn: (pid: number) => boolean = isProcessAlive,
 ): TreeSampler {
   let latest: number[] = []
@@ -311,7 +316,7 @@ export function startTreeSampler(
     try {
       latest = collectDescendants(await probe.list(), rootPid)
     } catch (error) {
-      onLog?.(`[tree] 树采样失败（沿用上次快照）：${error instanceof Error ? error.message : String(error)}`)
+      onLog?.debug(`树采样失败（沿用上次快照）：${error instanceof Error ? error.message : String(error)}`)
     }
   }
   void sample()

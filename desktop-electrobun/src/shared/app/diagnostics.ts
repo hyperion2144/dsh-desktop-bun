@@ -15,6 +15,19 @@ export interface DiagnosticsLogFile {
   rotated: number
 }
 
+/** #221：归档目录汇总（Decision 8 的 logs.archive）。 */
+export interface DiagnosticsLogsArchive {
+  dir: string
+  files: number
+  bytes: number
+}
+
+/** #221：日志 IO 健康度（Decision 9，写/转/删失败不再静默）。 */
+export interface DiagnosticsLogsHealth {
+  ioErrorCount: number
+  lastIoError: string | null
+}
+
 export interface DiagnosticsInput {
   appVersion: string
   pid: number
@@ -41,7 +54,7 @@ export interface DiagnosticsInput {
   views: { kind: string; profile: string; label: string }[]
   downloads: { tasks: number; active: number; concurrency: number }
   notify: { available: boolean; permission: string; port: number }
-  logs: { shell: DiagnosticsLogFile; webview: DiagnosticsLogFile; tail: string[] }
+  logs: { shell: DiagnosticsLogFile; webview: DiagnosticsLogFile; relay: DiagnosticsLogFile; archive: DiagnosticsLogsArchive; level: string; health: DiagnosticsLogsHealth; tail: string[] }
   process: { platform: string; arch: string; osRelease: string; bun: string; node?: string; cpus: number; totalMemBytes: number; freeMemBytes: number }
 }
 
@@ -87,6 +100,10 @@ export function buildDiagnostics(input: DiagnosticsInput, now: Date): Record<str
     logs: {
       shell: input.logs.shell,
       webview: input.logs.webview,
+      relay: input.logs.relay,
+      archive: input.logs.archive,
+      level: input.logs.level,
+      health: input.logs.health,
       tail: input.logs.tail,
     },
     process: {

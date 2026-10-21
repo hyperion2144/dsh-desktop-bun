@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { createAccountWatcher, REMOTE_MUX_PATH, type WebSocketLike } from '../src/bun/host/account-watcher.ts'
+import { silentLogger } from './helpers/test-logger.ts'
 
 interface FakeSocket extends WebSocketLike {
   url: string
@@ -51,7 +52,7 @@ describe('主进程账号 watcher（#169）', () => {
       cookie: () => 'dsh-auth-test=1',
       openExternal: (url) => opened.push(url),
       theme: () => 'dark',
-      log: () => {},
+        log: silentLogger,
       retryMs: 5,
       createSocket: (url, headers) => {
         const socket = fakeSocketFactory(url, headers)
@@ -99,7 +100,7 @@ describe('主进程账号 watcher（#169）', () => {
       hostOrigin: () => 'http://127.0.0.1:3081',
       cookie: () => cookie,
       openExternal: () => {},
-      log: () => {},
+        log: silentLogger,
       retryMs: 5,
       createSocket: (url, headers) => {
         const socket = fakeSocketFactory(url, headers)
@@ -132,7 +133,7 @@ describe('主进程账号 watcher（#169）', () => {
       sockets.push(socket)
       return socket
     }
-    const idle = createAccountWatcher({ hostOrigin: () => 'http://127.0.0.1:3081', cookie: () => 'c1', log: () => {}, retryMs: 5, createSocket: factory })
+      const idle = createAccountWatcher({ hostOrigin: () => 'http://127.0.0.1:3081', cookie: () => 'c1', log: silentLogger, retryMs: 5, createSocket: factory })
     idle.start()
     expect(sockets).toHaveLength(0)
 
@@ -140,7 +141,7 @@ describe('主进程账号 watcher（#169）', () => {
       hostOrigin: () => 'http://127.0.0.1:3081',
       cookie: () => 'c1',
       openExternal: () => {},
-      log: () => {},
+        log: silentLogger,
       retryMs: 5,
       createSocket: factory,
     })

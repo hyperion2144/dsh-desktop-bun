@@ -10,6 +10,8 @@
 // 防御纪律：载荷体积上限 64 KiB（与协议层同量级），不做任何转发，不读磁盘。
 
 import { randomBytes } from 'node:crypto'
+import type { Logger } from '../../shared/logging/levels.ts'
+import { NOOP_LOGGER } from '../../shared/app/noop-log.ts'
 import { parseBusyReport, UNKNOWN_PROFILE } from '../../shared/app/power-arbiter.ts'
 
 /** 载荷上限：通知文本远小于此，超了直接 413。 */
@@ -35,7 +37,7 @@ export interface NotifyServerOptions {
   /** 缺省 0（随机端口）。 */
   port?: number
   hostname?: string
-  onLog?: (line: string) => void
+  onLog?: Logger
 }
 
 export interface NotifyServer {
@@ -74,7 +76,7 @@ export function bearerToken(header: string | null): string {
 
 export function startNotifyServer(options: NotifyServerOptions = {}): NotifyServer {
   const token = options.token ?? randomNotifyToken()
-  const log = options.onLog ?? ((): void => {})
+  const log: Logger = options.onLog ?? NOOP_LOGGER
   const hostname = options.hostname ?? '127.0.0.1'
 
   const server = Bun.serve({
@@ -87,7 +89,7 @@ export function startNotifyServer(options: NotifyServerOptions = {}): NotifyServ
         return new Response('method not allowed', { status: 405, headers: { allow: 'POST' } })
       }
       if (bearerToken(request.headers.get('authorization')) !== token) {
-        log('[notify] 令牌不符，已拒绝')
+        log.warn('令牌不符，已拒绝')
         return new Response('unauthorized', { status: 401 })
       }
       const length = Number(request.headers.get('content-length') ?? '0')
@@ -100,6 +102,7 @@ export function startNotifyServer(options: NotifyServerOptions = {}): NotifyServ
       try {
         payload = JSON.parse(text) as unknown
       } catch {
+        log.warn('载荷不是合法 JSON，已丢弃')
         return new Response('bad json', { status: 400 })
       }
       const classified = classifyNotify(payload)
@@ -108,14 +111,14 @@ export function startNotifyServer(options: NotifyServerOptions = {}): NotifyServ
       } else if (classified.kind === 'notify') {
         options.onNotify?.(classified.payload)
       } else {
-        log('[notify] 忽略未知载荷')
+        log.warn('忽略未知载荷')
       }
       return new Response(null, { status: 204 })
     },
   })
 
   const port = server.port ?? 0
-  log(`通知口已就绪：${hostname}:${String(port)}`)
+  log.info(`通知口已就绪：${hostname}:${String(port)}`)
   return {
     port,
     token,

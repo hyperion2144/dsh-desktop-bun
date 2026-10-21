@@ -45,6 +45,14 @@ describe('每视图授权：纯逻辑', () => {
     }
   })
 
+    test('日志管理三命令（#224 Decision 7/D14 负例）：guest/remote 一律拒，仅 shell 放行', () => {
+        for (const command of ['list_log_files', 'export_log_range', 'clear_logs']) {
+            expect(isCommandAllowed('guest', command)).toBe(false)
+            expect(isCommandAllowed('remote', command)).toBe(false)
+            expect(isCommandAllowed('shell', command)).toBe(true)
+        }
+    })
+
   test('拒绝原因是给人看的一句话', () => {
     expect(denyReason('guest', 'save_desktop_settings')).toContain('save_desktop_settings')
     expect(denyReason('guest', 'save_desktop_settings')).toContain('guest')

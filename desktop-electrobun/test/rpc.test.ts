@@ -37,7 +37,12 @@ function harness(overrides: Partial<CommandDeps> = {}): {
     home,
     profile: 'desktop',
     platform: 'darwin',
-    log: (line) => calls.log.push(line),
+      log: {
+          debug: (line) => { calls.log.push(line) },
+          info: (line) => { calls.log.push(line) },
+          warn: (line) => { calls.log.push(line) },
+          error: (line) => { calls.log.push(line) },
+      },
     settings: () => settings,
     save: (patch) => {
       settings = updateSettings(home, patch)
@@ -386,7 +391,7 @@ describe('命令表', () => {
     const h = harness()
     try {
       await h.table.log_diag?.({ msg: '外链被拦' })
-      expect(h.calls.log.some((line) => line.includes('[diag] 外链被拦'))).toBe(true)
+        expect(h.calls.log.some((line) => line.includes('诊断：外链被拦'))).toBe(true)
       // 同步抛（命令表直调），所以用 toThrow 而不是 rejects
       expect(() => h.table.get_diagnostics?.({})).toThrow('壳未接诊断快照')
       expect(() => h.table.export_diagnostics?.({})).toThrow('壳未接诊断导出')
@@ -405,6 +410,52 @@ describe('命令表', () => {
       expect(got.diagnostics.summary).toContain('desktop')
       const exported = (await h.table.export_diagnostics?.({})) as { path: string; bytes: number }
       expect(exported).toEqual({ path: '/home/.dsh/diagnostics/diag-1.json', bytes: 2048 })
+    } finally {
+      h.cleanup()
+    }
+  })
+})
+describe('日志命令（#221）：list/export/clear 走 logging 注入，未注入报清楚原因', () => {
+  test('未注入 logging：三个命令都报清楚原因（同步/异步都不得静默）', async () => {
+    const h = harness()
+    try {
+      expect(() => h.table.list_log_files?.({})).toThrow('当前运行模式没有日志内核')
+      expect(() => h.table.clear_logs?.({})).toThrow('当前运行模式没有日志内核')
+      await expect(h.table.export_log_range?.({ range: 'today' })).rejects.toThrow('当前运行模式没有日志内核')
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('注入后：list 回清单、export 选目录后回包（取消选目录报清楚）、save 带走清理回执', async () => {
+    const chooseDirs: (string | null)[] = ['/tmp/export-out', null]
+    const h = harness({
+      logging: {
+        list: () => ({ archive_dir: '/h/logs/archive', level: 'info', archives: [], active: [], health: { io_error_count: 0, last_io_error: null } }),
+            exportRange: () => ({ path: '/tmp/export-out/dsh-logs-20261020-120000.tar.gz', bytes: 4096, approximations: ['webview 活跃日志为整文件近似（行无时间戳）'], archives_included: 2 }),
+        clear: () => ({ removed_files: 3, bytes_freed: 1234 }),
+        takeCleanupReceipt: (() => {
+          let n = 0
+          return () => (n++ === 0 ? { removed_files: 2, bytes_freed: 9 } : null)
+        })(),
+        chooseDir: async () => chooseDirs.shift() ?? null,
+        reveal: () => {},
+      },
+    })
+    try {
+      const listed = (await h.table.list_log_files?.({})) as { archive_dir: string }
+      expect(listed.archive_dir).toBe('/h/logs/archive')
+      const exported = (await h.table.export_log_range?.({ range: 'today' })) as { path: string }
+      expect(exported.path).toBe('/tmp/export-out/dsh-logs-20261020-120000.tar.gz')
+      // 第二次导出取消选目录 ⇒ 报清楚而不是静默
+      await expect(h.table.export_log_range?.({ range: '7d' })).rejects.toThrow('未选择导出目录')
+      // 设置保存把挂起的保留清理回执一并带走：第一次有、第二次没有
+      const saved = (await h.table.save_desktop_settings?.({ patch: { logRetentionDays: 30 } })) as { log_cleanup?: { removed_files: number; bytes_freed: number } }
+      expect(saved.log_cleanup).toEqual({ removed_files: 2, bytes_freed: 9 })
+      const saved2 = (await h.table.save_desktop_settings?.({ patch: { logRetentionDays: 60 } })) as { log_cleanup?: unknown }
+      expect('log_cleanup' in saved2).toBe(false)
+      // 一键清理直呼
+      expect(await h.table.clear_logs?.({})).toEqual({ removed_files: 3, bytes_freed: 1234 })
     } finally {
       h.cleanup()
     }

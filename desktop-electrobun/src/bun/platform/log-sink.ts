@@ -7,6 +7,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { LOG_KEEP, LOG_MAX_BYTES, formatLogLine, rotatePlan, shouldRotate } from '../../shared/app/log-file.ts'
+import { type LogLevel } from '../../shared/logging/levels.ts'
 
 export interface LogSinkOptions {
   file: string
@@ -26,8 +27,8 @@ export interface LogSink {
   path: string
   /** 追加一段文本（调用方负责换行与格式）；超限先轮转 */
   write(text: string): void
-  /** 追加一行壳日志（自己加本地时区时间戳） */
-  line(message: string): void
+  /** 追加一行壳日志（自己加本地时区时间戳）；level 缺省 info——壳日志行级由调用方显式给（#228）。 */
+  line(message: string, level?: LogLevel): void
   size(): number
   tail(lines: number): string[]
   rotate(): void

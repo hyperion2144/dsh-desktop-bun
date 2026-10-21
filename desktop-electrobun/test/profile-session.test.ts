@@ -3,11 +3,21 @@
  * 断言开窗顺序、失败 phase、单飞去重、dispose 拆除、关窗策略、stop/重启时序。
  * 环境噪声：heal 只在 win32 生效，macOS 上天然跳过。
  */
-import { describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, test } from 'bun:test'
 import { createProfileSessions } from '../src/bun/windows/profile-session.ts'
 import type { ProfileSessionDeps } from '../src/bun/windows/profile-session.ts'
 import type { ShellService } from '../src/bun/host/service.ts'
 import { windowKey } from '../src/shared/app/window-targets.ts'
+import { resetLoggingKernelForTests } from '../src/bun/logging/kernel.ts'
+import { resetShellLogSinkForTests } from '../src/bun/platform/shell-log.ts'
+
+// #228：profile-session 的 log 现在直走日志内核（shellLogLine）；本文件的用例会把进程级
+// 内核单例以默认 DSH_HOME 初始化出来，不复位会污染后续文件（如 shell-log.test.ts）的 env 生效预期。
+afterAll(() => {
+    resetLoggingKernelForTests()
+    // shell-log.ts 的适配器单例缓存了内核引用，必须与内核一起复位，否则旧适配器还攥着旧内核。
+    resetShellLogSinkForTests()
+})
 
 type Handler = (event?: unknown) => void
 

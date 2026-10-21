@@ -422,7 +422,7 @@ const guardSource = readFileSync(join(tmp, 'composer-input-guard.mjs'), 'utf8')
 assert.ok(!guardSource.includes('export '), '转译产物里的 export 已剥掉（vm 里当脚本跑）')
 const guardLogs = []
 const guardSandbox = {
-  console: { info: (...args) => guardLogs.push(args.join(' ')) },
+  console: { info: (...args) => guardLogs.push(args.join(' ')), debug: (...args) => guardLogs.push(args.join(' ')) },
   setTimeout,
   clearTimeout,
 }

@@ -27,6 +27,7 @@ import {
   parseGuestReport,
   type GuestPush,
 } from '../src/shared/profiles/guest-policy.ts'
+import { collectingLogger, silentLogger } from './helpers/test-logger.ts'
 import { createGuestManager, type GuestViewLike } from '../src/bun/windows/guest-manager.ts'
 import { coreLibCandidates, coreLibNames, loadNativeWebviewCore, type NativeWebviewCore } from '../src/bun/windows/native-webview.ts'
 import { carrierScript } from '../src/bun/windows/carrier.ts'
@@ -233,7 +234,7 @@ describe('guest 管理器', () => {
     const timers: Array<() => void> = []
     const ready = overrides.autoReady ?? []
     const table = createGuestManager({
-      log: (line) => void logs.push(line),
+        log: collectingLogger(logs),
       core: core.core,
       now: () => 1_700_000_000_000,
       // 就绪 / 超时都不要真等：冷分区预热在单测里走微任务
@@ -283,13 +284,13 @@ describe('guest 管理器', () => {
     expect(GUEST_LEASE_PATTERN.test(reservation.lease)).toBe(true)
     expect(reservation.partition).toBe(guestPartition('ws-1'))
     expect(h.created[0]?.lease).toBe(reservation.lease)
-    expect(h.logs.some((line) => line.includes('[guest] acquire'))).toBe(true)
+      expect(h.logs.some((line) => line.includes('acquire：'))).toBe(true)
     expect(h.table.count()).toBe(1)
   })
 
   test('窗口不在 ⇒ acquire 抛错（不静默失败）', async () => {
     const table = createGuestManager({
-      log: () => {},
+        log: silentLogger,
       core: null,
       createView: () => null,
       pushToHost: () => {},
@@ -434,7 +435,7 @@ describe('guest 管理器', () => {
     const logs: string[] = []
     let index = 0
     const table = createGuestManager({
-      log: (line) => void logs.push(line),
+        log: collectingLogger(logs),
       core: fakeCore().core,
       sleep: async () => {},
       createView: () => {

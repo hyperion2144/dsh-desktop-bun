@@ -6,6 +6,7 @@
 import { mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { diagnosticsFileName } from '../../shared/app/diagnostics.ts'
+import type { Logger } from '../../shared/logging/levels.ts'
 
 export const DIAGNOSTICS_DIR = 'diagnostics'
 
@@ -15,7 +16,7 @@ export interface ExportDiagnosticsInput {
   now: Date
   /** 在文件管理器里选中文件（主进程注入；缺省不动） */
   reveal?: (path: string) => void
-  log?: (line: string) => void
+  log?: Logger
 }
 
 export interface ExportDiagnosticsResult {
@@ -36,8 +37,10 @@ export function exportDiagnostics(input: ExportDiagnosticsInput): ExportDiagnost
   let bytes = Buffer.byteLength(text)
   try {
     bytes = statSync(path).size
-  } catch {}
-  input.log?.(`[diag] 诊断已导出：${path}（${String(bytes)} 字节）`)
+  } catch (error) {
+    input.log?.debug(`诊断文件 stat 失败：${String(error)}`)
+  }
+  input.log?.info(`诊断已导出：${path}（${String(bytes)} 字节）`)
   input.reveal?.(path)
   return { path, bytes }
 }
