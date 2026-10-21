@@ -643,6 +643,8 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     onFullRestart: noWindow ? undefined : () => restartDsh(),
     // #119：dev_tools 保存后的生效路径。拉不起时带原因回传（dev 态显式降级），不假报成功。
     onRestartApp: () => restartDesktopApp(),
+    // #235：win 安装壳更新（运行安装包）后退出本应用——安装器要替换运行中的程序文件。
+    onExitApp: noWindow ? undefined : () => shutdown(),
     notifier,
     // 同一个 UN 桥实例（状态与投递都走它；面板的权限徽标也从这里读）
     notifyBridge,
@@ -1215,6 +1217,8 @@ const updateNoticePresenter = createUpdateNoticePresenter({
   run: (op) => uiService().updateNoticeOp(op),
   // 页面只读的下载进度：同一个单飞下载器的状态，壳算好百分比再递给页面。
   downloadStatus: () => uiService().downloadStatus(),
+  // #235：壳段更新状态（自管安装包下载器 + 自管 check 视图的合成），页面画进度与「安装更新」用。
+  shellUpdateStatus: () => uiService().shellUpdateStatus(),
   refresh: () => void refreshTray(),
   // #164：platform 决定提醒窗画不画标题带（win32/linux 画，窗高也相应加一段）。
   renderer,

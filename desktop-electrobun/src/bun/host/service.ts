@@ -47,7 +47,10 @@ import { systemDefaultSoundCommand } from '../notify/sound-playback.ts'
 import { createNativeNotify, type NativeNotify } from '../notify/notify-un.ts'
 import type { ViewRegistry } from '../../shared/net/view-grant.ts'
 import type { GuestCommands } from '../windows/guest-manager.ts'
-import { createUpdater, type ShellUpdater } from '../platform/updater.ts'
+import { createUpdater, type ShellUpdater, type UpdaterSnapshot } from '../platform/updater.ts'
+import { createInstallerDownloader, idleInstallerStatus, installerFilePath, installerRootDir, type InstallerDownloader } from '../platform/installer-download.ts'
+import { shellUpdateStatusOf, type ShellUpdateStatus } from '../platform/shell-update-status.ts'
+import { updateActions, type UpdateView } from '../../shared/runtime/update.ts'
 import { permissionHint, permissionLabel } from '../../shared/notify/notify-permission.ts'
 import { NOTIFY_TYPE_SCENARIOS, SCENARIO } from '../../shared/notify/notify-policy.ts'
 import { resolveBundleIdentifier } from '../../shared/app/app-identity.ts'
@@ -82,7 +85,8 @@ import {
 import { createRuntimeDownloader, ensureNodeShim, ensureShimDir, installRuntime, resolvePnpmCjs, withRuntimeDownloadNotify } from '../runtime/runtime-install.ts'
 
 
-/** #117：服务面自己管 DSH 的判别位（ShellState.status 取这个联合）。 */
+
+
 /** #117：服务面自己管 DSH 的判别位（ShellState.status 取这个联合；口径定义在 host-supervisor，避免反向 import 成环）。 */
 export type ShellServiceStatus = HostLifecycleStatus
 export interface ServiceOptions {
@@ -110,6 +114,8 @@ export interface ServiceOptions {
   onHostGiveUp?: (state: ShellState, reason: string) => void
   /** #60：手动「重启 dsh 服务」= DSH 树级完整重启（宿主+伴生树灭后全新拉起，壳/窗口不动）；缺省回落宿主级 restartHost（无窗口/测试） */
   onFullRestart?: () => Promise<void>
+  /** #235：applyShell（win）启动安装器后退出本应用——安装器要替换运行中的程序文件；点「安装更新」即用户确认。测试不注入（只 spawn 安装器，不退出）。 */
+  onExitApp?: () => Promise<void>
   /** #119：整应用退出 + 自动重启（B）。拉不起时带原因回传（dev 态显式降级），不抛给页面。 */
   onRestartApp?: () => Promise<{ ok: boolean; reason?: string; message?: string }>
   /** F9：托盘弹框的 profile 新建/迁移落地后（create → 开窗，migrate → 刷新托盘） */
@@ -209,6 +215,8 @@ export interface ShellService {
   notify: NativeNotify
   /** 下载进度（托盘与设置面板共用同一个单飞状态） */
   downloadStatus: () => RuntimeDownloadStatus
+  /** #235：壳段更新状态（自管安装包下载器 + 自管 check 视图合成；提醒窗 shell_update_status 的数据源） */
+  shellUpdateStatus: () => ShellUpdateStatus
   /** 下载并安装一个运行时（单飞） */
   download: (version: string, source: RuntimeSource) => Promise<{ ok: true; version: string }>
   /** #97：取消进行中的运行时安装（托盘与面板共用；没有任务是幂等 no-op） */
@@ -617,6 +625,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 拿不到更新源（dev 构建 / 未配 release.baseUrl）时只记日志，面板里显示「为什么不可用」。
   const updater = options.updater ?? createUpdater({ log: updateLog, env })
   updater.start()
+  // #235：三平台壳更新全部壳侧自管（ADR-0014，2026-10-21 修订）——框架链路两个硬伤：
+  // 「受管更新目录」校验对 #87 自定义安装位置一票否决；mac 实测进度回调不可靠
+  // （瞬间 100% 再回落、然后卡住不动）。改为直接下载各平台安装包（win=NSIS / mac=DMG /
+  // linux=tar.gz），就绪后用户点「安装」按平台动作（运行安装器 / 挂载 DMG / 打开所在文件夹）。
+  const installerDownloader: InstallerDownloader | null = createInstallerDownloader({ log: updateLog, env })
   // ② 插件：把桌面壳插件（+ 手机侧，若在）挂进 profile 模块池，并写 `--patch` 注入清单。
   const staged = stagePlugins({
     home,
@@ -1134,7 +1147,17 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       trigger,
       store: updateNoticeStore,
       // 壳这一路：框架 updater 拿不到更新源（dev 构建）时 view 里压根没有新版本 ⇒ 自然静默。
-      probeShell: async () => ({ view: (await updater.check()).view, fresh: true }),
+      // #235：Windows 上目标版本的安装包若已在本地就绪，直接把壳段呈「安装态」，不要求重下。
+      probeShell: async () => {
+        const view = (await updater.check()).view
+        if (installerDownloader !== null && view.latest !== '') {
+          const ready = installerDownloader.findReady(view.latest)
+          if (ready !== '') {
+            return { view: { ...view, updateReady: true, phase: 'ready' as const, message: `安装包已就绪：${ready}` }, fresh: true }
+          }
+        }
+        return { view, fresh: true }
+      },
       probeRuntime: async () => {
         const snapshot = runtimeSnapshot()
         const source = liveSettings.runtimeSource ?? DEFAULT_CATALOG_SOURCE
@@ -1169,12 +1192,68 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     })
   }
   // #139：提醒卡动作的依赖全部指向**已有**能力——壳下载走 updater，运行时下载走同一个单飞下载器，
-  // 落设置走 saveSettings（#97：dsh_mode 必须一起写，否则「切回内置」会被当成没设置），重启走上面那份，
-  // 「不再提示」落到上面那份 update-notice.json（测试可经 options.onIgnoreVersions 注入假实现）。
+  // #139/#235：提醒卡动作的依赖全部指向**已有**能力；壳两段的实现与设置面板
+  // （download_update/apply_update）共用同一条壳自管路（三平台安装包下载 + 按平台安装动作）。
+
+    // #235：壳自管安装包状态的唯一读口——面板 get_shell_update_status 与提醒窗 shell_update_status 共用。
+    const shellStatusNow = (): ShellUpdateStatus => {
+      const view = updater.snapshot().view
+      return shellUpdateStatusOf({
+        installer: installerDownloader?.status() ?? idleInstallerStatus(),
+        view,
+        readyPath: installerDownloader !== null && view.latest !== '' ? installerDownloader.findReady(view.latest) : '',
+        // #235 review：下载中就把落点展示出来（票面「下载文件的位置」），不等就绪。
+        targetPath:
+          installerDownloader !== null && view.latest !== ''
+            ? installerFilePath(installerRootDir(env), view.latest)
+            : '',
+      })
+    }
+    // 把壳下载器状态融进框架快照：自管下载框架感知不到，弹窗/面板的 download_update 回执
+    // 必须以壳下载器为准（下载中→进度，已就绪→安装态），否则点完下载 UI 看不出任何变化。
+    const shellSnapshotWithInstaller = (view: UpdateView): UpdaterSnapshot => {
+      const base = updater.snapshot()
+      if (installerDownloader === null) return base
+      const ready = view.latest !== '' ? installerDownloader.findReady(view.latest) : ''
+      if (ready !== '') {
+        const next: UpdateView = { ...view, updateReady: true, phase: 'ready', error: '', message: `安装包已就绪：${ready}` }
+        return { ...base, view: next, actions: updateActions(next) }
+      }
+      const st = installerDownloader.status()
+      if (st.active) {
+        const next: UpdateView = { ...view, phase: 'downloading', progress: st.percent, error: '', message: `安装包下载中…（${st.percent ?? 0}%）` }
+        return { ...base, view: next, actions: updateActions(next) }
+      }
+      return base
+    }
+  const shellDownload = async (): Promise<UpdaterSnapshot> => {
+    // #235：三平台全部壳侧自管（ADR-0014），不再有框架兜底分支。
+    if (installerDownloader === null) throw new Error('壳未接自管安装包下载器')
+    const view = (await updater.check()).view
+    if (view.latest === '') throw new Error('没有可下载的桌面壳版本（更新源未就绪）')
+    // start 对「已就绪」幂等返回、对「下载中」单飞复用——回执要反映壳侧真实状态。
+    await installerDownloader.start({ baseUrl: view.baseUrl, version: view.latest })
+    return shellSnapshotWithInstaller(view)
+  }
+  const shellApply = async (): Promise<UpdaterSnapshot> => {
+    // #235：三平台全部壳侧自管（ADR-0014），不再有框架兜底分支。
+    if (installerDownloader === null) throw new Error('壳未接自管安装包下载器')
+    // 离线优先：先信下载器内存态的版本（不联网）；探不到才问检查更新拿 latest（要联网）——
+    // 网络挂了也不能挡住「已下载的直接装」（票面诉求 3）。
+    const local = installerDownloader.status()
+    let ready = local.version !== '' ? installerDownloader.findReady(local.version) : ''
+    if (ready === '') {
+      const view = (await updater.check()).view
+      ready = view.latest !== '' ? installerDownloader.findReady(view.latest) : ''
+    }
+    if (ready === '') throw new Error('安装包还没就绪，请先下载更新')
+    await installerDownloader.launch(ready)
+    await options.onExitApp?.()
+    return updater.snapshot()
+  }
   const updateNoticeOp = createUpdateNoticeOpRunner({
-    downloadShell: async () => {
-      await updater.download()
-    },
+    downloadShell: shellDownload,
+    applyShell: shellApply,
     // 端点是回环 HTTP，source 按普通外部输入对待：只认这两个，其余回落 github。
     downloadRuntime: (version, source) => downloadRuntimeNotified(version, source === 'npm' ? 'npm' : 'github'),
     switchRuntime: (version) => {
@@ -1204,6 +1283,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     fetchCatalog: (source) =>
       fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log: updateLog }),
     downloadStatus: () => downloader.status(),
+    // #235：壳段状态（自管安装包下载器 + 框架视图合成；提醒窗 shell_update_status 的数据源）
+    shellUpdateStatus: shellStatusNow,
     download: downloadRuntimeNotified,
     // #97：托盘与面板共用同一个取消口，取消后两边都从轮询快照看到 cancelled 终态
     cancelRuntimeDownload: () => downloader.cancel(),
@@ -1479,6 +1560,12 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       testProxy: (url) => testProxyConnectivity(url),
       guests: options.guests,
       updater,
+      // #235：面板的「下载更新/安装更新」与提醒卡共用同一条壳自管路（三平台安装包）。
+      downloadShellUpdate: shellDownload,
+      applyShellUpdate: shellApply,
+      // #235：面板 get_shell_update_status 的唯一数据源——漏传会让查询永远 throw（面板 catch 静默吞掉，
+      // 表面就是「无进度条/安装态不可用」），弹窗与面板必须同一份数据源。
+      shellUpdateStatus: shellStatusNow,
       dependencyRows: async () => {
         const builtinPnpm = builtinPnpmVersion({
           env: childEnv,

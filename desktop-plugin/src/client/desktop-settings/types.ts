@@ -28,6 +28,8 @@ export type RuntimeCatalog = Commands['list_runtime_catalog']['result']
 
 /** 应用更新（#220 决策 11）：壳把框架 Updater 的状态机翻成这个视图，客户端只负责渲染。 */
 export type UpdateSnapshotLike = Commands['get_update_state']['result']
+/** 壳段自管安装包更新状态（#235 get_shell_update_status 回执）：面板进度条与提醒窗共用。 */
+export type ShellUpdateStatusLike = Commands['get_shell_update_status']['result']
 
 /** 迁移进度（migration_status 回执）。 */
 export type MigrationStatus = Commands['migration_status']['result']

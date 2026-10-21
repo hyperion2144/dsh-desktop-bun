@@ -21,6 +21,7 @@ import {
 import { attachUpdateNoticeRpc } from './update-notice-rpc.ts'
 import { dialogTitlebarFrameHeight } from './dialog-titlebar.ts'
 import type { CarrierPlatform } from './carrier.ts'
+import type { ShellUpdateStatus } from '../platform/shell-update-status.ts'
 
 /** BrowserWindow 的最小结构（测试用假窗即可，不必真开窗）。 */
 export interface NoticeWindowLike {
@@ -129,6 +130,11 @@ export interface UpdateNoticePresenterDeps {
   run: (op: UpdateNoticeOp) => Promise<unknown>
   /** 运行时下载器的当前状态（只读；壳算好百分比再递给页面）。 */
   downloadStatus: () => { active: boolean; version: string; resolved: number; downloaded: number }
+  /**
+   * #235：壳段更新状态（自管安装包下载器 + 自管 check 视图的合成）。未接上时返回
+   * null，页面按无状态画；提醒窗自己不持有下载器，只透传给 RPC 桥。
+   */
+  shellUpdateStatus?: () => ShellUpdateStatus | null
   /** 窗关掉后的壳侧刷新（refreshTray）。 */
   refresh: () => void
   renderer?: 'native' | 'cef'
@@ -158,6 +164,7 @@ export function createUpdateNoticePresenter(deps: UpdateNoticePresenterDeps): Up
     const pending = attachUpdateNoticeRpc({
       run: deps.run,
       downloadStatus: deps.downloadStatus,
+      shellUpdateStatus: deps.shellUpdateStatus,
       resize: (height) => windows.get(profile)?.resize(height),
       close: () => windows.get(profile)?.close(),
     })

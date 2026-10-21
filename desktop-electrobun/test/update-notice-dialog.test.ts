@@ -4,7 +4,8 @@ import {
   UPDATE_NOTICE_BAND_TITLE,
   UPDATE_NOTICE_OP_METHOD,
   UPDATE_NOTICE_CLOSE_METHOD,
-  UPDATE_NOTICE_STATUS_METHOD,
+    UPDATE_NOTICE_STATUS_METHOD,
+    UPDATE_NOTICE_SHELL_STATUS_METHOD,
   UPDATE_NOTICE_MAX_HEIGHT,
   UPDATE_NOTICE_MIN_HEIGHT,
   UPDATE_NOTICE_RESIZE_METHOD,
@@ -425,4 +426,49 @@ describe('updateNoticeHtml 的标题带（#164）', () => {
     expect(script).toContain('if (closeBtn) closeBtn.addEventListener(\'click\', closeSelf)')
     expect(script).toContain("if (event.key === 'Escape') closeSelf()")
   })
+})
+
+describe('#235：壳段安装态（apply-shell）', () => {
+    function scriptOf(html: string): string {
+        const start = html.lastIndexOf('<script>')
+        const end = html.lastIndexOf('</script>')
+        return html.slice(start + '<script>'.length, end)
+    }
+    test('updateNoticeOp 认 apply-shell（用户手动确认，不自动装）', () => {
+        expect(updateNoticeOp({ op: 'apply-shell' })).toEqual({ op: 'apply-shell' })
+    })
+
+    test('壳段就绪（updateReady）→ 开窗即呈「安装更新」', () => {
+        const ready = payload({ shell: shellView({ updateReady: true, phase: 'ready' }) })
+        expect(updateNoticeModel(ready)!.shell!.ready).toBe(true)
+        const html = updateNoticeHtml(ready)
+        expect(html).toContain('安装更新')
+        expect(html).toContain('&quot;op&quot;:&quot;apply-shell&quot;')
+    })
+
+    test('壳段未就绪 → 维持「下载更新」，不呈安装态', () => {
+        expect(updateNoticeModel(payload())!.shell!.ready).toBe(false)
+        expect(updateNoticeHtml(payload())).not.toContain('&quot;op&quot;:&quot;apply-shell&quot;')
+    })
+
+    test('壳段状态轮询与进度条（shell_update_status + #sdl + 就绪换装）', () => {
+        const html = updateNoticeHtml(payload())
+        const script = scriptOf(html)
+        expect(script).toContain(JSON.stringify(UPDATE_NOTICE_SHELL_STATUS_METHOD))
+        expect(script).toContain('function renderShellStatus')
+        expect(script).toContain('function morphShellInstall')
+        expect(script).toContain("getElementById('sdl')")
+        expect(html).toContain('id="sdl"')
+        expect(html).toContain('id="shellhint"')
+    })
+
+    test('含壳段动作不自动关窗，纯运行时动作维持 350ms 关窗', () => {
+        const script = scriptOf(updateNoticeHtml(payload()))
+        expect(script).toContain('function touchesShell(op)')
+        expect(script).toContain(
+            "op.op === 'download-shell' || op.op === 'apply-shell' || (op.op === 'update-all' && op.shell === true)",
+        )
+        expect(script).toContain('正在下载桌面壳更新，完成后可在此安装')
+        expect(script).toContain('安装器已启动，应用即将退出…')
+    })
 })

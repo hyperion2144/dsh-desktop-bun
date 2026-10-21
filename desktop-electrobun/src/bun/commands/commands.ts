@@ -16,11 +16,17 @@ import { listSounds, type Notifier } from '../notify/notifications.ts'
 import { permissionHint, type NotifyPermission } from '../../shared/notify/notify-permission.ts'
 import type { PortClaim } from '../../shared/net/ports.ts'
 import { EMPTY_TASK, startupAction, validProfileName, type MigrationStatus, type ProfileDependencyRow, type StartupHealth, type TaskSnapshot } from '../../shared/profiles/profile-ops.ts'
-import type { ShellUpdater } from '../platform/updater.ts'
+import type { ShellUpdater, UpdaterSnapshot } from '../platform/updater.ts'
 import type { UpdateNoticeStore, UpdateNoticeTarget } from './update-notice-store.ts'
 import type { ProxyEnv } from '../../shared/net/proxy-env.ts'
 import type { KeepAwakeCapability } from '../notify/keep-awake.ts'
-import type { CommandArgs, CommandHandlers, CommandResult, RuntimeCatalogSnapshot } from '../../../../contracts/index.ts'
+import type {
+    CommandArgs,
+    CommandHandlers,
+    CommandResult,
+    RuntimeCatalogSnapshot,
+    ShellUpdateStatus,
+} from '../../../../contracts/index.ts'
 import { evaluateRuntimeUpdates } from '../../shared/runtime/runtime-update.ts'
 import { pageLevelToLogLevel, type Logger } from '../../shared/logging/levels.ts'
 import { classifyLevel } from '../../shared/app/log-file.ts'
@@ -144,6 +150,14 @@ export interface CommandDeps {
   testProxy?: (url: string) => Promise<number>
   /** 应用更新（`src/bun/updater.ts` 包住的框架 Updater）；无窗口单测可以不接 */
   updater?: ShellUpdater
+    /**
+     * #235：壳更新的壳侧自管实现（三平台安装包下载 + 按平台安装动作），与提醒卡共用同一条路。
+     * 未注入时 download_update/apply_update 直接报「壳未接自管更新」（不再有框架兜底）。
+     */
+    downloadShellUpdate?: () => Promise<UpdaterSnapshot>
+    applyShellUpdate?: () => Promise<UpdaterSnapshot>
+    /** #235：壳段更新状态合成（安装包下载器 + 框架视图）；设置面板进度条的数据源。 */
+    shellUpdateStatus?: () => ShellUpdateStatus | null
   /**
    * #136：启动更新提醒的开关与拉黑列表。状态住在 `app-support/update-notice.json`，
    * **不经 `desktop-settings.json`**——设置文件的键名是契约红线，壳内部状态不往里塞。
@@ -870,22 +884,27 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       const updater = deps.updater
       if (updater === undefined) throw new Error('get_update_state：壳未接应用更新')
       return updater.snapshot()
-    },
+      },
+      // #235：壳段更新状态（安装包下载进度/就绪/失败）；设置面板进度条 1s 轮询它。
+      get_shell_update_status: () => {
+          const status = deps.shellUpdateStatus?.()
+          if (status === undefined || status === null) throw new Error('get_shell_update_status：壳未接自管安装包下载器')
+          return status
+      },
     check_update: async () => {
       const updater = deps.updater
       if (updater === undefined) throw new Error('check_update：壳未接应用更新')
       return updater.check()
     },
-    download_update: async () => {
-      const updater = deps.updater
-      if (updater === undefined) throw new Error('download_update：壳未接应用更新')
-      return updater.download()
-    },
-    apply_update: async () => {
-      const updater = deps.updater
-      if (updater === undefined) throw new Error('apply_update：壳未接应用更新')
-      return updater.apply()
-    },
+      download_update: async () => {
+          // #235：下载全部壳侧自管（ADR-0014）；未注入实现 = 壳没接更新能力。
+          if (deps.downloadShellUpdate === undefined) throw new Error('download_update：壳未接自管更新')
+          return deps.downloadShellUpdate()
+      },
+      apply_update: async () => {
+          if (deps.applyShellUpdate === undefined) throw new Error('apply_update：壳未接自管更新')
+          return deps.applyShellUpdate()
+      },
     // ---- 启动更新提醒的开关与拉黑列表（#136）----
     // 面板只改 `update-notice.json`；不碰 desktop-settings.json（键名是契约红线）。
     get_update_notice_state: () => {

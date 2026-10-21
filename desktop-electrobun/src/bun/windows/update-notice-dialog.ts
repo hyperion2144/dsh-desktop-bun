@@ -48,6 +48,14 @@ export const UPDATE_NOTICE_OP_METHOD = 'update_notice_op'
 
 /** 只读的下载状态查询方法名（与壳命令表同名；页面靠它画进度）。 */
 export const UPDATE_NOTICE_STATUS_METHOD = 'runtime_download_status'
+
+/**
+ * #235：壳段状态查询（下载进度 / 失败红字 / 就绪转「安装更新」）。
+ *
+ * 与 `runtime_download_status`（只管运行时下载器）分开：壳更新是壳侧自管链路——合成自
+ * 自管安装包下载器快照与自管 check 的远端视图（`shell-update-status.ts`）。页面只认这一个方法，不猜该信哪个源。
+ */
+export const UPDATE_NOTICE_SHELL_STATUS_METHOD = 'shell_update_status'
 /**
  * 请壳关掉本窗的方法名（#160 实机：点「稍后」毫无反应）。
  *
@@ -118,6 +126,8 @@ export interface UpdateNoticeRuntimeTarget {
 
 export type UpdateNoticeOp =
   | { op: 'download-shell' }
+  // #235：安装包已就绪（磁盘探测命中 / 下载完成）→「安装更新」，用户手动确认。
+  | { op: 'apply-shell' }
   | ({ op: 'runtime' } & UpdateNoticeRuntimeTarget)
   | { op: 'update-all'; shell: boolean; runtime?: UpdateNoticeRuntimeTarget }
   | { op: 'ignore'; targets: UpdateNoticeTarget[] }
@@ -130,6 +140,8 @@ export interface UpdateNoticeShellSegment {
   bytes: string
   /** 下载类动作忙（checking/downloading/preparing）时按钮不可点。 */
   disabled: boolean
+  /** #235：安装包已就绪 → 按钮呈「安装更新」（开窗即判，覆盖「已下载未装再开窗」）。 */
+  ready: boolean
   hint: string
 }
 
@@ -162,13 +174,16 @@ export interface UpdateNoticeModel {
 function shellSegment(view: UpdateView | null): UpdateNoticeShellSegment | null {
   if (view === null || !view.updateAvailable) return null
   const busy = view.phase === 'checking' || view.phase === 'downloading' || view.phase === 'preparing'
+  // #235：updateReady 就呈安装态（win 由组装处把已下载安装包融进 view；mac 用框架 updateReady）。
+  const ready = !busy && view.updateReady
   return {
     version: view.latest,
     current: view.current,
     channel: view.channel,
     bytes: formatBytes(view.totalBytes),
     disabled: busy,
-    hint: busy ? view.label : '重启应用后生效',
+    ready,
+    hint: busy ? view.label : ready ? '安装包已就绪，点击安装' : '重启应用后生效',
   }
 }
 
@@ -254,10 +269,10 @@ export function updateNoticeHtml(payload: UpdateNoticePayload): string {
     band.html === ''
       ? ''
       : [
-          dialogTitlebarStyle(),
-          '  body { position: relative; }',
-          `  .${DIALOG_TITLEBAR_CLASS} { padding-top: 46px; }`,
-        ].join('\n')
+        dialogTitlebarStyle(),
+        '  body { position: relative; }',
+        `  .${DIALOG_TITLEBAR_CLASS} { padding-top: 46px; }`,
+      ].join('\n')
   if (model === null) {
     // 不该走到这里：调用方先看 updateNoticeModel()，为 null 就不开窗。留一页体面话兜底。
     return `<!doctype html>
@@ -282,8 +297,11 @@ ${shellThemeStyle()}
   <div class="cap">桌面壳</div>
   <div class="ver">${escapeHtml(model.shell.version)}</div>
   <div class="sub">当前 ${escapeHtml(model.shell.current)} · ${escapeHtml(model.shell.channel)} · ${escapeHtml(model.shell.bytes)}</div>
-  ${button('下载更新', { op: 'download-shell' }, true, model.shell.disabled)}
-  <div class="hint">${escapeHtml(model.shell.hint)}</div>
+  ${model.shell.ready
+        ? button('安装更新', { op: 'apply-shell' }, true, false)
+        : button('下载更新', { op: 'download-shell' }, true, model.shell.disabled)}
+  <div class="hint" id="shellhint">${escapeHtml(model.shell.hint)}</div>
+  <div id="sdl" hidden><div class="bar"><div class="fill" id="sfill"></div></div><div id="stxt"></div></div>
 </div>`
   const runtimeCol =
     model.runtime === null
@@ -403,17 +421,83 @@ ${shellCol}${runtimeCol}
     pollStatus()
     statusTimer = setInterval(pollStatus, 700)
   }
-  // 只有会拉包的两种动作才盯进度；「稍后」「不再提示」不碰网络。
+  // #235：壳段状态轮询（shell_update_status）：下载进度 / 失败红字 / 就绪转「安装更新」。
+  var shellTimer = null
+  function pollShellStatus() {
+    invokeShell(${jsString(UPDATE_NOTICE_SHELL_STATUS_METHOD)}, null).then(renderShellStatus).catch(function () {})
+  }
+  function watchShellStatus() {
+    if (shellTimer !== null) return
+    pollShellStatus()
+    shellTimer = setInterval(pollShellStatus, 700)
+  }
+  function stopShellWatch() {
+    if (shellTimer !== null) { clearInterval(shellTimer); shellTimer = null }
+  }
+  function renderShellStatus(status) {
+    var wrap = document.getElementById('sdl')
+    if (status && status.active === true) {
+      if (wrap) {
+        wrap.removeAttribute('hidden')
+        document.getElementById('sfill').style.width = (status.percent != null ? status.percent : 8) + '%'
+        document.getElementById('stxt').textContent =
+          '正在下载 ' + status.version + (status.percent != null ? '　' + status.percent + '%' : '…')
+      }
+      setBusy(true)
+      return
+    }
+    if (wrap) wrap.setAttribute('hidden', 'hidden')
+    if (status && status.error) {
+      // #235：失败必须可见（候选 C 的教训：以前失败只落日志，窗早关了）。
+      stopShellWatch()
+      msg.className = 'err'
+      msg.textContent = status.error
+      setBusy(false)
+      return
+    }
+    if (status && status.updateReady === true) {
+      stopShellWatch()
+      morphShellInstall(status.installerPath)
+      setBusy(false)
+      msg.className = ''
+      msg.textContent = status.installerPath !== '' ? '安装包已就绪：' + status.installerPath : '安装包已就绪，点击安装'
+      return
+    }
+  }
+  // 壳段就绪 → 下载按钮换成「安装更新」（点它 = 用户确认退出应用并运行安装器）。
+  function morphShellInstall(installerPath) {
+    var nodes = document.querySelectorAll('[data-op]')
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i]
+      var op
+      try { op = JSON.parse(el.getAttribute('data-op')) } catch (e) { continue }
+      if (op && op.op === 'download-shell') {
+        el.textContent = '安装更新'
+        el.setAttribute('data-op', JSON.stringify({ op: 'apply-shell' }))
+        el.removeAttribute('disabled')
+        el.setAttribute('data-was-disabled', '0')
+      }
+    }
+    var hint = document.getElementById('shellhint')
+    if (hint && installerPath) hint.textContent = '安装包位置：' + installerPath
+  }
+  // 只有会拉包的两种动作才盯运行时进度；「稍后」「不再提示」不碰网络。
   function wantsDownload(op) {
     if (op.op === 'runtime') return op.action === 'download-and-switch'
     if (op.op === 'update-all') return op.runtime !== undefined && op.runtime !== null
     return false
+  }
+  // #235：这个动作要不要在窗上盯壳段？下载/安装/含壳段的「全部更新」都要——弹窗不再
+  // 「成功即关窗」，壳段要留在窗上看到终态（就绪转「安装更新」，失败红字可见）。
+  function touchesShell(op) {
+    return op.op === 'download-shell' || op.op === 'apply-shell' || (op.op === 'update-all' && op.shell === true)
   }
   function send(op) {
     setBusy(true)
     msg.className = ''
     msg.textContent = '处理中…'
     if (wantsDownload(op)) watchStatus()
+    if (touchesShell(op)) watchShellStatus()
     invokeShell(${jsString(UPDATE_NOTICE_OP_METHOD)}, op).then(function (data) {
       window.__dshUpdateNoticeOp = op
       window.__dshUpdateNoticeOpResult = data
@@ -423,6 +507,13 @@ ${shellCol}${runtimeCol}
         setBusy(false)
         if (statusTimer !== null) { clearInterval(statusTimer); statusTimer = null }
         renderStatus(null)
+        stopShellWatch()
+        return
+      }
+      if (touchesShell(op)) {
+        // #235：含壳段不自动关窗——进度/终态由 shell_update_status 轮询摆上来；
+        // apply-shell 成功后壳会退出应用（点「安装」即用户确认），窗随进程一起走。
+        msg.textContent = op.op === 'apply-shell' ? '安装器已启动，应用即将退出…' : '正在下载桌面壳更新，完成后可在此安装'
         return
       }
       setTimeout(closeSelf, 350)
@@ -432,6 +523,7 @@ ${shellCol}${runtimeCol}
       setBusy(false)
       if (statusTimer !== null) { clearInterval(statusTimer); statusTimer = null }
       renderStatus(null)
+      stopShellWatch()
     })
   }
   // 动作走 Electrobun 官方 Typed RPC 的原生桥，不走 fetch（#139 实机修）：这扇窗是
@@ -483,10 +575,16 @@ ${shellCol}${runtimeCol}
       send(op)
     })
   })
-  // 开窗时可能已经有下载在跑（面板点过、或上一张卡没关）：那就把进度摆出来、按钮锁上。
+  // 开窗时可能已经有运行时下载在跑（面板点过、或上一张卡没关）：把进度摆出来、按钮锁上。
   invokeShell(${jsString(UPDATE_NOTICE_STATUS_METHOD)}, null).then(function (status) {
     renderStatus(status)
     if (status && status.active === true) setBusy(true)
+  }).catch(function () {})
+  // #235：壳段同理——可能已就绪（上窗下载过没装）或在下载中：就绪直接换「安装更新」，
+  // 下载中就把进度条摆出来并盯住（覆盖「已下载未安装再开窗直接装」）。
+  invokeShell(${jsString(UPDATE_NOTICE_SHELL_STATUS_METHOD)}, null).then(function (status) {
+    renderShellStatus(status)
+    if (status && status.active === true) watchShellStatus()
   }).catch(function () {})
   // 窗高跟着内容走（#130 实机反馈）：窗是固定 560×300 开的，而「另有 …」那一行会随候选版本
   // 个数换行、页脚又多一行——条目一多，页脚就被裁掉、还多一条滚动条。壳先开窗才知道渲染高，
@@ -539,6 +637,8 @@ export function updateNoticeOp(value: unknown): UpdateNoticeOp | null {
   switch (raw['op']) {
     case 'download-shell':
       return { op: 'download-shell' }
+    case 'apply-shell':
+      return { op: 'apply-shell' }
     case 'update-all': {
       const runtime = raw['runtime']
       const target = runtime === undefined || runtime === null ? null : runtimeTarget(runtime)

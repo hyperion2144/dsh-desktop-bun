@@ -73,12 +73,13 @@ export type {
   UpdateView,
   UpdateActions,
   UpdateSnapshot,
+  ShellUpdateStatus,
   UpdateNoticeTarget,
   UpdateNoticeState,
   UpdateCommands,
 } from './updates.ts'
 
-/** 壳服务的全部命令（75 条），按域拼装；域之间不允许重复键。 */
+/** 壳服务的全部命令（76 条），按域拼装；域之间不允许重复键。 */
 export interface Commands
   extends SettingsCommands,
   RuntimeCommands,
@@ -179,6 +180,7 @@ export const COMMAND_NAMES: readonly CommandName[] = [
   'check_update',
   'download_update',
   'apply_update',
+  'get_shell_update_status',
   'get_update_notice_state',
   'set_update_notice_enabled',
   'restore_update_notice',

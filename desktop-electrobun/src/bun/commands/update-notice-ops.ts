@@ -7,9 +7,11 @@
  * - 运行时「切换到此版本」＝ 只落设置 + 重启服务。设置写的是
  *   `{ dsh_runtime: version, dsh_mode: 'builtin' }`——**内置行也写版本号**，这是 #97 修的坑：
  *   写 null 会让壳把「切回内置」当成没设置，进而拿已装最高版本顶上。
- * - 壳「下载更新」＝ 壳 updater 的 download。**不碰 apply**：跨重启换 `.app` 是维护者的动作，
+ * - 壳「下载更新」＝ 自管安装包下载器启动（三平台同一条路）。**不自动安装**：跨重启换 .app 是
  *   提醒窗不自动装。
  * - 「稍后」什么都不做；「不再提示」交给 #142 的 `update-notice.json`（拉黑版本号）。
+  * - #235「安装更新」（apply-shell）＝ 用户手动确认后的壳安装：win 运行已下载的安装包（随后
+  *   退出本应用），mac 挂载 DMG、linux 打开所在文件夹（`installer-download.ts` 的平台分叉）。安装永远不自动触发。
  *
  * 依赖全从外面注入，所以本文件能单测：一个假下载器就能把「下载失败不许继续切」「两段里
  * 一段失败另一段照走」这些时序钉死，不必起壳。
@@ -29,8 +31,10 @@ export interface UpdateNoticeOpResult {
 
 
 export interface UpdateNoticeOpDeps {
-  /** 壳更新下载（`updater.download()`）。 */
+  /** 壳更新下载（自管安装包下载器，三平台同一条路）。 */
   downloadShell: () => Promise<unknown>
+  /** #235：安装壳更新（win 运行安装包+退出 / mac 挂 DMG / linux 开文件夹）。没接上时报不可用。 */
+  applyShell?: () => Promise<unknown>
   /** 运行时下载（进 `runtimesDir`；已有任务在跑时由下载器自己抛「已有运行时下载任务」）。 */
   downloadRuntime: (version: string, source: string) => Promise<unknown>
   /** 落设置：把选中版本钉成目标（含内置，见上方 #97 红线）。 */
@@ -94,6 +98,16 @@ export function createUpdateNoticeOpRunner(deps: UpdateNoticeOpDeps): UpdateNoti
           return { ok: true, message: '正在下载桌面壳更新，下载完重启应用即可' }
         } catch (error) {
           return { ok: false, message: `桌面壳更新下载失败：${reasonOf(error)}` }
+        }
+      case 'apply-shell':
+        if (deps.applyShell === undefined) {
+          return { ok: false, message: '这个版本还不支持在应用内安装更新' }
+        }
+        try {
+          await deps.applyShell()
+          return { ok: true, message: '安装器已启动，应用即将退出' }
+        } catch (error) {
+          return { ok: false, message: `安装壳更新失败：${reasonOf(error)}` }
         }
       case 'runtime':
         return await runRuntime(op, deps)
