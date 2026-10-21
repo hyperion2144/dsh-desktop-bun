@@ -114,7 +114,14 @@ export default {
     // 与 runtime.ts 的 packagedRoot() 约定一致。
     copy: {
       'runtime/dsh-host.mjs': 'runtime/dsh-host.mjs',
-      'runtime/parent-watch.mjs': 'runtime/parent-watch.mjs',
+        'runtime/parent-watch.mjs': 'runtime/parent-watch.mjs',
+        // #237 常驻监督进程：明文脚本随包发出（与 dsh-host.mjs 同模式），依赖的零依赖纯逻辑
+        // 模块按仓库相对结构一并复制——监督进程在包内仍按 ../src/... 相对路径引用它们。
+        'runtime/shell-supervisor.mjs': 'runtime/shell-supervisor.mjs',
+        'src/bun/platform/app-restart.ts': 'src/bun/platform/app-restart.ts',
+        'src/bun/platform/restart/intent.ts': 'src/bun/platform/restart/intent.ts',
+        'src/bun/platform/restart/cef-lock.ts': 'src/bun/platform/restart/cef-lock.ts',
+        'src/bun/platform/restart/entry.ts': 'src/bun/platform/restart/entry.ts',
       'runtime/bun-preload.mjs': 'runtime/bun-preload.mjs',
       // 托盘图标：prepare:bundle 把旧的 32x32.png 拷到 resources/tray.png，再落进包内 runtime/
       'resources/tray.png': 'runtime/tray.png',

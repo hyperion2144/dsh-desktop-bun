@@ -23,7 +23,8 @@ import { isExternalUrl } from './windows/external.ts'
 import { APP_NAME } from '../shared/app/app.ts'
 import { appSupportDir, dshHome, resolveLauncherForRelaunch, trayImagePath } from './runtime/runtime.ts'
 import { acquireInstance, activateUrl, defaultIsAlive, releaseInstance, updateInstance } from './platform/single-instance.ts'
-import { awaitParentExit, cefDirFromExecPath, relaunchDesktopApp, relaunchParentPid } from './platform/app-restart.ts'
+import { awaitParentExit, relaunchParentPid } from './platform/app-restart.ts'
+import { ensureSupervisorAtBoot, requestDesktopRestart } from './platform/restart/entry.ts'
 import { applyWindowsIcon, windowIconCandidates } from './platform/window-icon.ts'
 import { createViewRegistry } from '../shared/net/view-grant.ts'
 import { createGuestManager, type GuestViewLike } from './windows/guest-manager.ts'
@@ -878,11 +879,13 @@ async function recheckDevToolsPort(): Promise<string | null> {
 }
 
 /**
- * #119 整应用重启（B）：先拉起新实例，**再**退自己。
- *
- * 顺序不能反：先退就没人执行 spawn；先退到一半再拉也不行（壳正在释放端口，新实例会抢到一半的世界）。
- * 新实例知道自己是被拉起来的（DSH_SHELL_RELAUNCH_PID），会等本进程真退干净再抢实例锁（app-restart.ts）。
- * 拉不起来（dev 构建 / 探测不到 launcher）**不退出、不假报成功**，把原因原样回给页面。
+ * #237 统一后台运行模型：托盘「重启应用」。本进程只「表态」——写重启意图给常驻监督进程，
+ * **不亲自等退净**：等旧壳退净、等 CEF 锁、收割渲染进程尾巴、拉起新桌面，全是监督进程
+ * （platform/restart/ + runtime/shell-supervisor.mjs，headless 不露 Dock）的事，本进程随后
+ * shutdown 退出。没有监督进程（老包升级上来 / 自举失败）就回退 #119 直拉 launcher。
+ * 表不了态（dev 构建 / 探测不到 launcher）**不退出、不假报成功**，把原因原样回给页面
+ * （#119 红线不变）。新桌面知道自己接谁的班（DSH_SHELL_RELAUNCH_PID），会等本进程
+ * 真退干净再抢实例锁。
  */
 async function restartDesktopApp(): Promise<{ ok: boolean; reason?: string; message?: string }> {
   const warning = await recheckDevToolsPort().catch((error: unknown) => {
@@ -890,16 +893,15 @@ async function restartDesktopApp(): Promise<{ ok: boolean; reason?: string; mess
     return null
   })
   const resolution = resolveLauncherForRelaunch()
-  const plan = await relaunchDesktopApp({
+  const plan = await requestDesktopRestart({
     isPackaged: build.isPackaged,
     launcherExe: resolution.launcherExe,
     pid: process.pid,
-    // #204/#209 口径修正：CEF 锁只在 mac（CEF 后端）存在，目录取实际安装根下的 CEF/（从 execPath
-    // 反推）；Windows 用 WebView2 无 CEF 锁；appSupportDir 拼默认安装根的旧写法废弃。
-    cefDir: build.isPackaged ? cefDirFromExecPath(process.execPath) : null,
-    // 中继全程日志落盘（stdio 全 ignore，Windows 排障全靠它，#209）：与 shell.log 同目录（dsh home，
-    // 用户实际找得到的地方）；appSupportDir 下的 Library 目录在 Windows 自定义安装时不存在。
+    appSupport: appSupportDir(),
+    // 后台链路全程日志落盘（stdio 全 ignore，Windows 排障全靠它，#209）：与 shell.log 同目录
+    // （dsh home，用户实际找得到的地方）；appSupportDir 下的 Library 目录在 Windows 自定义安装时不存在。
     logFile: join(dirname(resolveShellLogFile(process.env)), 'shell-relay.log'),
+    bundleDir: import.meta.dir,
     onLog: shellLog,
   })
   if (!plan.ok) {
@@ -911,15 +913,16 @@ async function restartDesktopApp(): Promise<{ ok: boolean; reason?: string; mess
   }
   console.log(`[shell] 重启桌面应用：launcher=${plan.exe}（来源 ${resolution.source ?? 'unknown'}）`)
   if (warning !== null) {
-    console.error(`[shell] 重启桌面应用：${warning}`)
-    notifier.notify(SCENARIO.STARTUP_ERROR, '开发者工具：重启后口仍开不了', warning)
+      // 预检在旧壳存活期执行：占用调试口的通常就是本壳自己的渲染进程（devTools=true 时 100% 触发），
+      // 旧壳退出后口自然释放、新壳会重开——降为 debug 留痕，不再弹误导性 error 通知（#237 实测）。
+      console.debug(`[shell] 重启桌面应用：${warning}（预检时口仍由旧壳占用属预期）`)
   }
   await shutdown()
   return { ok: true }
 }
 
 /**
- * 托盘「重启应用」（#126）：整个应用退出 + 自动拉起，直接复用 #119 的 relaunch 路径。
+ * 托盘「重启应用」（#126）：整个应用退出 + 自动拉起，走 #237 统一后台监督路径。
  *
  * 口径 2026-10-16 改过：#60 当初定的是「托盘重启 = DSH 侧树级重启，壳不退出」——那样托盘图标和
  * 窗口从头到尾都在，用户看不出到底重启了没有。现在这一项改成整个应用重来。
@@ -1338,6 +1341,23 @@ if (!instance.acquired && !skipSingleton) {
   // 第二个实例不做任何服务面工作，直接退出（不起宿主、不抢端口、不写台账）
   process.exit(0)
 }
+
+// #237 统一后台运行模型：冷启动自举常驻监督进程（本壳同款 bun 跑 runtime/shell-supervisor.mjs，
+// headless 不露 Dock/任务栏——后台归应用本体，而不是第二个应用图标）。它长驻负责托盘重启的
+// 等退净/收割尾巴/拉新；桌面退出且没有重启意图时它自己也退。已有活着的监督进程（接班桌面凭
+// env 跳过 / 双活让位）就不再重复拉；dev 态不拉（重启本来就显式降级）；失败/自证不过（spawn 后
+// 租约 2s 内没落地 = 监督进程没真跑起来，#237 Windows 实测）都不挡启动，重启时走保底路径。
+ensureSupervisorAtBoot({
+  isPackaged: build.isPackaged,
+  launcherExe: resolveLauncherForRelaunch().launcherExe,
+  pid: process.pid,
+  appSupport: appSupportDir(),
+  logFile: join(dirname(resolveShellLogFile(process.env)), 'shell-relay.log'),
+  bundleDir: import.meta.dir,
+  onLog: shellLog,
+}).catch((error: unknown) => {
+  shellLog.warn(`监督进程自举意外失败：${error instanceof Error ? error.message : String(error)}`)
+})
 
 // ---- 启动界面：起宿主那几十秒里给用户看的东西（无窗口模式跳过）----
 let splash: BrowserWindow | null = null
