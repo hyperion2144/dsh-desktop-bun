@@ -440,23 +440,40 @@ function trayState(): TrayState {
     // 多 profile：菜单按 home 下的 profile 目录列，点了开/聚焦那一份窗口
     profiles: listProfiles(dshHome(), instanceProfile),
     openWindows: sessions.openProfiles(),
-    profileRows: listProfiles(dshHome(), instanceProfile).map((profile) => {
-      const row = sessions.get(profile)
-      // #215：运行中与否由会话状态说了算（服务面 stop() 之后状态落 stopped、宿主 PID 归 0）。
-      // 旧口径只看 hostPid：退过实例还留着旧 PID，托盘就一直说「运行中」——
-      // 那个 profile 既开不了新窗（服务面是终态对象），菜单还只剩「退出」没别的路走。
-      // 一次 state() 拿全：origin 也从会话状态取，别越过会话接口摸服务面。
-      const sessionState = row?.state()
-      const running = sessionState?.running ?? false
-      const port = running ? Number((sessionState?.origin ?? '').split(':').pop() ?? '') || null : null
-      return {
-        profile,
-        open: sessionState?.windowOpen ?? false,
-        running,
-        port,
-        focused: sessions.focused()?.profile === profile,
-      }
-    }),
+      profileRows: [
+        ...listProfiles(dshHome(), instanceProfile).map((profile) => {
+          const row = sessions.get(profile)
+          // #215：运行中与否由会话状态说了算（服务面 stop() 之后状态落 stopped、宿主 PID 归 0）。
+          // 旧口径只看 hostPid：退过实例还留着旧 PID，托盘就一直说「运行中」——
+          // 那个 profile 既开不了新窗（服务面是终态对象），菜单还只剩「退出」没别的路走。
+          // 一次 state() 拿全：origin 也从会话状态取，别越过会话接口摸服务面。
+          const sessionState = row?.state()
+          const running = sessionState?.running ?? false
+          const port = running ? Number((sessionState?.origin ?? '').split(':').pop() ?? '') || null : null
+          const windowOpen = sessionState?.windowOpen ?? false
+          return {
+            profile,
+            kind: 'local' as const,
+            open: windowOpen,
+            // #241：窗口开着但不在前台（隐藏回托盘）→ 菜单给「显示窗口」而不是「隐藏窗口」。
+            hidden: windowOpen && !sessions.inFront(profile),
+            running,
+            port,
+            focused: sessions.focused()?.profile === profile,
+          }
+        }),
+        // #241/#6：远程 dsh 地址以独立条目进「profile 管理」；远程通路（开窗/重启）在
+        // #246 接入前先只读展示，菜单侧会把动作禁用。
+        ...settings.remoteList.map((addr) => ({
+          profile: `remote:${addr}`,
+          kind: 'remote' as const,
+          open: false,
+          hidden: false,
+          running: false,
+          port: null,
+          focused: false,
+        })),
+      ],
     hostRunning: uiService().state.hostPid > 0,
     // #117：服务面先于 DSH 存在，所以托盘在 DSH 没起来/起不来时照样拿得到真相，
     // 并能把原因摆进状态行告诉用户「还能换一版再试」。
@@ -470,8 +487,6 @@ function trayState(): TrayState {
     candidates: runtimeReport.candidates,
     builtinDescriptor: runtimeReport.builtinDescriptor,
     downloading: download.active && download.version !== '' ? download.version : null,
-    remoteAddr: settings.remoteAddr ?? null,
-    remoteList: settings.remoteList,
     registerLabel: registerTrayLabel(registerCli.cached()),
     // #141：手动检查的进程态。壳主进程持有，不进设置/服务面——菜单只负责把它显示出来。
     // 没查过就压根不摆这一行（与 registerLabel 同一套「缺省不扰民」的口径）
@@ -1097,22 +1112,21 @@ function onTrayAction(action: TrayAction): void {
     case 'register-cli':
       void registerDshCliFromTray()
       return
-    case 'remote-source': {
-      // 「dsh 服务地址」（旧壳 #136）：本地/远程同层单选；选完立即按目标重启 dsh。
-      // 远程不可用（token 失效 401）时也能从这里一键切回本地。
-      const svc = uiService()
-      const current = svc.settings()
-      const target = action.addrIndex === undefined ? '' : current.remoteList[action.addrIndex] ?? ''
-      if ((current.remoteAddr ?? '') === target) return
-      svc.save({ remote_addr: target })
-      void svc
-        .restartHost()
-        .then(() => refreshTray())
-        .catch((error) => console.error(`[shell] 切换 dsh 服务地址失败：${String(error)}`))
-      return
-    }
     case 'stop-profile':
       if (action.profile !== undefined) void stopProfileFromTray(action.profile)
+      return
+    case 'restart-profile': {
+      // #241：托盘「重启」= 退出实例再打开（带 splash 的壳内重建是 #247 的升级项）。
+      const profile = action.profile
+      if (profile !== undefined) void stopProfileFromTray(profile).then(() => openProfileWindow(profile))
+      return
+    }
+    case 'toggle-profile-window':
+      // #241：条目级「隐藏·显示」，只动这个 profile 的窗口（一级显隐仍对全部生效）。
+      if (action.profile !== undefined) {
+        if (sessions.inFront(action.profile)) sessions.hideWindow(action.profile)
+        else sessions.focus(action.profile)
+      }
       return
     case 'new-profile':
       void openProfileOpDialog('create')
@@ -1142,7 +1156,22 @@ function openProfileOpDialog(kind: ProfileOpDialogKind): void {
   }
   // 每扇窗一份 rpc：壳里其余窗（createProfileWindow）也是这么挂的。共用一份会让多开的
   // 两张窗按请求 id 串回包。
-  attachProfileOpRpc({ run: (request) => uiService().profileOp(request), close: closeDialog })
+  attachProfileOpRpc({
+    run: async (request) => {
+      // #241/#9：新建弹窗的「远程 dsh 地址」分流在壳侧落地——写 settings 的 remote_list
+      // （去重追加）并刷新托盘；远程条目的开窗/重启通路是 #246 的活。
+      if (request.op === 'add-remote') {
+        const svc = uiService()
+        const addr = request.target ?? ''
+        const list = svc.settings().remoteList
+        if (!list.includes(addr)) svc.save({ remote_list: [...list, addr] })
+        refreshTray()
+        return { ok: true, message: '已添加远程地址（远程开窗通路在后续版本接入）' }
+      }
+      return uiService().profileOp(request)
+    },
+    close: closeDialog,
+  })
     .catch((error: unknown) => {
       // 通道挂不上时**仍然开窗**：页面会把「壳桥不可用」显示成红字，比「点了没反应」强——
       // 那正是本票要根治的失败形态。

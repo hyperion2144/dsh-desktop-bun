@@ -80,7 +80,9 @@ export interface ProfileSession {
 
 export interface ProfileSessions {
   open(profile: string): Promise<OpenResult>
-  focus(profile: string): boolean
+    focus(profile: string): boolean
+    /** #241：托盘「隐藏窗口」——只动这个 profile 的窗（显示走 focus()）；没窗返回 false。 */
+    hideWindow(profile: string): boolean
   get(profile: string): ProfileSession | undefined
   list(): ProfileSession[]
   /** 窗口开着的 profile（托盘 openWindows / restartDsh 的重开清单）。 */
@@ -593,17 +595,24 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
       return pending
     },
 
-    focus(profile: string): boolean {
-      const record = recordFor(profile)
-      if (record === undefined || record.window === null) return false
-      record.window.unminimize()
-      record.window.show()
-      record.window.activate()
-      focusedProfile = profile
-      deps.onWindowsChanged()
-      return true
-    },
+      focus(profile: string): boolean {
+          const record = recordFor(profile)
+          if (record === undefined || record.window === null) return false
+          record.window.unminimize()
+          record.window.show()
+          record.window.activate()
+          focusedProfile = profile
+          deps.onWindowsChanged()
+          return true
+      },
 
+      hideWindow(profile: string): boolean {
+          const record = recordFor(profile)
+          if (record === undefined || record.window === null) return false
+          record.window.hide()
+          deps.onWindowsChanged()
+          return true
+      },
     get: (profile) => recordFor(profile)?.session,
 
     list: () => [...records.values()].map((record) => record.session),
