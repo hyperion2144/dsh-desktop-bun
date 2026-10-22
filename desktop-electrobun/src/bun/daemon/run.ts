@@ -8,7 +8,7 @@ import { defaultIsAlive } from '../platform/single-instance.ts'
 import { startControlServer, type ControlChannel } from './control.ts'
 import { ProfileRegistry, type RegistryIo } from './registry.ts'
 import { acquireDaemonRole, DAEMON_ROLE, daemonInstanceFile, readShellInstance, releaseDaemonRole } from './roles.ts'
-import { killShell, spawnShell, shellDaemonEnv } from './spawn.ts'
+import { killShell, shellDaemonEnv, shellLaunchArgv, spawnShell } from './spawn.ts'
 
 import { updateInstance } from '../platform/single-instance.ts'
 export interface DaemonLogger {
@@ -112,7 +112,7 @@ export async function runDaemon(options: RunDaemonOptions): Promise<DaemonHandle
       restoreProfiles,
       cefIdentity: options.shellCefIdentity,
     })
-    const result = doSpawn({ argv: [options.launcherExe], env, logFile: options.shellLogFile ?? '', onLog: log })
+    const result = doSpawn({ argv: shellLaunchArgv({ launcherExe: options.launcherExe }), env, logFile: options.shellLogFile ?? '', onLog: log })
     if (!result.ok || result.pid === null) {
       log?.error(`拉壳失败：${result.error ?? 'unknown'}`)
       return null

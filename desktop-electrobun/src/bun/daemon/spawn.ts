@@ -5,6 +5,30 @@
 // 拉哪个 profile）归 run.ts 编排层。
 
 import { defaultIsAlive } from '../platform/single-instance.ts'
+import { existsSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+
+/**
+ * Windows 壳的启动命令行：绕开 launcher.exe（#243 Windows CI 两轮实抓）。
+ *
+ * Windows 版式里 launcher.exe 是**自解压安装入口**（上游 extractor 有 tar.spool 冻结 bug），
+ * 主进程拿它当壳拉起 → 卡死在安装逻辑，永远出不了 SHELL-READY。壳的正确引导 = 包内
+ * bun 直接跑 Resources/main.js（与 launcher 的引导语义等价、完全绕开安装器）。
+ * 布局不符（找不到 bun.exe / main.js）时原样返回 [launcherExe] —— 宁试旧路不错过拉壳。
+ */
+export function shellLaunchArgv(input: {
+  launcherExe: string
+  platform?: NodeJS.Platform
+  exists?: (path: string) => boolean
+}): string[] {
+  if ((input.platform ?? process.platform) !== 'win32') return [input.launcherExe]
+  const exists = input.exists ?? existsSync
+  const bin = dirname(input.launcherExe)
+  const bun = join(bin, 'bun.exe')
+  const mainJs = resolve(bin, '..', 'Resources', 'main.js')
+  return exists(bun) && exists(mainJs) ? [bun, mainJs] : [input.launcherExe]
+}
+
 
 /**
  * 拉壳注入给壳的守护上下文 env。#243 的壳按这些键认出「自己是被守护管的」：

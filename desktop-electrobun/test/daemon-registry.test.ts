@@ -10,10 +10,10 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { ProfileRegistry, parseRegistry, remoteProfileId, type RegistryIo } from '../src/bun/daemon/registry.ts'
 import { DAEMON_ROLE, acquireDaemonRole, daemonInstanceFile, readShellInstance, releaseDaemonRole } from '../src/bun/daemon/roles.ts'
-import { classifyShellExit, killShell, shellDaemonEnv, spawnShell } from '../src/bun/daemon/spawn.ts'
+import { classifyShellExit, killShell, shellDaemonEnv, shellLaunchArgv, spawnShell } from '../src/bun/daemon/spawn.ts'
 import { runDaemon } from '../src/bun/daemon/run.ts'
 
 function memoryIo(initial: string = ''): RegistryIo & { store: Map<string, string> } {
@@ -204,6 +204,21 @@ describe('spawn 机械（注入式）', () => {
         expect(classifyShellExit({ exitCode: 1, signalCode: null })).toBe('crashed')
         expect(classifyShellExit({ exitCode: 0, signalCode: 'SIGKILL' })).toBe('crashed')
     })
+})
+
+test('shellLaunchArgv：Windows 绕开 launcher.exe 直拉 [bun, main.js]，布局不全兜底旧行为（#243 CI 实抓）', () => {
+        const win32 = 'C:/app/bin/launcher.exe'
+        expect(
+                shellLaunchArgv({
+                        launcherExe: win32,
+                        platform: 'win32',
+                        exists: (path) => path.endsWith('bun.exe') || path.endsWith('main.js'),
+                }),
+        ).toEqual(['C:/app/bin/bun.exe', resolve('C:/app/bin', '..', 'Resources', 'main.js')])
+        // 包内找不到 bun/main.js（布局变了）→ 原样 launcher，宁试旧路不错过拉壳。
+        expect(shellLaunchArgv({ launcherExe: win32, platform: 'win32', exists: () => false })).toEqual([win32])
+        // 非 Windows：launcher 就是引导器，原样。
+        expect(shellLaunchArgv({ launcherExe: '/app/launcher', platform: 'darwin' })).toEqual(['/app/launcher'])
 })
 
 describe('runDaemon（装配，内存 IO + 注入 isAlive）', () => {
