@@ -214,7 +214,7 @@ test('shellLaunchArgv：Windows 绕开 launcher.exe 直拉 [bun, main.js]，布�
                         platform: 'win32',
                         exists: (path) => path.endsWith('bun.exe') || path.endsWith('main.js'),
                 }),
-        ).toEqual(['C:/app/bin/bun.exe', resolve('C:/app/bin', '..', 'Resources', 'main.js')])
+        ).toEqual([join('C:/app/bin', 'bun.exe'), resolve('C:/app/bin', '..', 'Resources', 'main.js')])
         // 包内找不到 bun/main.js（布局变了）→ 原样 launcher，宁试旧路不错过拉壳。
         expect(shellLaunchArgv({ launcherExe: win32, platform: 'win32', exists: () => false })).toEqual([win32])
         // 非 Windows：launcher 就是引导器，原样。
