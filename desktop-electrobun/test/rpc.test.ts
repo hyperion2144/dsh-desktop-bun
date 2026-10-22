@@ -528,18 +528,18 @@ describe('多窗口的数据面（列表类命令要看到别的 profile / 正�
   })
 })
 describe('/__shell__/rpc 端点', () => {
-  // 2026-10-18 Build Windows 单测：首个 loopback 请求偶发超过默认 5s（run 39106378160）；
-  // 这里只验路由契约，给足 15s，避免主分支构建被单次慢请求判红。
+  // Windows CI 的 loopback 竞态已三犯：run 39106378160 首请求偶发超 5s；run 39269733346 与
+  // run 39700844583 是 port:0 返回后 listen 未就绪（ConnectionRefused）。治本：withServer 起
+  // 服务后先探测端口真的在听再跑用例；fetchShell 的退避只作兜底（5 次指数退避）。
   const RPC_TEST_TIMEOUT_MS = 15_000
-  /** Windows CI 偶发 port:0 监听就绪竞态（ConnectionRefused，run 39269733346 实证）：退避重试再判失败。 */
   async function fetchShell(url: string, init?: RequestInit): Promise<Response> {
     let lastError: unknown = null
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
       try {
         return await fetch(url, init)
       } catch (error) {
         lastError = error
-        await Bun.sleep(50 * attempt)
+        await Bun.sleep(50 * 2 ** (attempt - 1))
       }
     }
     throw lastError
@@ -550,6 +550,21 @@ describe('/__shell__/rpc 端点', () => {
    * 早先版本让壳绑在上游端口上，于是「转发」其实打回了壳自己——测出来的 200 是自环，
    * 掩盖了真契约：壳自答端点只在**根绝对路径**（见 src/shared/admission.ts 的 SHELL_PREFIX）。
    */
+
+  /** 探测 loopback 端口真的开始收连接（任何 HTTP 响应都算就绪；拒绝/超时继续等）。 */
+  async function waitForServer(origin: string, timeoutMs = 5_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      try {
+        await fetch(origin, { signal: AbortSignal.timeout(500) })
+        return
+      } catch {
+        // ConnectionRefused / 单次超时 = 还没就绪
+      }
+      if (Date.now() > deadline) throw new Error(`测试服务 ${origin} ${timeoutMs}ms 内未就绪`)
+      await Bun.sleep(25)
+    }
+  }
 
   async function withServer(run: (origin: string, token: string) => Promise<void>): Promise<void> {
     const dist = mkdtempSync(join(tmpdir(), 'dsh-rpc-dist-'))
@@ -568,6 +583,7 @@ describe('/__shell__/rpc 端点', () => {
       bootPayload: () => null,
       onRpc: (raw) => dispatchRpc(router, raw),
     })
+    await waitForServer(server.origin)
     try {
       await run(server.origin, 'tok')
     } finally {

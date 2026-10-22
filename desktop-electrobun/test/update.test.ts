@@ -1,19 +1,18 @@
-// 应用更新（#220 决策 11：旧壳没有这个能力，是新增件；走框架自带的 Updater）。
+// 应用更新（#235：壳侧全自管——检查/下载/安装都不依赖 Electrobun 框架 Updater）。
 //
 // 守的是三件事：
-//   1. **纯逻辑**：Electrobun 的 29 个状态 → 壳的 9 个阶段、版本比较（含预发布段）、进度与
-//      字节数的翻译、三个按钮的可点性——客户端卡片完全照这个渲染；
-//   2. **不静默降级**：拿不到更新源（dev 构建、没配 `release.baseUrl`、被开关关掉、
-//      框架 import 失败、读本地版本抛错）时，视图里必须写清楚「为什么不可用」；
-//   3. **IO 外壳**（`createUpdater`）在假 Updater 上的行为：check/download/apply 三条路、
-//      状态订阅、失败落到 `error` 而不是抛出去。
-
+//   1. **纯逻辑**：版本比较（含预发布段）、进度与字节数的翻译、按钮可点性——客户端完全照这个渲染；
+//   2. **不静默降级**：404 二义性（发布过 vs 没发布过）、HTTP 500、网络中断、清单非法——
+//      失败都要落进视图写清楚「为什么不可用」，不是笼统红字；
+//   3. **IO 外壳**（createUpdater 的自管 check）：清单 URL 前缀固定 stable、env 覆盖源、
+//      版本比较定可用性（不看 hash）——dev 实例也能检查到发布。
 import { describe, expect, test } from 'bun:test'
 import {
   DEFAULT_UPDATE_BASE_URL,
   UPDATE_BASE_URL_ENV,
   UPDATE_DISABLE_ENV,
-  compareVersions,
+    classifyUpdateFailure,
+    compareVersions,
   feedFileName,
   feedUrl,
   formatBytes,
@@ -24,9 +23,8 @@ import {
   updateActions,
   updateView,
 } from '../src/shared/runtime/update.ts'
-import { collectingLogger, silentLogger } from './helpers/test-logger.ts'
-import type { StatusLike } from '../src/shared/runtime/update.ts'
-import { createUpdater, isFlagOn, type UpdaterLike } from '../src/bun/platform/updater.ts'
+import { silentLogger } from './helpers/test-logger.ts'
+import { createUpdater, isFlagOn } from '../src/bun/platform/updater.ts'
 
 describe('平台前缀与清单 URL', () => {
   test('前缀是 <buildEnvironment>-<os>-<arch>', () => {
@@ -52,6 +50,14 @@ describe('平台前缀与清单 URL', () => {
     expect(DEFAULT_UPDATE_BASE_URL).toContain('github.com/hyperion2144/dsh-desktop-bun')
     expect(DEFAULT_UPDATE_BASE_URL.endsWith('/releases/latest/download')).toBe(true)
   })
+})
+describe('失败分类（classifyUpdateFailure）', () => {
+    test('#235：受管目录校验错误给出可操作提示，不笼统红字', () => {
+        const failure = classifyUpdateFailure('The running application is outside its managed update directory')
+        expect(failure.kind).toBe('managed-dir')
+        expect(failure.text).toContain('受管更新目录')
+        expect(failure.text).toContain('安装包')
+    })
 })
 
 describe('版本比较', () => {
@@ -257,320 +263,194 @@ describe('开关解析', () => {
   })
 })
 
-/** 假 Updater：按脚本发状态，并记录被调用的动作。 */
-function fakeUpdater(input: {
-  local?: Record<string, unknown>
-  info?: Record<string, unknown>
-  check?: (emit: (status: string, details?: StatusLike['details']) => void) => void | Promise<void>
-  download?: () => void | Promise<void>
-  apply?: () => void | Promise<void>
-  /** 框架式失败：发一条 error 状态并把错误写进 updateInfo（**不抛**）。 */
-  failWith?: { message: string; errorMessage?: string }
-}): { updater: UpdaterLike; calls: string[]; emit: (status: string, details?: StatusLike['details']) => void } {
-  const calls: string[] = []
-  let listener: ((entry: StatusLike) => void) | null = null
-  let info = { version: '0.2.0', hash: 'h2', updateAvailable: true, updateReady: false, error: '', ...input.info }
-  return {
-    updater: {
-      getLocalInfo: async () => ({
-        version: '0.1.0',
-        hash: 'h1',
-        channel: 'stable',
-        baseUrl: 'https://example.com/r',
-        identifier: 'com.arcreel.dsh-desktop-tauriapp',
-        ...input.local,
-      }),
-      checkForUpdate: async () => {
-        calls.push('check')
-        if (input.failWith !== undefined) {
-          // 框架式失败：**不抛**，只发一条 error 状态并把错误写进 updateInfo
-          info = { ...info, error: input.failWith.message }
-          listener?.({
-            status: 'error',
-            details: { errorMessage: input.failWith.errorMessage ?? input.failWith.message },
-          })
-          return info
-        }
-        await input.check?.((status, details) => {
-          listener?.({ status, details })
-        })
-        return info
-      },
-      downloadUpdate: async () => {
-        calls.push('download')
-        await input.download?.()
-      },
-      applyUpdate: async () => {
-        calls.push('apply')
-        await input.apply?.()
-      },
-      updateInfo: () => info,
-      onStatusChange: (callback) => {
-        listener = callback
-      },
-    },
-    calls,
-    emit: (status, details) => listener?.({ status, details }),
-  }
+/** 合法清单（发布链 release-publish.mjs 的结构子集）。 */
+const OK_MANIFEST = {
+    schemaVersion: 1,
+    identifier: 'com.hyperion.dsh-desktop-bun',
+    channel: 'stable',
+    version: '0.2.0',
+    hash: 'h2',
+    platform: 'macos',
+    arch: 'arm64',
 }
 
-describe('createUpdater（IO 外壳）', () => {
-  const logLines: string[] = []
-    const log = collectingLogger(logLines)
+/** 假 fetch：按脚本回清单/错误，记录请求 URL（自管 check 的测试缝）。 */
+function fakeFetch(input: {
+    manifest?: unknown
+    status?: number
+    fail?: Error
+}): { fetchFn: typeof fetch; urls: string[] } {
+    const urls: string[] = []
+    const fetchFn = (async (target: RequestInfo | URL) => {
+        urls.push(String(target))
+        if (input.fail !== undefined) throw input.fail
+        if (input.status !== undefined && input.status !== 200) {
+            return new Response('nope', { status: input.status })
+        }
+        return new Response(JSON.stringify(input.manifest ?? OK_MANIFEST), { status: 200 })
+    }) as typeof fetch
+    return { fetchFn, urls }
+}
 
-  test('被开关关掉 ⇒ 不可用且写明是哪个环境变量', async () => {
-    const updater = createUpdater({
-      log,
-      env: { [UPDATE_DISABLE_ENV]: '1' },
-      importUpdater: async () => null,
-    })
-    await updater.check()
-    const snapshot = updater.snapshot()
-    expect(snapshot.available).toBe(false)
-    expect(snapshot.view.phase).toBe('unavailable')
-    expect(snapshot.view.reason).toContain(UPDATE_DISABLE_ENV)
-    expect(snapshot.actions.canCheck).toBe(false)
-  })
-
-  test('框架里没有 Updater ⇒ 不可用但不说成崩溃', async () => {
-    const updater = createUpdater({ log, env: {}, importUpdater: async () => null })
-    await updater.check()
-    expect(updater.available).toBe(false)
-    expect(updater.reason).toContain('没有框架更新器')
-  })
-
-  test('读不到本地版本信息 ⇒ 不可用（错误进 reason）', async () => {
-    const updater = createUpdater({
-      log,
-      env: {},
-      importUpdater: async () => {
-        throw new Error('boom')
-      },
-    })
-    await updater.check()
-    expect(updater.available).toBe(false)
-    expect(updater.reason).toBeTruthy()
-  })
-
-  test('baseUrl 为空 ⇒ 不可用，并提示默认源', async () => {
-    const fake = fakeUpdater({ local: { baseUrl: '' } })
-    const updater = createUpdater({ log, env: {}, importUpdater: async () => fake.updater })
-    await updater.check()
-    expect(updater.available).toBe(false)
-    expect(updater.reason).toContain('release.baseUrl')
-    expect(updater.reason).toContain(DEFAULT_UPDATE_BASE_URL)
-  })
-
-  test('没给构建环境时按 version.json 的 channel 推清单前缀', async () => {
-    const fake = fakeUpdater({ local: { channel: 'canary' } })
-    const updater = createUpdater({
-      log,
-      env: {},
-      importUpdater: async () => fake.updater,
-      os: 'darwin',
-      arch: 'arm64',
-    })
-    const snapshot = await updater.check()
-    expect(snapshot.view.feedUrl).toBe('https://example.com/r/canary-macos-arm64-update.json')
-  })
-
-  test('env 覆盖更新源：视图里的 feedUrl 跟着覆盖走', async () => {
-    const fake = fakeUpdater({ local: { baseUrl: '' } })
-    const updater = createUpdater({
-      log,
-      env: { [UPDATE_BASE_URL_ENV]: 'http://127.0.0.1:8899/feed/' },
-      importUpdater: async () => fake.updater,
-      os: 'darwin',
-      arch: 'arm64',
-      buildEnv: 'stable',
-    })
-    const snapshot = await updater.check()
-    expect(snapshot.available).toBe(true)
-    expect(snapshot.view.feedUrl).toBe('http://127.0.0.1:8899/feed/stable-macos-arm64-update.json')
-    expect(fake.calls).toEqual(['check'])
-  })
-
-  test('检查 → 下载 → 安装：状态订阅把阶段与进度带进视图', async () => {
-    const fake = fakeUpdater({})
-    const updater = createUpdater({
-      log,
-      env: {},
-      importUpdater: async () => fake.updater,
-      os: 'darwin',
-      arch: 'arm64',
-      buildEnv: 'stable',
+describe('createUpdater（自管 check）', () => {
+    test('被开关关掉 ⇒ 不可用且写明是哪个环境变量（且不发请求）', async () => {
+        const fake = fakeFetch({})
+        const updater = createUpdater({
+            log: silentLogger,
+            env: { [UPDATE_DISABLE_ENV]: '1' },
+            fetchFn: fake.fetchFn,
+        })
+        await updater.check()
+        const snapshot = updater.snapshot()
+        expect(snapshot.available).toBe(false)
+        expect(snapshot.view.phase).toBe('unavailable')
+        expect(snapshot.view.reason).toContain(UPDATE_DISABLE_ENV)
+        expect(snapshot.actions.canCheck).toBe(false)
+        expect(fake.urls).toEqual([])
     })
 
-    const checked = await updater.check()
-    expect(checked.view.updateAvailable).toBe(true)
-    fake.emit('update-available', {})
-    expect(updater.snapshot().view.phase).toBe('available')
-    expect(updater.snapshot().actions.canDownload).toBe(true)
-
-    // downloadUpdate 期间框架会发 download-progress（这里手动发一条）
-    fake.emit('download-progress', { progress: 0.5, bytesDownloaded: 512, totalBytes: 1024 })
-    const downloading = await updater.download()
-    expect(downloading.view.phase).toBe('downloading')
-    expect(downloading.view.progress).toBe(50)
-    expect(downloading.actions.canCheck).toBe(false)
-
-    fake.emit('complete', {})
-    const applied = await updater.apply()
-    expect(applied.view.updateReady).toBe(true)
-    expect(applied.actions.canApply).toBe(true)
-    expect(fake.calls).toEqual(['check', 'download', 'apply'])
-  })
-
-  test('框架抛错 ⇒ 落到 error 而不是抛给调用方', async () => {
-    const fake = fakeUpdater({
-      check: () => {
-        throw new Error('网络不通')
-      },
+    test('检查成功：清单前缀固定 stable（dev 实例也查发布链同一份），新版本 ⇒ updateAvailable', async () => {
+        const fake = fakeFetch({})
+        const updater = createUpdater({
+            log: silentLogger,
+            env: {},
+            currentVersion: '0.1.0',
+            os: 'darwin',
+            arch: 'arm64',
+            fetchFn: fake.fetchFn,
+        })
+        const snapshot = await updater.check()
+        expect(snapshot.available).toBe(true)
+        expect(snapshot.view.updateAvailable).toBe(true)
+        expect(snapshot.view.latest).toBe('0.2.0')
+        expect(fake.urls).toEqual([`${DEFAULT_UPDATE_BASE_URL}/stable-macos-arm64-update.json`])
     })
-    const updater = createUpdater({ log, env: {}, importUpdater: async () => fake.updater })
-    const snapshot = await updater.check()
-    expect(snapshot.view.phase).toBe('error')
-    expect(snapshot.view.error).toContain('网络不通')
-    expect(snapshot.view.label).toBe('更新失败')
-  })
 
-  test('start/stop：订阅与退订（退订后回调不再打到壳里）', async () => {
-    const fake = fakeUpdater({})
-    const updater = createUpdater({ log, env: {}, importUpdater: async () => fake.updater })
-    updater.start()
-    await Bun.sleep(10)
-    fake.emit('checking', {})
-    expect(updater.snapshot().view.phase).toBe('checking')
-    updater.stop()
-    fake.emit('error', { errorMessage: '停掉之后不该再记' })
-    expect(updater.snapshot().view.phase).toBe('checking')
-    expect(updater.snapshot().view.error).toBe('')
-  })
+    test('env 覆盖更新源：清单 URL 跟着覆盖走', async () => {
+        const fake = fakeFetch({})
+        const updater = createUpdater({
+            log: silentLogger,
+            env: { [UPDATE_BASE_URL_ENV]: 'http://127.0.0.1:8899/feed/' },
+            currentVersion: '0.1.0',
+            os: 'darwin',
+            arch: 'arm64',
+            fetchFn: fake.fetchFn,
+        })
+        const snapshot = await updater.check()
+        expect(snapshot.available).toBe(true)
+        expect(fake.urls).toEqual(['http://127.0.0.1:8899/feed/stable-macos-arm64-update.json'])
+    })
+
+    test('远端不比本地新 ⇒ updateAvailable=false（版本比较，不看 hash）', async () => {
+        const fake = fakeFetch({ manifest: { ...OK_MANIFEST, version: '0.1.0' } })
+        const updater = createUpdater({ log: silentLogger, env: {}, currentVersion: '0.1.0', os: 'darwin', arch: 'arm64', fetchFn: fake.fetchFn })
+        const snapshot = await updater.check()
+        expect(snapshot.view.updateAvailable).toBe(false)
+    })
+
+    // PR #236 实测回归：自管 check 的终态不能写框架的 check-complete（那是「查完发现有更新」的中间态，
+    // phase→checking）——面板每秒轮询会永远显示「正在检查…」。终态必须落 no-update / update-available。
+    test('检查完成（无更新）⇒ phase=up-to-date，不再卡「正在检查…」', async () => {
+        const fake = fakeFetch({ manifest: { ...OK_MANIFEST, version: '0.1.0' } })
+        const updater = createUpdater({ log: silentLogger, env: {}, currentVersion: '0.1.0', os: 'darwin', arch: 'arm64', fetchFn: fake.fetchFn })
+        const snapshot = await updater.check()
+        expect(snapshot.view.phase).toBe('up-to-date')
+        expect(snapshot.view.label).toBe('已是最新')
+    })
+
+    test('检查完成（有更新）⇒ phase=available（不是 checking）', async () => {
+        const fake = fakeFetch({ manifest: { ...OK_MANIFEST, version: '0.2.0' } })
+        const updater = createUpdater({ log: silentLogger, env: {}, currentVersion: '0.1.0', os: 'darwin', arch: 'arm64', fetchFn: fake.fetchFn })
+        const snapshot = await updater.check()
+        expect(snapshot.view.updateAvailable).toBe(true)
+        expect(snapshot.view.phase).toBe('available')
+    })
+
+    test('本地版本未知（读不到 version.json）⇒ 检查照常、不误报可更新', async () => {
+        const fake = fakeFetch({})
+        const updater = createUpdater({ log: silentLogger, env: {}, currentVersion: 'unknown', os: 'darwin', arch: 'arm64', fetchFn: fake.fetchFn })
+        const snapshot = await updater.check()
+        expect(snapshot.view.updateAvailable).toBe(false)
+    })
 })
 
-describe('失败语义：404 ⇒ 无更新（#216）', () => {
-    const log = silentLogger
-  const base = {
-    available: true,
-    reason: '',
-    prefix: 'stable-macos-arm64',
-    local: { version: '0.1.0', channel: 'stable', baseUrl: 'https://example.com/r' },
-  }
-
-  /** 框架式失败：发一条 error 状态 + 写进 updateInfo，**不抛**。 */
-  const frameworkFailure = (message: string, errorMessage?: string) => ({
-    info: { updateAvailable: false, version: '' },
-    failWith: { message, errorMessage },
-  })
-
-  test('404 且这个通道没发过版 ⇒ 「暂未发布」（不是失败、也不是「已是最新」）', async () => {
-    const fake = fakeUpdater(
-      frameworkFailure('Failed to check for updates: HTTP 404', 'HTTP 404')
-    )
-    const updater = createUpdater({
-      log,
-      env: {},
-      importUpdater: async () => fake.updater,
-      probeRelease: async () => 'absent',
+describe('失败语义（#216 的 404 二义性 + 常见网络错）', () => {
+    test('404 且这个通道没发过版 ⇒ 「暂未发布」（不是失败、也不是「已是最新」）', async () => {
+        const fake = fakeFetch({ status: 404 })
+        const updater = createUpdater({ log: silentLogger, env: {}, currentVersion: '0.1.0', os: 'darwin', arch: 'arm64', fetchFn: fake.fetchFn, probeRelease: async () => 'absent' })
+        const snapshot = await updater.check()
+        expect(snapshot.view.phase).toBe('no-release')
+        expect(snapshot.view.label).toBe('暂未发布')
+        expect(snapshot.view.error).toBe('')
+        expect(snapshot.view.message).toContain('还没有发布过版本')
+        expect(snapshot.actions.hint).toContain('还没有发布过版本')
+        expect(snapshot.actions.canCheck).toBe(true)
+        expect(snapshot.actions.canDownload).toBe(false)
     })
-    const snapshot = await updater.check()
-    expect(snapshot.view.phase).toBe('no-release')
-    expect(snapshot.view.label).toBe('暂未发布')
-    expect(snapshot.view.error).toBe('')
-    expect(snapshot.view.message).toContain('还没有发布过版本')
-    expect(snapshot.actions.hint).toContain('还没有发布过版本')
-    expect(snapshot.actions.canCheck).toBe(true)
-    expect(snapshot.actions.canDownload).toBe(false)
-  })
 
-  test('404 但确实有发布 ⇒ 报错（发布链路故障不能静默成「无更新」）', async () => {
-    const fake = fakeUpdater(
-      frameworkFailure('Failed to check for updates: HTTP 404', 'HTTP 404')
-    )
-    const updater = createUpdater({
-      log,
-      env: {},
-      importUpdater: async () => fake.updater,
-      probeRelease: async () => 'present',
+    test('404 但确实有发布 ⇒ 报错（发布链路故障不能静默成「无更新」）', async () => {
+        const fake = fakeFetch({ status: 404 })
+        const updater = createUpdater({ log: silentLogger, env: {}, currentVersion: '0.1.0', os: 'darwin', arch: 'arm64', fetchFn: fake.fetchFn, probeRelease: async () => 'present' })
+        const snapshot = await updater.check()
+        expect(snapshot.view.phase).toBe('error')
+        expect(snapshot.view.label).toBe('更新失败')
+        expect(snapshot.view.error).toContain('没有本平台的更新资产')
     })
-    const snapshot = await updater.check()
-    expect(snapshot.view.phase).toBe('error')
-    expect(snapshot.view.label).toBe('更新失败')
-    expect(snapshot.view.error).toContain('没有本平台的更新资产')
-  })
 
-  test('探不到（unknown）⇒ 仍按「暂未发布」处理', async () => {
-    const fake = fakeUpdater(
-      frameworkFailure('Failed to check for updates: HTTP 404', 'HTTP 404')
-    )
-    const updater = createUpdater({
-      log,
-      env: {},
-      importUpdater: async () => fake.updater,
-      probeRelease: async () => 'unknown',
+    test('探不到（unknown）⇒ 仍按「暂未发布」处理', async () => {
+        const fake = fakeFetch({ status: 404 })
+        const updater = createUpdater({ log: silentLogger, env: {}, currentVersion: '0.1.0', os: 'darwin', arch: 'arm64', fetchFn: fake.fetchFn, probeRelease: async () => 'unknown' })
+        expect((await updater.check()).view.phase).toBe('no-release')
     })
-    expect((await updater.check()).view.phase).toBe('no-release')
-  })
 
-  test('HTTP 500 ⇒ 失败态，中文原因可见（不直出英文原文）', async () => {
-    const fake = fakeUpdater(
-      frameworkFailure('Failed to check for updates: HTTP 500', 'HTTP 500')
-    )
-    const updater = createUpdater({ log, env: {}, importUpdater: async () => fake.updater })
-    const snapshot = await updater.check()
-    expect(snapshot.view.phase).toBe('error')
-    expect(snapshot.view.error).toBe('更新源返回 HTTP 500')
-    expect(snapshot.view.message).not.toContain('Failed to check for updates')
-  })
-
-  test('网络中断 ⇒ 失败态，中文原因', async () => {
-    const fake = fakeUpdater(
-      frameworkFailure('Failed to check for updates: The network connection was lost.')
-    )
-    const updater = createUpdater({ log, env: {}, importUpdater: async () => fake.updater })
-    const snapshot = await updater.check()
-    expect(snapshot.view.phase).toBe('error')
-    expect(snapshot.view.error).toContain('网络')
-    expect(snapshot.view.error).not.toContain('network connection was lost')
-  })
-
-  test('清单非法 ⇒ 失败态（与 404 不同因）', async () => {
-    const fake = fakeUpdater(
-      frameworkFailure('Invalid update manifest: artifact.file must start with the platform prefix')
-    )
-    const updater = createUpdater({ log, env: {}, importUpdater: async () => fake.updater })
-    const snapshot = await updater.check()
-    expect(snapshot.view.phase).toBe('error')
-    expect(snapshot.view.error).toContain('清单无效')
-  })
-
-  test('纯逻辑层：error 传空串也不能短路掉状态里的错误文本', () => {
-    const view = updateView({
-      ...base,
-      error: '',
-      status: { status: 'error', details: { errorMessage: 'HTTP 500' } },
+    test('HTTP 500 ⇒ 失败态，中文原因可见（不直出英文原文）', async () => {
+        const fake = fakeFetch({ status: 500 })
+        const updater = createUpdater({ log: silentLogger, env: {}, currentVersion: '0.1.0', os: 'darwin', arch: 'arm64', fetchFn: fake.fetchFn })
+        const snapshot = await updater.check()
+        expect(snapshot.view.phase).toBe('error')
+        expect(snapshot.view.error).toBe('更新源返回 HTTP 500')
+        expect(snapshot.view.message).not.toContain('Failed to check for updates')
     })
-    expect(view.phase).toBe('error')
-    expect(view.error).toBe('更新源返回 HTTP 500')
-  })
 
-  test('纯逻辑层：状态是历史遗留的 error 但没有错误文本 ⇒ 仍是「未检查」', () => {
-    const view = updateView({ ...base, status: { status: 'error' } })
-    expect(view.phase).toBe('idle')
-    expect(view.error).toBe('')
-  })
-
-  test('壳自己抛错（状态还停在 checking）⇒ 也是失败态，不是「正在检查…」', async () => {
-    const fake = fakeUpdater({
-      check: (emit) => {
-        emit('checking', {})
-        throw new Error('网络不通')
-      },
+    test('网络中断 ⇒ 失败态，中文原因', async () => {
+        const fake = fakeFetch({ fail: new Error('The network connection was lost.') })
+        const updater = createUpdater({ log: silentLogger, env: {}, currentVersion: '0.1.0', os: 'darwin', arch: 'arm64', fetchFn: fake.fetchFn })
+        const snapshot = await updater.check()
+        expect(snapshot.view.phase).toBe('error')
+        expect(snapshot.view.error).toContain('网络')
+        expect(snapshot.view.error).not.toContain('network connection was lost')
     })
-    const updater = createUpdater({ log, env: {}, importUpdater: async () => fake.updater })
-    const snapshot = await updater.check()
-    expect(snapshot.view.phase).toBe('error')
-    expect(snapshot.view.error).toContain('网络不通')
-    expect(snapshot.actions.canCheck).toBe(true)
-  })
+
+    test('清单非法 ⇒ 失败态（version 缺失与 404 不同因）', async () => {
+        const fake = fakeFetch({ manifest: { channel: 'stable' } })
+        const updater = createUpdater({ log: silentLogger, env: {}, currentVersion: '0.1.0', os: 'darwin', arch: 'arm64', fetchFn: fake.fetchFn })
+        const snapshot = await updater.check()
+        expect(snapshot.view.phase).toBe('error')
+        expect(snapshot.view.error).toContain('清单')
+    })
+
+    test('纯逻辑层：error 传空串也不能短路掉状态里的错误文本', () => {
+        const view = updateView({
+            available: true,
+            reason: '',
+            prefix: 'stable-macos-arm64',
+            local: { version: '0.1.0', channel: 'stable', baseUrl: 'https://example.com/r' },
+            error: '',
+            status: { status: 'error', details: { errorMessage: 'HTTP 500' } },
+        })
+        expect(view.phase).toBe('error')
+        expect(view.error).toBe('更新源返回 HTTP 500')
+    })
+
+    test('纯逻辑层：状态是历史遗留的 error 但没有错误文本 ⇒ 仍是「未检查」', () => {
+        const view = updateView({
+            available: true,
+            reason: '',
+            prefix: 'stable-macos-arm64',
+            local: { version: '0.1.0', channel: 'stable', baseUrl: 'https://example.com/r' },
+            status: { status: 'error' },
+        })
+        expect(view.phase).toBe('idle')
+        expect(view.error).toBe('')
+    })
 })

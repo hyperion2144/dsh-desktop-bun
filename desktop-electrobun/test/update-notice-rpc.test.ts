@@ -8,7 +8,8 @@ import {
   UPDATE_NOTICE_OP_METHOD,
   UPDATE_NOTICE_CLOSE_METHOD,
   UPDATE_NOTICE_RESIZE_METHOD,
-  UPDATE_NOTICE_STATUS_METHOD,
+    UPDATE_NOTICE_STATUS_METHOD,
+    UPDATE_NOTICE_SHELL_STATUS_METHOD,
   type UpdateNoticeOp,
 } from '../src/bun/windows/update-notice-dialog.ts'
 import {
@@ -62,13 +63,15 @@ describe('提醒卡动作的官方 RPC 通道', () => {
       UPDATE_NOTICE_OP_METHOD,
       STATUS_METHOD,
       UPDATE_NOTICE_RESIZE_METHOD,
-      UPDATE_NOTICE_CLOSE_METHOD,
+        UPDATE_NOTICE_CLOSE_METHOD,
+        UPDATE_NOTICE_SHELL_STATUS_METHOD,
     ])
-    expect(UPDATE_NOTICE_CLOSE_METHOD).toBe('update_notice_close')
-    expect(UPDATE_NOTICE_OP_METHOD).toBe('update_notice_op')
-    expect(STATUS_METHOD).toBe('runtime_download_status')
-    // 同一串在两处定义：页面引 dialog 的常量，壳命令表也按这个名字注册。
-    expect(STATUS_METHOD).toBe(UPDATE_NOTICE_STATUS_METHOD)
+      expect(UPDATE_NOTICE_CLOSE_METHOD).toBe('update_notice_close')
+      expect(UPDATE_NOTICE_OP_METHOD).toBe('update_notice_op')
+      expect(STATUS_METHOD).toBe('runtime_download_status')
+      expect(UPDATE_NOTICE_SHELL_STATUS_METHOD).toBe('shell_update_status')
+      // 同一串在两处定义：页面引 dialog 的常量，壳命令表也按这个名字注册。
+      expect(STATUS_METHOD).toBe(UPDATE_NOTICE_STATUS_METHOD)
   })
 
   test('形状认了就原样透传给服务面，结果原样回', async () => {
@@ -195,4 +198,30 @@ describe('关窗交给壳（#160）', () => {
     await new Promise((resolve) => setTimeout(resolve, UPDATE_NOTICE_CLOSE_DELAY_MS + 60))
     expect(closed).toEqual([1])
   })
+
+    describe('#235：壳段状态查询（shell_update_status）', () => {
+        test('没接上：回 null，页面按无状态画，不抛', async () => {
+            const { requests } = updateNoticeRpcRequests(deps())
+            const handler = requests[UPDATE_NOTICE_SHELL_STATUS_METHOD]
+            expect(handler).toBeDefined()
+            await expect(handler!(null)).resolves.toBeNull()
+        })
+
+        test('接上了：原样回壳段状态', async () => {
+            const { requests } = updateNoticeRpcRequests(
+                deps({
+                    shellUpdateStatus: () => ({
+                        active: true,
+                        version: '0.2.0',
+                        percent: 42,
+                        error: '',
+                        updateReady: false,
+                        installerPath: '',
+                    }),
+                }),
+            )
+            const handler = requests[UPDATE_NOTICE_SHELL_STATUS_METHOD]!
+            await expect(handler(null)).resolves.toMatchObject({ active: true, percent: 42 })
+        })
+    })
 })

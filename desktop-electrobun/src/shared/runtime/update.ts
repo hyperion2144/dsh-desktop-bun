@@ -107,7 +107,7 @@ export interface StatusLike {
 export type ReleasePresence = 'present' | 'absent' | 'unknown'
 
 /** 失败分类：框架只给一段文本，壳侧自己认。 */
-export type UpdateFailureKind = 'not-found' | 'invalid-manifest' | 'network' | 'http' | 'unknown'
+export type UpdateFailureKind = 'not-found' | 'invalid-manifest' | 'network' | 'http' | 'managed-dir' | 'unknown'
 
 export interface UpdateFailure {
   kind: UpdateFailureKind
@@ -138,6 +138,16 @@ const NETWORK_RE = /network|econnreset|enotfound|eai_again|fetch failed|timeout|
 export function classifyUpdateFailure(raw: string): UpdateFailure {
   const trimmed = raw.trim()
   if (trimmed === '') return { kind: 'unknown', raw: trimmed, text: '' }
+  if (/outside its managed update directory/i.test(trimmed)) {
+    // #235：框架（Electrobun Updater）在 download 一开始就校验「应用必须在受管更新目录
+    // （win/linux 硬编码 %LOCALAPPDATA%\<identifier>）」——#87 的自定义安装目录必抛，壳侧无法
+    // 配置绕过。文案要给可操作提示，不能笼统红字（triage Brief 第 6 点）。
+    return {
+      kind: 'managed-dir',
+      raw: trimmed,
+      text: '应用不在框架的受管更新目录（例如自定义安装位置），应用内下载更新不可用；请用最新安装包覆盖安装来升级',
+    }
+  }
   if (/invalid update manifest/i.test(trimmed)) {
     return { kind: 'invalid-manifest', raw: trimmed, text: '更新清单无效（版本号或资产名对不上）' }
   }
@@ -351,9 +361,11 @@ export function updateView(input: {
   }
   const current = local.version ?? ''
   const latest = remote.version ?? ''
+  // 本地版本读不到（''/'unknown'）时没法比较——不能自算「可更新」（宁可不报也不误报）。
+  const comparable = current !== '' && current !== 'unknown'
   const updateAvailable =
     remote.updateAvailable === true ||
-    (input.available && phase !== 'unavailable' && isNewerVersion(latest, current))
+    (comparable && input.available && phase !== 'unavailable' && isNewerVersion(latest, current))
   const updateReady = remote.updateReady === true || phase === 'ready'
   return {
     available: input.available,

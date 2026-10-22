@@ -20,11 +20,13 @@ import {
   UPDATE_NOTICE_OP_METHOD,
   UPDATE_NOTICE_RESIZE_METHOD,
   UPDATE_NOTICE_CLOSE_METHOD,
+  UPDATE_NOTICE_SHELL_STATUS_METHOD,
   updateNoticeOp,
   updateNoticeResizeHeight,
   type UpdateNoticeOp,
 } from './update-notice-dialog.ts'
 import { downloadPercent } from '../../shared/runtime/runtime-download-progress.ts'
+import type { ShellUpdateStatus } from '../platform/shell-update-status.ts'
 
 /** 只读的下载状态查询方法名（与壳命令表同名，页面按名字叫）。 */
 export const UPDATE_NOTICE_STATUS_METHOD = 'runtime_download_status'
@@ -37,7 +39,11 @@ export interface UpdateNoticeRpcDeps {
   run: (op: UpdateNoticeOp) => Promise<unknown>
   /** 运行时下载器的当前状态（只读；壳算好百分比再递给页面）。 */
   downloadStatus: () => { active: boolean; version: string; resolved: number; downloaded: number }
-  /** 页面量好的窗高（#130）：壳按当前 x/y/宽度重新 setFrame，只动高度。 */
+  /**
+   * #235：壳段更新状态（自管安装包下载器 + 自管 check 视图的合成，见
+   * `platform/shell-update-status.ts`）。未接上时返回 null，页面按无状态画（不报错）。
+   */
+  shellUpdateStatus?: () => ShellUpdateStatus | null
   resize: (height: number) => void
   /** 请壳关掉本窗（#160）：页面自己关不了自己，只能让壳代劳。 */
   close: () => void
@@ -78,6 +84,8 @@ export function updateNoticeRpcRequests(deps: UpdateNoticeRpcDeps): {
         setTimeout(() => deps.close(), UPDATE_NOTICE_CLOSE_DELAY_MS)
         return {}
       },
+      // #235：壳段状态（进度/失败红字/就绪转「安装更新」）。页面拿 null 就当无状态画。
+      [UPDATE_NOTICE_SHELL_STATUS_METHOD]: async () => deps.shellUpdateStatus?.() ?? null,
     },
   }
 }

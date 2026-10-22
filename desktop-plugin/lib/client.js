@@ -3532,10 +3532,17 @@ var import_jsx_runtime19 = require("react/jsx-runtime");
 function UpdateCard() {
   const [updateState, setUpdateState] = (0, import_react18.useState)(null);
   const updateBusy = updateState !== null && (updateState.view.phase === "checking" || updateState.view.phase === "downloading" || updateState.view.phase === "preparing");
+  const [shellStatus, setShellStatus] = (0, import_react18.useState)(null);
+  const shellActive = shellStatus !== null && shellStatus.active;
+  const fetchShellStatus = () => {
+    void invoke("get_shell_update_status").then(setShellStatus).catch(() => {
+    });
+  };
   const runUpdate = (cmd) => {
     void invoke(cmd).then((snapshot) => {
       setUpdateState(snapshot);
       showToast(snapshot.view.label, snapshot.view.phase !== "error");
+      void fetchShellStatus();
     }).catch((e) => showToast(`\u66F4\u65B0\u5931\u8D25\uFF1A${String(e)}`, false));
   };
   (0, import_react18.useEffect)(() => {
@@ -3544,18 +3551,19 @@ function UpdateCard() {
       if (!cancelled) setUpdateState(snapshot);
     }).catch(() => {
     });
+    void fetchShellStatus();
     return () => {
       cancelled = true;
     };
   }, []);
   (0, import_react18.useEffect)(() => {
-    if (!updateBusy) return;
     const timer = setInterval(() => {
       void invoke("get_update_state").then(setUpdateState).catch(() => {
       });
+      void fetchShellStatus();
     }, 1e3);
     return () => clearInterval(timer);
-  }, [updateBusy]);
+  }, []);
   const [updateNotice, setUpdateNotice] = (0, import_react18.useState)(null);
   const [updateNoticeError, setUpdateNoticeError] = (0, import_react18.useState)(null);
   const refreshUpdateNotice = () => {
@@ -3600,6 +3608,31 @@ function UpdateCard() {
       "%",
       updateState.view.totalBytes !== null ? `\uFF08${fmtBytes2(updateState.view.bytesDownloaded)} / ${fmtBytes2(updateState.view.totalBytes)}\uFF09` : ""
     ] }),
+    shellStatus !== null && shellStatus.active && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { style: NOTE_STYLE, children: [
+      "\u5B89\u88C5\u5305\u4E0B\u8F7D\u4E2D ",
+      shellStatus.percent !== null ? `${shellStatus.percent}%` : "\u2026",
+      /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: { marginTop: 4, height: 6, background: "rgba(128,128,128,0.25)", borderRadius: 3 }, children: /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
+        "div",
+        {
+          style: {
+            width: `${shellStatus.percent ?? 0}%`,
+            height: "100%",
+            borderRadius: 3,
+            background: "#3b82f6"
+          }
+        }
+      ) }),
+      shellStatus.installerPath !== "" && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { style: { marginTop: 4 }, children: [
+        "\u4FDD\u5B58\u5230\uFF1A",
+        shellStatus.installerPath
+      ] })
+    ] }),
+    shellStatus !== null && shellStatus.updateReady && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { style: NOTE_STYLE, children: [
+      "\u5B89\u88C5\u5305\u5DF2\u5C31\u7EEA\uFF1A",
+      shellStatus.installerPath !== "" ? shellStatus.installerPath : `v${shellStatus.version}`,
+      "\uFF0C\u70B9\u300C\u91CD\u542F\u5E76\u5B89\u88C5\u300D\u5F00\u59CB\u5B89\u88C5\u3002"
+    ] }),
+    shellStatus !== null && shellStatus.error !== "" && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { style: DANGER_NOTE_STYLE, children: shellStatus.error }),
     /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { style: { display: "flex", gap: 8, marginTop: 8 }, children: [
       /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
         PfBtn,
@@ -3614,7 +3647,8 @@ function UpdateCard() {
         PfBtn,
         {
           variant: "ghost",
-          disabled: updateState === null || !updateState.actions.canDownload,
+          disabled: updateState === null || !updateState.actions.canDownload || // 壳自管下载在跑时禁点（下载器有单飞保护，这里禁掉避免误导）。
+          shellActive,
           onClick: () => runUpdate("download_update"),
           children: "\u4E0B\u8F7D\u66F4\u65B0"
         }
@@ -3623,7 +3657,8 @@ function UpdateCard() {
         PfBtn,
         {
           variant: "ghost",
-          disabled: updateState === null || !updateState.actions.canApply,
+          disabled: updateState === null || // 壳安装包就绪也能装（service 的 shellApply 离线优先），不等框架 canApply。
+          !updateState.actions.canApply && !(shellStatus !== null && shellStatus.updateReady),
           onClick: () => runUpdate("apply_update"),
           children: "\u91CD\u542F\u5E76\u5B89\u88C5"
         }

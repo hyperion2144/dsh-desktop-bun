@@ -163,4 +163,38 @@ describe('提醒卡动作执行器', () => {
     expect(result.ok).toBe(false)
     expect(result.message).toContain('update-notice.json 不可用')
   })
+
+    describe('#235：安装壳更新（apply-shell）', () => {
+        test('没接上 applyShell：如实报不可用，不假装装了', async () => {
+            const { run } = harness()
+            const result = await run({ op: 'apply-shell' })
+            expect(result.ok).toBe(false)
+            expect(result.message).toContain('还不支持在应用内安装更新')
+        })
+
+        test('接上了：调 applyShell，报「安装器已启动」', () => {
+            const calls: string[] = []
+            const { run } = harness({
+                applyShell: async () => {
+                    calls.push('applyShell')
+                },
+            })
+            return run({ op: 'apply-shell' }).then((result) => {
+                expect(result.ok).toBe(true)
+                expect(result.message).toContain('安装器已启动')
+                expect(calls).toEqual(['applyShell'])
+            })
+        }),
+
+        test('applyShell 抛错：失败原因原样回给页面', async () => {
+            const { run } = harness({
+                applyShell: async () => {
+                    throw new Error('安装包不存在')
+                },
+            })
+            const result = await run({ op: 'apply-shell' })
+            expect(result.ok).toBe(false)
+            expect(result.message).toContain('安装包不存在')
+        })
+    })
 })

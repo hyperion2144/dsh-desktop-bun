@@ -1,15 +1,19 @@
 /**
- * 应用更新的 IO 层：把 Electrobun 自带的 `Updater` 包成壳自己的小接口（#220 决策 11）。
+/**
+ * 应用更新的 IO 层（#235：**壳侧全自管**，不再依赖 Electrobun 框架 Updater）。
  *
- * 分工：`src/shared/runtime/update.ts` 管纯逻辑（阶段翻译、版本比较、可点性），本文件只管
- * 「拿框架的本地信息 / 订阅状态 / 调三个动作」，并且**在任何一种失败里都不抛**——更新是
- * 锦上添花的功能，它坏了不能连带把设置面板或启动流程拖垮。
+ * 框架链路的三个硬伤（ADR-0014）：
+ *   · win/linux「受管更新目录」校验对 #87 自定义安装位置一票否决；
+ *   · mac 实测进度回调不可靠（瞬间 100% 再回落、然后卡住）；
+ *   · dev 通道直接短路「updates disabled」，开发实例永远检查不到更新。
+ *
+ * 所以检查/下载/安装全部壳侧自己实现：check 自己 fetch 发布清单（`stable-<os>-<arch>-update.json`，
+ * 发布链 `release-publish.mjs` 的产物，`DSH_SHELL_UPDATE_BASE_URL` 可指向本地静态目录自测）；
+ * 下载/安装走自管安装包下载器（`installer-download.ts`，在 host/service.ts 组装）。
  *
  * 不可用的两种正当理由，都会原样写进视图让用户看见：
- *   · 这个构建没有更新源（dev 构建、`release.baseUrl` 没配）；
+ *   · 更新源没配（`release.baseUrl` 为空）；
  *   · 被 `DSH_SHELL_DISABLE_UPDATER=1` 关掉。
- * 此外 `DSH_SHELL_UPDATE_BASE_URL` 可以盖掉清单源——本地起一个静态目录就能把「检查→下载→
- * 安装→重启」整条链路走一遍，不必真发版。
  */
 
 import {
@@ -20,6 +24,8 @@ import {
   firstNonEmpty,
   platformPrefixOf,
   updateView,
+  isNewerVersion,
+  feedUrl,
   type LocalUpdateLike,
   type ReleasePresence,
   type RemoteUpdateLike,
@@ -29,18 +35,31 @@ import {
   type UpdateActions,
 } from '../../shared/runtime/update.ts'
 import { probeReleasePresence } from './release-probe.ts'
+import { resolveAppVersion } from './app-version.ts'
 import { type Logger } from '../../shared/logging/levels.ts'
 
-/** 我们用到的框架面（只声明用到的部分，便于测试注入假实现）。 */
-export interface UpdaterLike {
-  getLocalInfo(): Promise<LocalUpdateLike>
-  checkForUpdate(): Promise<RemoteUpdateLike>
-  downloadUpdate(): Promise<void>
-  applyUpdate(): Promise<void>
-  updateInfo(): RemoteUpdateLike
-  onStatusChange(callback: ((entry: StatusLike) => void) | null): void
+/** 壳侧自管清单用的通道前缀：发布链只发 stable（桌面独占 latest），dev 实例也查它。 */
+const SELF_MANAGED_CHANNEL = 'stable'
+
+/** 发布清单条目（`release-publish.mjs` 写出的结构；壳侧只取需要的字段）。 */
+export interface ShellUpdateManifest {
+  version?: string
+  hash?: string
+  channel?: string
+  identifier?: string
 }
 
+/** 发布清单校验：只要求 version 是非空字符串（其余字段展示用，不强校验）。 */
+export function validateShellManifest(document: unknown): ShellUpdateManifest {
+  if (typeof document !== 'object' || document === null) {
+    throw new Error('更新清单不是 JSON 对象')
+  }
+  const manifest = document as ShellUpdateManifest
+  if (typeof manifest.version !== 'string' || manifest.version === '') {
+    throw new Error('更新清单缺少 version 字段')
+  }
+  return manifest
+}
 export interface UpdaterSnapshot {
   available: boolean
   reason: string
@@ -54,11 +73,9 @@ export interface ShellUpdater {
   reason: string
   snapshot(): UpdaterSnapshot
   check(): Promise<UpdaterSnapshot>
-  download(): Promise<UpdaterSnapshot>
-  apply(): Promise<UpdaterSnapshot>
-  /** 订阅框架状态（幂等）。 */
+  /** 启动时预热（读本地版本/解析更新源，只记日志不拖启动）。 */
   start(): void
-  /** 退订（壳退出时调，避免回调打到已拆的窗口上）。 */
+  /** 壳退出收尾（自管实现无订阅，保留口子对齐旧接口）。 */
   stop(): void
 }
 
@@ -67,9 +84,10 @@ export interface UpdaterOptions {
   env?: Record<string, string | undefined>
   os?: string
   arch?: string
-  buildEnv?: string
-  /** 测试缝：注入假的 Updater（返回 null 表示 import 失败）。 */
-  importUpdater?: () => Promise<UpdaterLike | null>
+  /** 本地版本（缺省 resolveAppVersion()：DSH_SHELL_APP_VERSION 覆盖 → version.json）。 */
+  currentVersion?: string
+  /** 测试缝：注入假 fetch（清单拉取）。 */
+  fetchFn?: typeof fetch
   /** 测试缝：注入假的「这个更新源背后有没有已发布的 Release」探测。 */
   probeRelease?: (baseUrl: string) => Promise<ReleasePresence>
   now?: () => number
@@ -82,14 +100,6 @@ export function isFlagOn(value: string | undefined): boolean {
   return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on'
 }
 
-async function defaultImport(): Promise<UpdaterLike | null> {
-  try {
-    const mod = (await import('electrobun/bun')) as { Updater?: UpdaterLike }
-    return mod.Updater ?? null
-  } catch {
-    return null
-  }
-}
 
 export function createUpdater(options: UpdaterOptions): ShellUpdater {
   const env = options.env ?? process.env
@@ -97,22 +107,16 @@ export function createUpdater(options: UpdaterOptions): ShellUpdater {
   const now = options.now ?? (() => Date.now())
   const os = options.os ?? process.platform
   const arch = options.arch ?? process.arch
-  const buildEnv = options.buildEnv ?? env.DSH_SHELL_BUILD_ENV ?? ''
-  // 前缀影响的是**显示出来**的清单 URL（真正抓取的是框架自己）；拿不到构建环境时按
-  // version.json 的 channel 推（dev 构建 channel='dev'），实在没有才回落到 'stable'。
-  let prefix = platformPrefixOf({
-    buildEnv: buildEnv === '' ? 'stable' : buildEnv,
-    os: osName(os),
-    arch: archName(arch),
-  })
+  const fetchFn = options.fetchFn ?? globalThis.fetch
+  // 清单前缀固定 stable：发布链（release-publish.mjs）只发 stable（桌面独占 latest），
+  // dev 实例也查同一份清单——框架「dev 通道禁更新」的短路从此与我们无关。
+  const prefix = platformPrefixOf({ buildEnv: SELF_MANAGED_CHANNEL, os: osName(os), arch: archName(arch) })
 
-  let updater: UpdaterLike | null = null
   let ready = false
-  let subscribed = false
   let local: LocalUpdateLike = {}
   let remote: RemoteUpdateLike = {}
   let status: StatusLike | undefined
-  /** 框架/壳给的**原始**错误文本（分类与中文说明交给 `updateView`）。 */
+  /** 壳侧检查/网络失败的**原始**文本（分类与中文说明交给 `updateView`）。 */
   let failure = ''
   /** 404 二义性判据：这个更新源背后有没有已发布的 Release。 */
   let releasePresence: ReleasePresence = 'unknown'
@@ -146,61 +150,21 @@ export function createUpdater(options: UpdaterOptions): ShellUpdater {
       log.debug(reason)
       return
     }
-    const importer = options.importUpdater ?? defaultImport
-    try {
-      updater = await importer()
-    } catch (error) {
-      reason = `加载框架更新器失败：${String(error)}`
-      log.warn(reason)
-      return
-    }
-    if (updater === null) {
-      reason = '这个构建里没有框架更新器（不是打包运行？）'
-      log.debug(reason)
-      return
-    }
-    try {
-      local = await updater.getLocalInfo()
-    } catch (error) {
-      reason = `读不到本地版本信息：${String(error)}`
-      log.warn(reason)
-      return
-    }
-    if (buildEnv === '' && (local.channel ?? '') !== '') {
-      prefix = platformPrefixOf({
-        buildEnv: local.channel as string,
-        os: osName(os),
-        arch: archName(arch),
-      })
-    }
+    // 本地版本自读（DSH_SHELL_APP_VERSION 覆盖 → version.json），不再依赖框架 getLocalInfo。
+    const current = options.currentVersion ?? resolveAppVersion({ env })
     const override = env[UPDATE_BASE_URL_ENV]
-    const baseUrl = override !== undefined && override !== '' ? override : (local.baseUrl ?? '')
-    local = { ...local, baseUrl }
-    if (baseUrl === '') {
-      reason = `当前构建没有更新源（release.baseUrl 未配置；默认源是 ${DEFAULT_UPDATE_BASE_URL}）`
+    const baseUrl = override !== undefined && override !== '' ? override : DEFAULT_UPDATE_BASE_URL
+    local = { version: current, channel: SELF_MANAGED_CHANNEL, baseUrl }
+    available = baseUrl !== ''
+    if (!available) {
+      reason = `当前构建没有更新源（${UPDATE_BASE_URL_ENV} 与默认源都为空）`
       log.debug(reason)
       return
     }
-    available = true
     log.info(
-      `更新源就绪：${local.version ?? '?'}（channel=${local.channel ?? '?'}）→ ${baseUrl}` +
+      `更新源就绪：${current}（自管，通道=${SELF_MANAGED_CHANNEL}）→ ${baseUrl}` +
       (override !== undefined && override !== '' ? `（由 ${UPDATE_BASE_URL_ENV} 覆盖）` : ''),
     )
-  }
-
-  function ensureSubscribed(): void {
-    if (subscribed || updater === null) return
-    subscribed = true
-    updater.onStatusChange((entry) => {
-      status = { ...entry, timestamp: entry.timestamp ?? now() }
-    })
-  }
-
-  /** 动作名（给日志看，中文）。 */
-  const ACTION_LABELS: Record<'check' | 'download' | 'apply', string> = {
-    check: '检查更新',
-    download: '下载更新',
-    apply: '安装更新',
   }
 
   /** 探「这个更新源背后有没有已发布的 Release」（404 二义性靠它）。 */
@@ -215,43 +179,48 @@ export function createUpdater(options: UpdaterOptions): ShellUpdater {
     }
   }
 
-  async function run(
-    action: 'check' | 'download' | 'apply',
-    call: (target: UpdaterLike) => Promise<unknown>
-  ): Promise<UpdaterSnapshot> {
+  /** 拉发布清单并判可用性：壳侧自己的 check，失败写进视图不抛出。 */
+  async function check(): Promise<UpdaterSnapshot> {
     await load()
-    if (!available || updater === null) return snapshot()
-    ensureSubscribed()
-    const actionLabel = ACTION_LABELS[action]
+    if (!available) return snapshot()
+    const url = feedUrl(local.baseUrl ?? '', prefix)
     try {
-      await call(updater)
-      remote = updater.updateInfo() ?? {}
-      // 框架的失败**不会抛出来**：它把错误写进 updateInfo.error 并发一条 error 状态
-      const raw = firstNonEmpty(remote.error, status?.details?.errorMessage)
-      if (raw === '') {
-        failure = ''
-        log.info(
-          `${actionLabel}完成：${remote.version ?? '?'}` +
-          `（available=${String(remote.updateAvailable)}, ready=${String(remote.updateReady)}）`,
-        )
-      } else {
-        remember(raw, actionLabel)
-        if (action === 'check' && classifyUpdateFailure(raw).kind === 'not-found') {
-          // 404 有二义性：探一下这个更新源背后到底有没有已发布的 Release
-          releasePresence = await probeRelease()
-        }
+      const response = await fetchFn(url, { signal: AbortSignal.timeout(30_000) })
+      if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
+      const manifest = validateShellManifest(await response.json())
+      const latest = manifest.version ?? ''
+      const current = local.version ?? ''
+      // 本地版本读不到（'unknown'/空）时无法比较——不误报「可更新」，视图里的 current 如实显示。
+      const comparable = current !== '' && current !== 'unknown'
+      remote = {
+        version: latest,
+        hash: manifest.hash,
+        // 自管口径：版本比较定可用性（框架的 hash 比对要求本地 hash 与清单同源，dev 实例对不上）。
+        updateAvailable: comparable && isNewerVersion(latest, current),
+        updateReady: false,
+        error: '',
       }
+      failure = ''
+      // 框架词表里 check-complete 是「查完发现有更新」的中间态（phase→checking）；自管 check 的
+      // 终态要按结果落 update-available / no-update，否则面板轮询永远显示「正在检查…」（PR #236 实测）。
+      status = {
+        status: remote.updateAvailable ? 'update-available' : 'no-update',
+        message: `已检查：${latest}`,
+        timestamp: now(),
+      }
+      log.info(`检查更新完成：${latest}（available=${String(remote.updateAvailable)}）`)
     } catch (error) {
-      remember(error instanceof Error ? error.message : String(error), actionLabel)
-      try {
-        remote = updater.updateInfo() ?? {}
-      } catch (error) {
-        log.warn(`更新检查失败：${String(error)}`)
+      const raw = error instanceof Error ? error.message : String(error)
+      remember(raw, '检查更新')
+      remote = {}
+      status = { status: 'error', message: raw, timestamp: now() }
+      if (classifyUpdateFailure(raw).kind === 'not-found') {
+        // 404 有二义性：探一下这个更新源背后到底有没有已发布的 Release
+        releasePresence = await probeRelease()
       }
     }
     return snapshot()
   }
-
   return {
     get available() {
       return available
@@ -260,20 +229,14 @@ export function createUpdater(options: UpdaterOptions): ShellUpdater {
       return reason
     },
     snapshot,
-    check: () => run('check', (target) => target.checkForUpdate()),
-    download: () => run('download', (target) => target.downloadUpdate()),
-    apply: () => run('apply', (target) => target.applyUpdate()),
+    check,
     start: () => {
       void load().then(() => {
-        ensureSubscribed()
         const current = snapshot()
         log.info(`状态：${current.view.label}（${current.view.current || '版本未知'}）`)
       })
     },
-    stop: () => {
-      if (updater !== null && subscribed) updater.onStatusChange(null)
-      subscribed = false
-    },
+    stop: () => { },
   }
 }
 
