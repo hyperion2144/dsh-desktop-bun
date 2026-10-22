@@ -259,6 +259,10 @@ jobs:
           $mainJs = Join-Path $payloadRes 'main.js'
           if (-not (Test-Path $mainJs)) { throw ("安装树里没有 main.js：{0}" -f $mainJs) }
           Write-Host ("冒烟：bun = {0}" -f $bunExe.FullName)
+          # 主进程拉壳要 launcher 路径：绕过 launcher 的冒烟里 ppid 是 pwsh（CI 实抓：探测把
+          # pwsh 当 launcher，spawn pwsh 当壳 → watchdog 死循环）。显式声明走第一优先 env。
+          $appExe = Get-ChildItem $appRoot.FullName -Filter 'launcher.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -ne $appExe) { $env:DSH_SHELL_LAUNCHER = $appExe.FullName; Write-Host ("冒烟：DSH_SHELL_LAUNCHER = {0}" -f $appExe.FullName) }
           $log2 = Join-Path $env:RUNNER_TEMP 'smoke-payload.log'
           Write-Host ("冒烟：直接拉起包内载荷：{0} {1}" -f $bunExe, $mainJs)
           Start-Process -FilePath $bunExe -ArgumentList "`"$mainJs`"" -WorkingDirectory $payloadRes -RedirectStandardOutput $log2 -RedirectStandardError ($log2 + '.err')
