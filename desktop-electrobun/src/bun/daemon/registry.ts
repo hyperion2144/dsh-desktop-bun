@@ -3,7 +3,7 @@
 // #240-⑥：profile 列表 = 本地 + 远程统一条目。守护是权威记账方：托盘（#241）、
 // 壳（#243）、页面（#244）都从这里读「现在有哪些 profile、各自什么状态」。
 //
-// 持久化：appSupport/daemon-profiles.json，tmp+rename 原子写（与 restart/intent.ts
+// 持久化：appSupport/daemon-profiles.json，tmp+rename 原子写（与壳锁 daemon-instance.json
 // 同一口径）。IO 全部可注入，单测不碰磁盘；实现里宽容读（坏文件按空表继续）。
 
 import { join } from 'node:path'
@@ -29,6 +29,8 @@ export interface ProfileEntry {
   /** 远程条目：服务地址（本地条目恒 null） */
   remoteUrl: string | null
   startedAt: string | null
+  /** 本地条目：壳最近上报的开窗清单（守护重拉壳时透传回 env 恢复；未上报 = null）。 */
+  openProfiles: string[] | null
 }
 
 /** 注入式 IO：默认实现走 node:fs，测试塞内存 map。 */
@@ -95,6 +97,9 @@ function coerceEntry(item: unknown): ProfileEntry | null {
     pid: typeof raw.pid === 'number' && Number.isInteger(raw.pid) && raw.pid > 0 ? raw.pid : null,
     remoteUrl: typeof raw.remoteUrl === 'string' && raw.remoteUrl !== '' ? raw.remoteUrl : null,
     startedAt: typeof raw.startedAt === 'string' && raw.startedAt !== '' ? raw.startedAt : null,
+    openProfiles: Array.isArray(raw.openProfiles)
+      ? raw.openProfiles.filter((p): p is string => typeof p === 'string' && p !== '')
+      : null,
   }
 }
 
@@ -142,6 +147,7 @@ export class ProfileRegistry {
       pid: this.entries.get(profile)?.pid ?? null,
       remoteUrl: null,
       startedAt: this.entries.get(profile)?.startedAt ?? null,
+      openProfiles: this.entries.get(profile)?.openProfiles ?? null,
     }
     this.entries.set(entry.id, entry)
     this.persist()
@@ -159,6 +165,7 @@ export class ProfileRegistry {
       status: existing?.status ?? 'stopped',
       pid: null,
       remoteUrl,
+      openProfiles: null,
       startedAt: existing?.startedAt ?? null,
     }
     this.entries.set(id, entry)
@@ -178,6 +185,15 @@ export class ProfileRegistry {
     entry.status = status
     if (entry.kind === 'local') entry.pid = status === 'stopped' || status === 'crashed' ? null : pid
     if (status === 'running') entry.startedAt = new Date().toISOString()
+    this.persist()
+    return entry
+  }
+
+  /** 壳上报的开窗清单落账（register/exit 事件带；#243 重拉恢复的数据源）。 */
+  setOpenProfiles(id: string, profiles: readonly string[]): ProfileEntry | null {
+    const entry = this.entries.get(id)
+    if (entry === undefined) return null
+    entry.openProfiles = profiles.filter((p) => p !== '')
     this.persist()
     return entry
   }

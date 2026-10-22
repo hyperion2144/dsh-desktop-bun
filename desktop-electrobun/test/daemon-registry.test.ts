@@ -8,7 +8,7 @@
 // 控制通道 HTTP 面在 daemon-control.test.ts。
 
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProfileRegistry, parseRegistry, remoteProfileId, type RegistryIo } from '../src/bun/daemon/registry.ts'
@@ -148,6 +148,18 @@ describe('spawn 机械（注入式）', () => {
             DSH_SHELL_CONTROL_TOKEN: 'tok',
         })
     })
+        test('shellDaemonEnv：role/cefIdentity/restoreProfiles 可选键', () => {
+                expect(shellDaemonEnv({ controlOrigin: 'o', token: 't', daemonPid: 5, role: 'shell', cefIdentity: 'id-shell' })).toEqual({
+                        DSH_SHELL_SUPERVISED_BY: '5',
+                        DSH_SHELL_CONTROL_URL: 'o',
+                        DSH_SHELL_CONTROL_TOKEN: 't',
+                        DSH_SHELL_ROLE: 'shell',
+                        DSH_SHELL_CEF_IDENTITY: 'id-shell',
+                })
+                // 缺省 / 空串 cefIdentity 不透传（升级包 patch 未就位时的降级面）。
+                expect('DSH_SHELL_CEF_IDENTITY' in shellDaemonEnv({ controlOrigin: 'o', token: 't', daemonPid: 5 })).toBe(false)
+                expect('DSH_SHELL_CEF_IDENTITY' in shellDaemonEnv({ controlOrigin: 'o', token: 't', daemonPid: 5, cefIdentity: '' })).toBe(false)
+        })
     test('spawnShell 成功/异常 pid/抛错三路', () => {
         const log = { infos: [] as string[], warns: [] as string[] }
         const onLog = { info: (m: string) => void log.infos.push(m), warn: (m: string) => void log.warns.push(m) }
@@ -158,6 +170,14 @@ describe('spawn 机械（注入式）', () => {
         ).toBe('boom')
         expect(log.warns.some((line) => line.includes('boom'))).toBe(true)
     })
+        test('defaultSpawnShell：日志目录不存在时先建目录（#243 冒烟实抓）', () => {
+                const dir = mkdtempSync(join(tmpdir(), 'daemon-spawn-'))
+                const logFile = join(dir, 'no-such-dir', 'sub', 'shell-relay.log')
+                const result = spawnShell({ argv: [process.execPath, '-e', 'process.exit(0)'], logFile })
+                expect(result.ok).toBe(true)
+                expect(existsSync(logFile)).toBe(true)
+                rmSync(dir, { recursive: true, force: true })
+        })
     test('killShell：已死不动 / TERM 生效 / TERM 超时走 KILL', async () => {
         const signals: string[] = []
         const signal = (pid: number, sig: 'SIGTERM' | 'SIGKILL') => void signals.push(sig)

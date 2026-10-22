@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { planRelaunch } from '../src/bun/platform/app-restart.ts'
 import {
   layout,
   rememberLauncherExecutablePath,
@@ -70,10 +69,6 @@ describe('resolveLauncherForRelaunch：重启入口的 launcher 路径兜底', (
     expect(result.launcherExe).toBe(launcher)
     expect(result.source).toBe('cache')
     expect(result.attempts.join('\n')).toContain('status=0')
-    expect(planRelaunch({ isPackaged: true, launcherExe: result.launcherExe })).toEqual({
-      ok: true,
-      exe: launcher,
-    })
   })
 
   test('缓存路径已不存在 ⇒ 回退同目录 launcher.exe（Windows bun.exe 的 sibling）', () => {
@@ -109,24 +104,20 @@ describe('resolveLauncherForRelaunch：重启入口的 launcher 路径兜底', (
     expect(result.source).toBe('env')
   })
 
-  test('所有候选都不存在 ⇒ null；planRelaunch 仍是 launcher-unknown，且尝试记录非空', () => {
-    const result = resolveLauncherForRelaunch({
-      env: {},
-      ppid: 0,
-      platform: 'linux',
-      readlink: () => null,
-      exists: () => false,
-      cached: '/missing/launcher',
-    })
+    test('所有候选都不存在 ⇒ null，且尝试记录非空', () => {
+        const result = resolveLauncherForRelaunch({
+            env: {},
+            ppid: 0,
+            platform: 'linux',
+            readlink: () => null,
+            exists: () => false,
+            cached: '/missing/launcher',
+        })
 
-    expect(result.launcherExe).toBeNull()
-    expect(result.source).toBeNull()
-    expect(result.attempts.length).toBeGreaterThan(0)
-    const plan = planRelaunch({ isPackaged: true, launcherExe: result.launcherExe })
-    expect(plan.ok).toBe(false)
-    if (plan.ok) throw new Error('不该 ok')
-    expect(plan.reason).toBe('launcher-unknown')
-  })
+        expect(result.launcherExe).toBeNull()
+        expect(result.source).toBeNull()
+        expect(result.attempts.length).toBeGreaterThan(0)
+    })
 
   test('layout() 冷启动解析成功的 launcher 会进入缓存，供后续重启使用', () => {
     const dir = tempDir()

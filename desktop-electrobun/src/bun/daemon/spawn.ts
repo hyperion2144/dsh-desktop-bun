@@ -11,12 +11,33 @@ import { defaultIsAlive } from '../platform/single-instance.ts'
  * - SUPERVISED_BY 复用 #237 既有键（接班等待/单实例 succeedsPid 已按它豁免）
  * - CONTROL_URL/TOKEN 是壳回连控制通道的凭据（token 准入口径与页面 token 一致）
  */
-export function shellDaemonEnv(input: { controlOrigin: string; token: string; daemonPid: number }): Record<string, string> {
-  return {
+import { encodeRestoreProfiles, SHELL_RESTORE_PROFILES_ENV } from './control.ts'
+export function shellDaemonEnv(input: {
+  controlOrigin: string
+  token: string
+  daemonPid: number
+  /** 壳角色标记（#243：入口路由靠它分流；固定 'shell'） */
+  role?: 'shell'
+  /** 重拉恢复的开窗清单（#243：壳启动读它恢复窗口；缺省不透传） */
+  restoreProfiles?: readonly string[]
+  /**
+   * CEF 身份覆盖（#243 冒烟实抓：主进程与壳同 identifier ⇒ 同一 CEF 目录的
+   * ProcessSingleton 互斥，后起的一方 abort 退出）。壳侧注入 DSH_SHELL_CEF_IDENTITY
+   * （launcher main.js 的 #239 patch 杠杆）换一个 CEF 数据目录；主进程保留默认目录。
+   */
+  cefIdentity?: string
+}): Record<string, string> {
+  const env: Record<string, string> = {
     DSH_SHELL_SUPERVISED_BY: String(input.daemonPid),
     DSH_SHELL_CONTROL_URL: input.controlOrigin,
     DSH_SHELL_CONTROL_TOKEN: input.token,
   }
+  if (input.role !== undefined) env.DSH_SHELL_ROLE = input.role
+  if (input.cefIdentity !== undefined && input.cefIdentity !== '') env.DSH_SHELL_CEF_IDENTITY = input.cefIdentity
+  if (input.restoreProfiles !== undefined && input.restoreProfiles.length > 0) {
+    env[SHELL_RESTORE_PROFILES_ENV] = encodeRestoreProfiles(input.restoreProfiles)
+  }
+  return env
 }
 
 export interface SpawnShellOptions {
@@ -37,7 +58,14 @@ export interface SpawnShellResult {
 
 export function defaultSpawnShell(argv: string[], env: Record<string, string>, logFile: string): number {
   const fs = require('node:fs') as typeof import('node:fs')
-  const logFd = logFile === '' ? null : fs.openSync(logFile, 'a')
+  const path = require('node:path') as typeof import('node:path')
+  // 日志尾巴可能连目录都还没有（全新安装首启 / 隔离环境）：openSync 'a' 只建文件不建目录，
+  // 不先 mkdir 会让整个拉壳 ENOENT 失败（#243 冒烟实抓）。
+  let logFd: number | null = null
+  if (logFile !== '') {
+    fs.mkdirSync(path.dirname(logFile), { recursive: true })
+    logFd = fs.openSync(logFile, 'a')
+  }
   try {
     const envAll = { ...process.env, ...env }
     // stdio 的 [In, Out, Err] 泛型按分支独立推断：合成一个条件表达式会因元组联合推不出而报错。

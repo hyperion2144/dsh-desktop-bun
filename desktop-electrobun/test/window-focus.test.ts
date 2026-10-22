@@ -63,7 +63,7 @@ describe('window-focus：壳侧接线门禁（#115）', () => {
     readFileSync(new URL(file, import.meta.url), 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/^\s*\/\/.*$/gm, '')
-  const indexSource = codeOf('../src/bun/index.ts')
+    const indexSource = codeOf('../src/bun/desktop-shell.ts')
   const sessionSource = codeOf('../src/bun/windows/profile-session.ts')
   const serviceSource = codeOf('../src/bun/host/service.ts')
 

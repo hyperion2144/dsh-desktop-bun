@@ -270,13 +270,6 @@ const REQUIRED_PAYLOAD_FILES = [
   // 壳主进程入口与托盘图标：缺了等于「托盘/DevTools 静默失效」，构建期拦住。
   'app/bun/index.js',
   'app/runtime/tray.png',
-  // #237 常驻监督进程与其仓内依赖：明文随包发出、包内按 ../src/... 相对引用。漏抄一个，
-  // 监督进程 import 阶段即崩（Windows 实测：Cannot find module '../src/.../entry.ts'，重启只剩直拉兜底）。
-  'app/runtime/shell-supervisor.mjs',
-  'app/src/bun/platform/app-restart.ts',
-  'app/src/bun/platform/restart/intent.ts',
-  'app/src/bun/platform/restart/cef-lock.ts',
-  'app/src/bun/platform/restart/entry.ts',
 ]
 
 /** 二进制安全地把归档里的某个成员解到磁盘（内层归档可能很大，由调用方负责删）。 */
@@ -357,23 +350,6 @@ const REQUIRED_INDEX_MARKERS = ['openDevToolsWindow', 'startupTray', 'createTray
         if (!raw.includes(marker)) problems.push(`${label} 的 app/bun/index.js 缺关键符号：${marker}`)
       }
     }
-    }
-    // 监督脚本 import 自检：解析包内脚本的相对 import，逐一断言目标在包里——以后往脚本里加
-    // import 忘了同步 copy 清单时，构建期就炸，不再等实机翻 .child 日志。
-    const supervisorLine = norm.find((line) => line.endsWith('/app/runtime/shell-supervisor.mjs'))
-    if (supervisorLine !== undefined) {
-      const supervisorRaw = tarExtract(archive, supervisorLine)
-      if (supervisorRaw === null) problems.push(`${label} 的 app/runtime/shell-supervisor.mjs 读不出来`)
-      else {
-        for (const spec of supervisorRaw.matchAll(/from\s+'(\.[^']+)'/g)) {
-          // 相对引用按仓库相对结构落在 app/ 之下：'../src/x' → app/src/x；'./y' → app/runtime/y
-          const specPath = String(spec[1])
-          const target = specPath.startsWith('../') ? `app/${specPath.slice(3)}` : `app/runtime/${specPath.slice(2)}`
-          if (!norm.some((line) => line.endsWith(`/${target}`))) {
-            problems.push(`${label} 的 shell-supervisor.mjs import 的 ${specPath} 不在包内（copy 清单漏了？）`)
-          }
-        }
-      }
     }
   }
   if (versionLine === undefined) {
