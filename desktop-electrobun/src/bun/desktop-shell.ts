@@ -684,6 +684,11 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     onCloseWindow: () => {
       sessions.get(profile)?.closeWindow()
     },
+    // #244：侧边栏「退出本窗口」（exit_window_instance）：停本 profile 的 dsh 与服务面（含关窗）——
+    // 与托盘「退出（停止实例）」同一条 stop() 路；远程条目即 #246 的关窗销毁。
+    onExitInstance: async () => {
+      await sessions.get(profile)?.stop()
+    },
     // 启动确认选了别的 profile：#82 的旧行为是「用它重启」；新壳每 profile 一份服务面，所以是开它那份窗口
     onOpenProfileWindow: async (target) => {
       if (target === profile) return
