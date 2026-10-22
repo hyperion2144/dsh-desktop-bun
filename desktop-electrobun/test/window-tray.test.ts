@@ -10,7 +10,6 @@ import {
   type TrayState,
   orderedProfiles,
   parseTrayAction,
-  remoteMenuItems,
   windowAction,
   runtimeMenuItems,
   trayMenu,
@@ -68,8 +67,6 @@ const baseState = (
     selected: null,
     installed: [],
     downloading: null,
-    remoteAddr: null,
-    remoteList: [],
     registerLabel: null,
     candidates: report.candidates,
     builtinDescriptor: report.builtinDescriptor,
@@ -157,9 +154,9 @@ describe('trayMenu', () => {
     expect(hidden[0]).toBe('显示窗口')
   })
 
-  test('PROFILE 窗口子菜单：未运行裸名 + 「在新窗口打开」，末尾挂新建/迁移入口', () => {
+    test('profile 管理子菜单：未运行裸名 + 「在新窗口打开」，末尾挂新建/迁移入口', () => {
     const items = trayMenu(baseState({ openWindows: ['desktop'] }))
-    const group = findItem(items, 'PROFILE 窗口')
+        const group = findItem(items, 'profile 管理')
     const submenu = group?.submenu ?? []
     expect(submenu[0]?.type).toBe('normal')
     expect((submenu[0] as NormalItem).label).toBe('● desktop（聚焦中）')
@@ -174,7 +171,7 @@ describe('trayMenu', () => {
     expect(parseTrayAction((tail[2] as NormalItem).action)).toEqual({ kind: 'migrate-profile' })
   })
 
-  test('多个 profile：当前项打勾且排第一位，没开窗的不带后缀', () => {
+    test('多个 profile：当前项打勾且排第一位，没开窗的不带后缀', () => {
     const items = trayMenu(
       baseState({
         profile: 'web',
@@ -187,7 +184,7 @@ describe('trayMenu', () => {
         ],
       })
     )
-    const submenu = findItem(items, 'PROFILE 窗口')?.submenu
+        const submenu = findItem(items, 'profile 管理')?.submenu
     expect(submenu !== undefined).toBe(true)
     const webHead = (submenu ?? [])[0] as NormalItem
     expect(webHead.label).toBe('● web · 6393（聚焦中）')
@@ -214,7 +211,7 @@ describe('trayMenu', () => {
         ],
       })
     )
-    const submenu = findItem(items, 'PROFILE 窗口')?.submenu ?? []
+    const submenu = findItem(items, 'profile 管理')?.submenu ?? []
     const stopped = submenu[1] as NormalItem | undefined
     expect(stopped?.label).toBe('desktop')
     // 退过的那行不再带「运行中」字样（旧壳 tray.rs 的约定：未运行就是裸名）
@@ -291,39 +288,58 @@ describe('parseTrayAction', () => {
       kind: 'download-runtime',
       version: '0.2.0-rc.2',
     })
-    expect(parseTrayAction(windowAction('web'))).toEqual({ kind: 'open-window', profile: 'web' })
+      expect(parseTrayAction(windowAction('web'))).toEqual({ kind: 'open-window', profile: 'web' })
+      expect(parseTrayAction(`${TRAY_MENU_ACTIONS.restartProfile}web`)).toEqual({ kind: 'restart-profile', profile: 'web' })
+      expect(parseTrayAction(`${TRAY_MENU_ACTIONS.toggleProfileWindow}web`)).toEqual({ kind: 'toggle-profile-window', profile: 'web' })
   })
 
-describe('remoteMenuItems（托盘「dsh 服务地址」，旧壳 #136）', () => {
-  test('本地生效：本地 ●、远程 ○，标签不含 token', () => {
-    const items = remoteMenuItems({
-      remoteAddr: null,
-      remoteList: ['http://192.168.1.10:3080/?token=secret123', 'dsh.example.cn'],
+    describe('#241 profile 管理（本地+远程统一条目）', () => {
+        test('远程条目渲染：head 带「· 远程」；打开可用、无「退出」（远程 dsh 不归本桌面停）', () => {
+            const items = trayMenu(
+                baseState({
+                    profileRows: [
+                        { profile: 'remote:dsh.example.cn', kind: 'remote', open: false, hidden: false, running: false, port: null, focused: false },
+                    ],
+                }),
+            )
+            const sub = (findItem(items, 'profile 管理')?.submenu ?? [])[0] as NormalItem
+            expect(sub.label).toBe('dsh.example.cn · 远程')
+            const labels = (sub.submenu ?? []).filter((item): item is NormalItem => isNormal(item)).map((item) => item.label)
+            // #246：通路已接，打开/显隐可用；重启只在窗口开着时出现；退出永远不摆。
+            expect(labels[0]).toBe('在新窗口打开 dsh.example.cn')
+            expect(labels).not.toContain('退出（停止实例）')
+        })
+
+        test('开着窗的本地条目四动作：聚焦/隐藏/重启/退出，restart·toggle 动作可解析', () => {
+            const items = trayMenu(
+                baseState({
+                    profileRows: [
+                        { profile: 'desktop', kind: 'local', open: true, hidden: false, running: true, port: 6393, focused: true },
+                    ],
+                }),
+            )
+            const sub = ((findItem(items, 'profile 管理')?.submenu ?? [])[0] as NormalItem).submenu ?? []
+            const actionLabels = sub.filter((item): item is NormalItem => isNormal(item)).map((item) => item.label)
+            expect(actionLabels).toEqual(['聚焦窗口', '隐藏窗口', '重启', '退出（停止实例）'])
+            expect(parseTrayAction(`${TRAY_MENU_ACTIONS.restartProfile}desktop`)).toEqual({ kind: 'restart-profile', profile: 'desktop' })
+            expect(parseTrayAction(`${TRAY_MENU_ACTIONS.toggleProfileWindow}desktop`)).toEqual({ kind: 'toggle-profile-window', profile: 'desktop' })
+        })
+
+        test('隐藏回托盘的条目给「显示窗口」而不是「隐藏窗口」', () => {
+            const items = trayMenu(
+                baseState({
+                    profileRows: [
+                        { profile: 'desktop', kind: 'local', open: true, hidden: true, running: true, port: 6393, focused: false },
+                    ],
+                }),
+            )
+            const sub = ((findItem(items, 'profile 管理')?.submenu ?? [])[0] as NormalItem).submenu ?? []
+            const actionLabels = sub.filter((item): item is NormalItem => isNormal(item)).map((item) => item.label)
+            expect(actionLabels).toContain('显示窗口')
+            expect(actionLabels).not.toContain('隐藏窗口')
+        })
     })
-    expect(items.length).toBe(3)
-    expect((items[0] as NormalItem).label).toBe('● 本地（127.0.0.1）')
-    expect((items[0] as NormalItem).action).toBe(TRAY_MENU_ACTIONS.remoteLocal)
-    expect((items[1] as NormalItem).label).toBe('○ 192.168.1.10:3080')
-    expect(((items[1] as NormalItem).label ?? '')).not.toContain('secret123')
-    expect((items[2] as NormalItem).label).toBe('○ dsh.example.cn')
-  })
 
-  test('远程生效：选中项 ● 且 id 按列表序稳定', () => {
-    const list = ['http://192.168.1.10:3080/?token=abc', 'dsh.example.cn']
-    const items = remoteMenuItems({ remoteAddr: list[0] ?? null, remoteList: list })
-    expect((items[0] as NormalItem).label).toBe('○ 本地（127.0.0.1）')
-    expect((items[1] as NormalItem).label).toBe('● 192.168.1.10:3080')
-    expect(parseTrayAction((items[1] as NormalItem).action)).toEqual({ kind: 'remote-source', addrIndex: 0 })
-    expect(parseTrayAction(TRAY_MENU_ACTIONS.remoteLocal)).toEqual({ kind: 'remote-source' })
-  })
-
-  test('trayMenu 里有「dsh 服务地址」子菜单且空列表只留本地一行', () => {
-    const menu = trayMenu(baseState())
-    const group = findItem(menu, 'dsh 服务地址')
-    expect(group?.submenu?.length).toBe(1)
-    expect(((group?.submenu?.[0] ?? {}) as NormalItem).label).toContain('本地')
-  })
-})
 })
 
 describe('parseTrayAction 的前缀边界', () => {

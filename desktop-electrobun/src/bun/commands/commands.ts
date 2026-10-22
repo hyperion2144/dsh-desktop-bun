@@ -78,7 +78,9 @@ export interface CommandDeps {
   bootPayload?: () => BootPayload | null
   /** #128：页面右键菜单（`/__shell__/context-menu` 的同一个回调，由主进程弹原生菜单）；#130 起那条 HTTP 路由也叠视图鉴权。 */
   showContextMenu?: (request: ContextMenuRequest) => void
-  closeWindow?: () => void
+    closeWindow?: () => void
+    /** #244：侧边栏「退出本窗口」= 关窗 + 停本 profile 的 dsh 与服务面；缺省回落关窗（旧语义）。 */
+    exitInstance?: () => Promise<void>
   /** 试听音效（设置面板的「试听」）：真的出声才 true；没后端时 false，面板据此提示（不再假报成功） */
   playSound?: (name: string) => boolean
   /** 系统默认提示音的试听（旧壳 `preview_notification_sound("default")`）：真起了进程才 true */
@@ -759,10 +761,13 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       deps.closeWindow?.()
       return {}
     },
-    exit_window_instance: () => {
-      deps.closeWindow?.()
-      return {}
-    },
+      exit_window_instance: async () => {
+          // #244：做实「退出本窗口」——停实例（含 worker）而不是只关窗；
+          // 没接会话层的宿主（旧装配）回落关窗，不再让按钮假装退出。
+          if (deps.exitInstance !== undefined) await deps.exitInstance()
+          else deps.closeWindow?.()
+          return {}
+      },
 
     // ---- profile 运维与启动检查（旧壳 commands.rs:252/541/711/737/758） ----
     // 存量安装且没设 active_profile ⇒ 让用户选；profile 残缺 ⇒ 让用户确认修复。

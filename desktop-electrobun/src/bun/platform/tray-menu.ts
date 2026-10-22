@@ -11,11 +11,15 @@ import { remoteDisplay } from '../../shared/net/remote.ts'
 // 目录里点一下就下载并切换）、退出。
 // 还没做的项不摆假入口——宁可菜单短，也不要点了没反应的项。
 
-/** 「PROFILE 窗口」子菜单的每 profile 行（旧壳 tray.rs:63-73） */
+/** 「profile 管理」子菜单的每条目行（旧壳 tray.rs:63-73；#241 起本地+远程统一条目） */
 export interface ProfileRow {
   profile: string
+  /** 条目种类：本地 profile（默认）/ 远程 dsh 地址（#246 接入远程通路） */
+  kind?: 'local' | 'remote'
   /** 窗口开着 */
   open: boolean
+  /** 窗口开着但被隐藏（据此给「显示窗口」而不是「隐藏窗口」） */
+  hidden?: boolean
   /** dsh 宿主在跑 */
   running: boolean
   /** 页面 origin 端口（运行中才有） */
@@ -37,6 +41,8 @@ export const TRAY_MENU_ACTIONS = {
   runtimeFetchPrefix: 'tray:runtime:fetch:',
   registerCli: 'tray:register-cli',
   stopProfile: 'tray:profile:stop:',
+  restartProfile: 'tray:profile:restart:',
+  toggleProfileWindow: 'tray:profile:toggle:',
   newProfile: 'tray:profile:new',
   migrateProfile: 'tray:profile:migrate',
   checkUpdates: 'tray:check-updates',
@@ -49,8 +55,9 @@ export type TrayActionKind =
   | 'switch-runtime'
   | 'download-runtime'
   | 'register-cli'
-  | 'remote-source'
   | 'stop-profile'
+  | 'restart-profile'
+  | 'toggle-profile-window'
   | 'new-profile'
   | 'migrate-profile'
   | 'check-updates'
@@ -63,7 +70,6 @@ export interface TrayAction {
   /** kind === 'switch-runtime'（目标版本）或 'download-runtime'（要下的版本） */
   version?: string
   /** kind === 'remote-source'：选中的远程地址在 remoteList 里的下标；undefined = 切回本地 */
-  addrIndex?: number
   /** kind === 'stop-profile' 时是目标 profile */
 }
 
@@ -103,9 +109,6 @@ export interface TrayState {
   builtinDescriptor: RuntimeBuiltinDescriptor
   /** 正在下载的版本；非 null 时那条标「（下载中…）」 */
   downloading: string | null
-  /** 「dsh 服务地址」：当前生效的远程地址（null = 本地）与可选远程列表（旧壳 #136） */
-  remoteAddr: string | null
-  remoteList: readonly string[]
   /** 「注册 dsh 命令」项的文案；null = 已注册或还没探出 ⇒ 不摆这一项（旧壳 #175 三态） */
   registerLabel: string | null
   /**
@@ -164,19 +167,22 @@ export function parseTrayAction(action: string | undefined | null): TrayAction |
     if (version === '') return null
     return { kind: 'download-runtime', version }
   }
-  if (action === TRAY_MENU_ACTIONS.remoteLocal) return { kind: 'remote-source' }
-  if (action.startsWith(TRAY_MENU_ACTIONS.remoteAddrPrefix)) {
-    const raw = action.slice(TRAY_MENU_ACTIONS.remoteAddrPrefix.length)
-    const addrIndex = Number(raw)
-    if (raw === '' || !Number.isInteger(addrIndex) || addrIndex < 0) return null
-    return { kind: 'remote-source', addrIndex }
-  }
   if (action === TRAY_MENU_ACTIONS.newProfile) return { kind: 'new-profile' }
   if (action === TRAY_MENU_ACTIONS.migrateProfile) return { kind: 'migrate-profile' }
   if (action.startsWith(TRAY_MENU_ACTIONS.stopProfile)) {
     const profile = action.slice(TRAY_MENU_ACTIONS.stopProfile.length)
     if (profile === '') return null
     return { kind: 'stop-profile', profile }
+  }
+  if (action.startsWith(TRAY_MENU_ACTIONS.restartProfile)) {
+    const profile = action.slice(TRAY_MENU_ACTIONS.restartProfile.length)
+    if (profile === '') return null
+    return { kind: 'restart-profile', profile }
+  }
+  if (action.startsWith(TRAY_MENU_ACTIONS.toggleProfileWindow)) {
+    const profile = action.slice(TRAY_MENU_ACTIONS.toggleProfileWindow.length)
+    if (profile === '') return null
+    return { kind: 'toggle-profile-window', profile }
   }
   return null
 }
@@ -264,35 +270,6 @@ export function runtimeMenuItems(state: TrayState): TrayMenuItem[] {
   return items
 }
 
-/**
- * 「dsh 服务地址」子菜单（旧壳 `remote_menu_items` 的等价物，#136）：本地/远程同层单选，
- * ● 当前生效 / ○ 可选；标签用 remoteDisplay（host[:port]，不含 token）。远程不可用
- * （token 失效 401 等）时也能从托盘一键切回本地，不用手改配置文件。
- */
-export function remoteMenuItems(
-  state: Pick<TrayState, 'remoteAddr' | 'remoteList'>,
-): TrayMenuItem[] {
-  const localMark = state.remoteAddr === null ? '●' : '○'
-  const items: TrayMenuItem[] = [
-    {
-      type: 'normal',
-      label: `${localMark} 本地（127.0.0.1）`,
-      action: TRAY_MENU_ACTIONS.remoteLocal,
-      checked: state.remoteAddr === null,
-    },
-  ]
-  state.remoteList.forEach((addr, index) => {
-    const mark = addr === state.remoteAddr ? '●' : '○'
-    items.push({
-      type: 'normal',
-      label: `${mark} ${remoteDisplay(addr)}`,
-      action: `${TRAY_MENU_ACTIONS.remoteAddrPrefix}${String(index)}`,
-      checked: addr === state.remoteAddr,
-    })
-  })
-  return items
-}
-
 
 /**
  * 托盘菜单限宽（目标 A6）：Electrobun 的菜单项没有 width 概念，超长 label 会把菜单
@@ -373,32 +350,56 @@ export function trayMenu(state: TrayState): TrayMenuItem[] {
     { type: 'divider' },
   ]
   // 「PROFILE 窗口」（旧壳 tray.rs:63-73 的等价物）：每 profile 一层子菜单，头部
-  // `● name · port（聚焦中）` / `name · port（运行中）` / 未运行裸名；里面是「聚焦窗口」
-  // （未运行时「在新窗口打开 <name>」）+ 运行中的「退出（停止实例）」。末尾挂「新建 Profile…」
-  // 与「迁移 Profile…」两个顶层入口（F9 的 UI 门面，表单窗由壳进程弹出）。
+  // 「profile 管理」（#241，旧壳 tray.rs:63-73 的等价物）：本地 profile 与远程 dsh 地址
+  // 统一成条目，每条目四个动作：打开/聚焦 → 隐藏·显示窗口 → 重启 → 退出。
+  // 新建/迁移入口挂在子菜单尾部（F9 的 UI 门面，表单窗由壳进程弹出）。
   const rows =
     state.profileRows ??
     profiles.map((profile) => ({
       profile,
+      kind: 'local' as const,
       open: state.openWindows.includes(profile),
+      hidden: false,
       running: profile === state.profile && state.hostRunning,
       port: null as number | null,
       focused: profile === state.profile,
     }))
   const windowItems: TrayMenuItem[] = rows.map((row) => {
+    const isRemote = (row.kind ?? 'local') === 'remote'
+    // 远程条目显示 host[:port]（不含 token）；本地照旧裸名。
+    const name = isRemote && row.profile.startsWith('remote:') ? remoteDisplay(row.profile.slice('remote:'.length)) : row.profile
     const portPart = row.port !== null ? ` · ${row.port}` : ''
+    const remotePart = isRemote ? ' · 远程' : ''
     const head = row.running
-      ? `${row.focused ? '● ' : ''}${row.profile}${portPart}（${row.focused ? '聚焦中' : '运行中'}）`
-      : row.profile
+      ? `${row.focused ? '● ' : ''}${name}${portPart}${remotePart}（${row.focused ? '聚焦中' : '运行中'}）`
+      : `${name}${remotePart}`
+    // #241 每条目四动作；#246 远程条目解锁 打开/显隐/重启（窗口重建），退出仅本地
+    // （远程 dsh 不归本桌面停）——不摆假入口是本文件的既定口径。
     const sub: TrayMenuItem[] = [
       {
         type: 'normal',
-        label: row.open ? '聚焦窗口' : `在新窗口打开 ${row.profile}`,
+        label: row.open ? '聚焦窗口' : `在新窗口打开 ${name}`,
         action: windowAction(row.profile),
         checked: row.focused,
       },
     ]
-    if (row.running) {
+    if (row.open) {
+      sub.push({
+        type: 'normal',
+        label: row.hidden ? '显示窗口' : '隐藏窗口',
+        action: `${TRAY_MENU_ACTIONS.toggleProfileWindow}${row.profile}`,
+      })
+    }
+    if (row.open || row.running) {
+      // #246：远程条目重启 = 窗口销毁重建（数据面重连）；本地照旧。
+      sub.push({
+        type: 'normal',
+        label: '重启',
+        action: `${TRAY_MENU_ACTIONS.restartProfile}${row.profile}`,
+      })
+    }
+    if (!isRemote && (row.open || row.running)) {
+      // #215：退过的实例（没开窗也没在跑）不摆「退出」——服务面已是终态对象，点了走不通。
       sub.push({ type: 'divider' })
       sub.push({
         type: 'normal',
@@ -415,7 +416,7 @@ export function trayMenu(state: TrayState): TrayMenuItem[] {
   )
   items.push({
     type: 'normal',
-    label: 'PROFILE 窗口',
+    label: 'profile 管理',
     submenu: windowItems,
   })
   items.push(
@@ -428,11 +429,6 @@ export function trayMenu(state: TrayState): TrayMenuItem[] {
     },
     // #141：「检查更新」与运行时子菜单同区（都是“把自己这套弄到最新”）。
     ...updateCheckItems(state),
-    {
-      type: 'normal',
-      label: 'dsh 服务地址',
-      submenu: remoteMenuItems(state),
-    },
     {
       type: 'normal',
       label: statusLabel(state),

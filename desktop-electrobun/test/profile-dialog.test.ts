@@ -35,7 +35,7 @@ describe('isSelfMigrate', () => {
 describe('profileDialogHtml', () => {
   test('create：只有目标输入，动作走原生桥而不是 HTTP', () => {
     const html = profileDialogHtml('create', ['desktop'])
-    expect(html).toContain("op: 'create'")
+      expect(html).toContain(": 'create'")
     expect(html).not.toContain('id="source"')
     expect(html).toContain(`"${PROFILE_OP_METHOD}"`)
     // #129：这扇窗是 html 文档，/__shell__/* 永远到不了壳——别再把它写回去
@@ -59,7 +59,7 @@ describe('profileDialogHtml', () => {
   })
   test('migrate：源下拉与覆盖确认，profile 名经转义', () => {
     const html = profileDialogHtml('migrate', ['desktop', '<x>"y"'])
-    expect(html).toContain("op: 'migrate'")
+      expect(html).toContain(": 'migrate'")
     expect(html).toContain('id="source"')
     expect(html).toContain('id="overwrite"')
     expect(html).toContain('&lt;x&gt;&quot;y&quot;')
@@ -182,10 +182,18 @@ function runScript(
   const keydown: ((event: { key: string }) => unknown)[] = []
   const documentStub = {
     getElementById: elementOf,
-    querySelector(selector: string): typeof closeEl | null {
-      if (selector !== `[${DIALOG_CLOSE_ATTR}]`) throw new Error(`harness 不认的选择器：${selector}`)
-      return inputs.titlebar === true ? closeEl : null
-    },
+      querySelector(selector: string): typeof closeEl | null {
+          if (selector === 'input[name="kind"]:checked') return null // stub 环境无 radio：默认 local（#241）
+          if (selector !== `[${DIALOG_CLOSE_ATTR}]`) throw new Error(`harness 不认的选择器：${selector}`)
+          return inputs.titlebar === true ? closeEl : null
+      },
+      // #241：新建弹窗的「本地 | 远程」单选（input[name=kind]）。harness 只提供空集合——
+      // 页面脚本绑 change 监听属于纯 UI 路径，提交分流的逻辑走 submit 时的 kindValue()
+      // （stub 环境无 radio → 默认 local，正好覆盖默认分支）。
+      querySelectorAll(selector: string): unknown[] {
+          if (selector !== 'input[name="kind"]') throw new Error(`harness 不认的选择器：${selector}`)
+          return []
+      },
     addEventListener(event: string, fn: (event: unknown) => unknown) {
       if (event === 'keydown') keydown.push(fn as (event: { key: string }) => unknown)
     },
@@ -236,7 +244,11 @@ function runScript(
 describe('profileDialogHtml 的页面脚本（#129 回归）', () => {
   test('生成的脚本里不出现服务端模板变量（裸引用会变成运行时 ReferenceError）', () => {
     for (const kind of ['create', 'migrate'] as const) {
-      expect(scriptOf(profileDialogHtml(kind, ['desktop']))).not.toContain('kind')
+        // #241 后页面里有 kindValue()/name="kind" 这些合法的本地名字；这条回归要抓的是
+        // 服务端模板变量 ${kind} 漏插值后的裸引用形状（op: kind,）。
+        const script = scriptOf(profileDialogHtml(kind, ['desktop']))
+        expect(script).not.toContain('${kind}')
+        expect(script).not.toMatch(/op:\s*kind\b/)
     }
   })
 
@@ -444,6 +456,19 @@ describe('profileOpRequest（原生桥入参的形状门）', () => {
     expect(profileOpRequest({ op: 'migrate', target: 'b', source: '' })).toBeNull()
     expect(profileOpRequest({ op: 'migrate', target: 'b' })).toBeNull()
   })
+    test('#241 add-remote：只认 http(s) URL', () => {
+        expect(profileOpRequest({ op: 'add-remote', target: 'http://192.168.1.10:3080' })).toEqual({
+            op: 'add-remote',
+            target: 'http://192.168.1.10:3080',
+        })
+        expect(profileOpRequest({ op: 'add-remote', target: 'https://dsh.example.cn/?token=abc' })).toEqual({
+            op: 'add-remote',
+            target: 'https://dsh.example.cn/?token=abc',
+        })
+        expect(profileOpRequest({ op: 'add-remote', target: 'ftp://x' })).toBeNull()
+        expect(profileOpRequest({ op: 'add-remote', target: '不是地址' })).toBeNull()
+        expect(profileOpRequest({ op: 'add-remote' })).toBeNull()
+    })
   test('认不出来的形状一律 null，不猜', () => {
     expect(profileOpRequest(null)).toBeNull()
     expect(profileOpRequest('create')).toBeNull()

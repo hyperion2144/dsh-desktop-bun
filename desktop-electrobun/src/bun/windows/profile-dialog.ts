@@ -17,7 +17,7 @@ import type { CarrierPlatform } from './carrier.ts'
 import { SHELL_RPC_CORE_SOURCE } from '../../../../shared/rpc/core.ts'
 /** Profile 操作的请求体（页面提交 / 壳侧通道共用这个形状） */
 export interface ProfileOpRequest {
-  op: 'create' | 'migrate'
+  op: 'create' | 'migrate' | 'add-remote'
   /** create = 新名称；migrate = 目标名称 */
   target?: string
   /** migrate = 源 profile */
@@ -66,10 +66,20 @@ export function profileOpRequest(value: unknown): ProfileOpRequest | null {
   if (typeof value !== 'object' || value === null) return null
   const raw = value as Record<string, unknown>
   const op = raw['op']
-  if (op !== 'create' && op !== 'migrate') return null
+  if (op !== 'create' && op !== 'migrate' && op !== 'add-remote') return null
   const target = raw['target']
   if (typeof target !== 'string') return null
   if (op === 'create') return { op, target }
+  if (op === 'add-remote') {
+    // 远程 dsh 地址（#241/#9）：只认 http(s) URL；可达性等 #246 的通路接了再验。
+    try {
+      const url = new URL(target)
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+    } catch {
+      return null
+    }
+    return { op, target }
+  }
   // migrate 必须带非空源；overwrite 只认严格 true（与壳其余入参一个口径）。
   const source = raw['source']
   if (typeof source !== 'string' || source === '') return null
@@ -120,7 +130,9 @@ export function profileDialogHtml(
   const busyText = kind === 'create' ? '创建中…' : '迁移中（复制依赖树，可能要一会儿）…'
   const fields =
     kind === 'create'
-      ? `    <label>名称（小写字母、数字、连字符）<input id="target" autofocus></label>`
+      ? `    <label class="check"><input type="radio" name="kind" value="local" checked> 本地 profile</label>
+    <label class="check"><input type="radio" name="kind" value="remote"> 远程 dsh 地址</label>
+    <label id="target-label">名称（小写字母、数字、连字符）<input id="target" autofocus></label>`
       : `    <label>源 profile<select id="source">${profiles
           .map((p) => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`)
           .join('')}</select></label>
@@ -181,6 +193,22 @@ ${fields}
     const f = document.getElementById('f')
     const msg = document.getElementById('msg')
     // 动作经 Electrobun 官方 Typed RPC 原生桥发给壳（#129）：这扇窗是 html 文档，origin 是
+    // #241/#9：新建弹窗的「本地 | 远程」单选——选远程时同一个输入框换成服务地址，
+    // 提交的 op 也换成 add-remote（壳侧写设置；迁移不提供远程形态）。
+    function kindValue() {
+      var checked = document.querySelector('input[name="kind"]:checked')
+      return checked ? checked.value : 'local'
+    }
+    function syncKind() {
+      var remote = kindValue() === 'remote'
+      var label = document.getElementById('target-label')
+      var input = document.getElementById('target')
+      if (label && label.firstChild) label.firstChild.textContent = remote ? '服务地址（http(s)://…，可带 token）' : '名称（小写字母、数字、连字符）'
+      if (input) input.placeholder = remote ? 'http://192.168.1.10:3080/?token=…' : ''
+    }
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="kind"]'), function (radio) {
+      radio.addEventListener('change', syncKind)
+    })
     // views://internal，跟壳的 loopback 不同源——相对 URL 会被解析到 views:// 协议（请求根本
     // 发不出去），换成绝对 loopback URL 又会被准入的同源判据挡掉（Sec-Fetch-Site: cross-site
     // → 403，shared/admission.ts）。原生桥这两道都不过，也不必带视图 token。
@@ -232,7 +260,7 @@ ${fields}
       // async handler 抛出去只变成未处理的 rejection——用户看到的就是「点了没反应」（#129）。
       try {
         const body = {
-          op: '${kind}',
+          op: kindValue() === 'remote' ? 'add-remote' : '${kind}',
           target: (document.getElementById('target') || {}).value || '',
           source: (document.getElementById('source') || {}).value || '',
           overwrite: !!(document.getElementById('overwrite') || {}).checked,

@@ -87,7 +87,8 @@ function makeDeps(overrides: Partial<ProfileSessionDeps> = {}) {
   const deps: ProfileSessionDeps = {
     instanceProfile: 'main',
     createService: async () => fakeService(),
-    createWindow: async () => fakeWindow().win,
+      createWindow: async () => fakeWindow().win,
+      createRemoteWindow: async () => fakeWindow().win,
     closePolicy: () => 'close',
     isQuitting: () => false,
     onQuitRequested: () => {},
@@ -435,4 +436,73 @@ describe('profile-session：焦点与杂项（#179）', () => {
     expect(sessions.originOf('main')).toBe('http://127.0.0.1:65432')
     expect(sessions.originOf('ghost')).toBe('')
   })
+})
+
+describe('profile-session：远程条目（#246）', () => {
+    const REMOTE = 'remote:http://192.168.1.10:3080'
+
+    test('open 走 createRemoteWindow：不起服务面、不 ensureRunning', async () => {
+        const order: string[] = []
+        const { deps } = makeDeps({
+            createService: async () => {
+                order.push('service')
+                return fakeService()
+            },
+            createWindow: async () => {
+                order.push('window')
+                return fakeWindow().win
+            },
+            createRemoteWindow: async () => {
+                order.push('remote-window')
+                return fakeWindow().win
+            },
+        })
+        const sessions = createProfileSessions(deps)
+        const result = await sessions.open(REMOTE)
+        expect(result.ok).toBe(true)
+        expect(order).toEqual(['remote-window'])
+        expect(sessions.get(REMOTE)?.service).toBeNull()
+    })
+
+    test('远程状态：windowOpen 跟窗走，running 恒 false（没有本地宿主）', async () => {
+        const { deps } = makeDeps()
+        const sessions = createProfileSessions(deps)
+        await sessions.open(REMOTE)
+        const state = sessions.get(REMOTE)?.state()
+        expect(state?.windowOpen).toBe(true)
+        expect(state?.running).toBe(false)
+        expect(state?.hostPid).toBe(0)
+        expect(sessions.originOf(REMOTE)).toBe('')
+    })
+
+    test('stop = 关窗销毁记录（远程 dsh 不归本桌面停）；dispose 撤视图 token', async () => {
+        const { deps, revoked } = makeDeps()
+        const sessions = createProfileSessions(deps)
+        await sessions.open(REMOTE)
+        await sessions.stop(REMOTE)
+        expect(sessions.get(REMOTE)).toBeUndefined()
+        expect(sessions.openProfiles()).toEqual([])
+        expect(revoked.length).toBeGreaterThan(0)
+    })
+
+    test('开窗失败：记录回滚，不留下半成品', async () => {
+        const { deps } = makeDeps({
+            createRemoteWindow: async () => {
+                throw new Error('远程拒连')
+            },
+        })
+        const sessions = createProfileSessions(deps)
+        const result = await sessions.open(REMOTE)
+        expect(result.ok).toBe(false)
+        expect(result.ok === false ? result.phase : '').toBe('window')
+        expect(sessions.get(REMOTE)).toBeUndefined()
+    })
+
+    test('serviceProfiles 不含远程条目（restartDsh 的树级重启不碰远程）', async () => {
+        const { deps } = makeDeps()
+        const sessions = createProfileSessions(deps)
+        await sessions.open(REMOTE)
+        expect(sessions.serviceProfiles()).toEqual([])
+        expect(sessions.openProfiles()).toEqual([REMOTE])
+    })
 })

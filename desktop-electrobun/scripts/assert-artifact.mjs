@@ -350,7 +350,7 @@ const REQUIRED_INDEX_MARKERS = ['openDevToolsWindow', 'startupTray', 'createTray
         if (!raw.includes(marker)) problems.push(`${label} 的 app/bun/index.js 缺关键符号：${marker}`)
       }
     }
-  }
+    }
   }
   if (versionLine === undefined) {
     const sample = norm

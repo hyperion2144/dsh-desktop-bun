@@ -13,8 +13,8 @@ const codeOf = (file: string): string =>
 
 describe('通知接线门禁：死配置都接上了真事件（#115）', () => {
   const serviceSource = codeOf('../src/bun/host/service.ts')
-  const indexSource = codeOf('../src/bun/index.ts')
-  const installerSource = codeOf('../src/bun/runtime/runtime-install.ts')
+    const indexSource = codeOf('../src/bun/desktop-shell.ts')
+    const installerSource = codeOf('../src/bun/runtime/runtime-install.ts')
   const settingsSource = codeOf('../src/shared/settings/settings.ts')
 
   test('运行时下载：托盘与面板两条路都汇到带通知的包装，托盘不再用 STARTUP_ERROR 重复报', () => {

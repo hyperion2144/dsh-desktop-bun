@@ -36,6 +36,7 @@ import {
   writeWindowFrame,
 } from './window-state.ts'
 import { planWindowOpen, windowKey } from '../../shared/app/window-targets.ts'
+import { isRemoteProfile } from '../../shared/app/remote-profile.ts'
 import type { ShellService } from '../host/service.ts'
 import type { LaneForwarder } from '../net/lane-forwarder.ts'
 
@@ -80,7 +81,9 @@ export interface ProfileSession {
 
 export interface ProfileSessions {
   open(profile: string): Promise<OpenResult>
-  focus(profile: string): boolean
+    focus(profile: string): boolean
+    /** #241：托盘「隐藏窗口」——只动这个 profile 的窗（显示走 focus()）；没窗返回 false。 */
+    hideWindow(profile: string): boolean
   get(profile: string): ProfileSession | undefined
   list(): ProfileSession[]
   /** 窗口开着的 profile（托盘 openWindows / restartDsh 的重开清单）。 */
@@ -123,7 +126,9 @@ export interface ProfileSessionDeps {
   /** 服务面工厂：壳侧组装 ServiceOptions 后 startService。 */
   createService: (profile: string) => Promise<ShellService>
   /** 窗口工厂：建 BrowserWindow + 挂 RPC（壳侧语义）；事件与状态归本 module。 */
-  createWindow: (profile: string, svc: ShellService) => Promise<BrowserWindow>
+    createWindow: (profile: string, svc: ShellService) => Promise<BrowserWindow>
+    /** 远程窗口工厂（#246）：不起服务面直接建窗；数据面打远程、chrome 桥回本桌面。 */
+    createRemoteWindow: (profile: string) => Promise<BrowserWindow>
   /** 关窗策略（壳注入）：'hidden'=隐藏回托盘 / 'quit'=退进程 / 'close'=只销毁。 */
   closePolicy: (profile: string, win: BrowserWindow) => 'hidden' | 'quit' | 'close'
   isQuitting: () => boolean
@@ -196,7 +201,7 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
     return null
   }
 
-  function openProfileList(): string[] {
+    function openProfileList(): string[] {
     return [...records.values()].filter((record) => record.window !== null).map((record) => record.profile)
   }
 
@@ -204,7 +209,7 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
     return records.get(profile)
   }
 
-  function makeRecord(profile: string, service: ShellService): SessionRecord {
+    function makeRecord(profile: string, service: ShellService | null): SessionRecord {
     const record: SessionRecord = {
       profile,
       service,
@@ -505,8 +510,10 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
     return record.session
   }
 
-  async function startOpen(profile: string): Promise<OpenResult> {
-    let svc: ShellService
+      async function startOpen(profile: string): Promise<OpenResult> {
+          // #246：远程条目没有本地 worker——不起服务面/不 spawn，直接建窗。
+          if (isRemoteProfile(profile)) return startRemoteOpen(profile)
+          let svc: ShellService
     try {
       svc = await ensureService(profile)
     } catch (error) {
@@ -524,7 +531,34 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
     } catch (error) {
       return { ok: false, phase: 'window', reason: messageOf(error) }
     }
-  }
+      }
+
+      /**
+       * #246：远程条目开窗。数据面（dsh 页面/它的 /api）打远程地址，chrome 桥（preload RPC）
+       * 回本桌面——建窗回调（壳侧 createRemoteWindow）里定。会话记录 service=null：托盘状态
+       * 全由窗口推导，stop = 关窗销毁记录（远程 dsh 不归本桌面停）。
+       */
+      async function startRemoteOpen(profile: string): Promise<OpenResult> {
+          let record = recordFor(profile)
+          if (record === undefined) {
+              record = makeRecord(profile, null)
+              records.set(profile, record)
+          } else if (record.window !== null) {
+              return { ok: true, session: record.session }
+          }
+          try {
+              const win = await deps.createRemoteWindow(profile)
+              record.window = win
+              focusedProfile = profile
+              restoreStartMaximized(record, win)
+              wireEvents(record, win)
+              deps.onWindowsChanged()
+              return { ok: true, session: record.session }
+          } catch (error) {
+              records.delete(profile)
+              return { ok: false, phase: 'window', reason: messageOf(error) }
+          }
+      }
 
   async function ensureService(profile: string): Promise<ShellService> {
     const before = recordFor(profile)
@@ -545,11 +579,19 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
     return started
   }
 
-  async function stopRecord(record: SessionRecord): Promise<void> {
-    if (record.service === null) {
-        log.debug(`退出实例：${record.profile} 没有在跑的服务面，忽略`)
-      return
-    }
+      async function stopRecord(record: SessionRecord): Promise<void> {
+          if (record.service === null) {
+              // #246：远程条目没有本地实例可停——关窗销毁记录即「退出」；远程 dsh 本体不归本桌面管。
+              record.stopping = true
+              try {
+                  record.window?.close()
+              } finally {
+                  record.stopping = false
+                  records.delete(record.profile)
+                  deps.onWindowsChanged()
+              }
+              return
+          }
     if (record.retired) {
         log.debug(`退出实例：${record.profile} 的实例已经退过了，忽略`)
       return
@@ -593,17 +635,24 @@ export function createProfileSessions(deps: ProfileSessionDeps): ProfileSessions
       return pending
     },
 
-    focus(profile: string): boolean {
-      const record = recordFor(profile)
-      if (record === undefined || record.window === null) return false
-      record.window.unminimize()
-      record.window.show()
-      record.window.activate()
-      focusedProfile = profile
-      deps.onWindowsChanged()
-      return true
-    },
+      focus(profile: string): boolean {
+          const record = recordFor(profile)
+          if (record === undefined || record.window === null) return false
+          record.window.unminimize()
+          record.window.show()
+          record.window.activate()
+          focusedProfile = profile
+          deps.onWindowsChanged()
+          return true
+      },
 
+      hideWindow(profile: string): boolean {
+          const record = recordFor(profile)
+          if (record === undefined || record.window === null) return false
+          record.window.hide()
+          deps.onWindowsChanged()
+          return true
+      },
     get: (profile) => recordFor(profile)?.session,
 
     list: () => [...records.values()].map((record) => record.session),

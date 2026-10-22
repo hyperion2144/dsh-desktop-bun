@@ -14,7 +14,7 @@
     "prepare:bundle": "bun run scripts/prepare-bundle.mjs",
     "prepare:installer-assets": "bun run scripts/prepare-installer-assets.mjs",
     "build:native": "bun run scripts/build-native.mjs",
-    "build": "bun run build:native && bun run prepare:bundle && hutch electrobun build --env=stable && bun run scripts/sign-app.mjs",
+    "build": "bun run build:native && bun run prepare:bundle && hutch electrobun build --env=stable && bun run scripts/patch-launcher-identity.mjs && bun run scripts/sign-app.mjs",
     "sign:app": "bun run scripts/sign-app.mjs",
     "build:installer": "bun run scripts/build-windows-installer.mjs",
     "assert:artifact": "bun run scripts/assert-artifact.mjs"

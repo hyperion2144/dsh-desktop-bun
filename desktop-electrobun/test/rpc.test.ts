@@ -27,12 +27,12 @@ function harness(overrides: Partial<CommandDeps> = {}): {
   deps: CommandDeps
   home: string
   table: Record<string, (args: Record<string, unknown>, context?: RpcContext) => unknown | Promise<unknown>>
-  calls: { log: string[]; external: string[]; restarts: number; closed: number; sounds: string[] }
-  cleanup: () => void
+    calls: { log: string[]; external: string[]; restarts: number; closed: number; exits: number; sounds: string[] }
+    cleanup: () => void
 } {
   const home = tempHome()
-  let settings: DesktopSettings = loadSettings({ home }).settings
-  const calls = { log: [] as string[], external: [] as string[], restarts: 0, closed: 0, sounds: [] as string[] }
+    let settings: DesktopSettings = loadSettings({ home }).settings
+    const calls = { log: [] as string[], external: [] as string[], restarts: 0, closed: 0, exits: 0, sounds: [] as string[] }
   const deps: CommandDeps = {
     home,
     profile: 'desktop',
@@ -56,7 +56,10 @@ function harness(overrides: Partial<CommandDeps> = {}): {
     openExternal: (url) => calls.external.push(url),
     closeWindow: () => {
       calls.closed += 1
-    },
+      },
+      exitInstance: async () => {
+          calls.exits += 1
+      },
     playSound: (name) => {
       calls.sounds.push(name)
       return true
@@ -358,9 +361,11 @@ describe('命令表', () => {
         'https://example.com',
         'x-apple.systempreferences:com.apple.Preference.Notifications',
       ])
-      await h.table.close_current_window?.({})
-      await h.table.exit_window_instance?.({})
-      expect(h.calls.closed).toBe(2)
+        await h.table.close_current_window?.({})
+        await h.table.exit_window_instance?.({})
+        // #244：关窗命令只关窗；退出命令走 exitInstance（停实例），不再冒充关窗。
+        expect(h.calls.closed).toBe(1)
+        expect(h.calls.exits).toBe(1)
       // 危险协议仍然拦在命令面（RPC 直达主进程，没有第二层壳）
       expect(() => h.table.open_external?.({ url: 'javascript:alert(1)' })).toThrow('不是可外部打开的 URL')
     } finally {

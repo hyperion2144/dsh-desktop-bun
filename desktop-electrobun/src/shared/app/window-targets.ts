@@ -23,9 +23,11 @@ export function planWindowOpen(profile: string, open: readonly string[]): Window
 
 export type WindowCloseAction = 'hide-to-tray' | 'destroy'
 
-/** 关窗语义：主窗（启动 profile）隐藏回托盘，其余窗口只销毁 UI（实例继续跑）。 */
-export function closeAction(profile: string, bootProfile: string): WindowCloseAction {
-  return profile === bootProfile ? 'hide-to-tray' : 'destroy'
+/** 关窗语义（#244）：所有窗口的关闭按钮一律隐藏回托盘（DSH 保持运行）；退出 profile
+ *  走侧边栏「退出本窗口」（exit_window_instance）或托盘「退出（停止实例）」。
+ *  主动销毁（重启/停实例）由 stopping 直关，不经过这里。 */
+export function closeAction(_profile: string, _bootProfile: string): WindowCloseAction {
+  return 'hide-to-tray'
 }
 
 /**

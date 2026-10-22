@@ -309,6 +309,15 @@ export function packagedResourcesFromProcess(
 export type LauncherRunResult = { status: number; stdout: string; stderr?: string }
 export type LauncherRun = (argv: string[], timeoutMs: number) => LauncherRunResult
 
+/** #243 Windows CI 实抓：父进程探测把 pwsh 当 launcher 返回，主进程 spawn pwsh 当壳
+ *  → pwsh 无 stdin 立退 → watchdog 死循环。Electrobun 约定 launcher 可执行文件就叫
+ *  launcher / launcher.exe（assert:artifact 也在断言它），探测结果名字不对就不是它——
+ *  宁可 null 让调用方走 sibling/cache 兜底，也不能拿任意 exe 当自家 launcher。 */
+function looksLikeLauncherExecutable(path: string): boolean {
+  const base = path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
+  return /^launcher(\.exe)?$/i.test(base)
+}
+
 /** launcher 可执行文件路径：Electrobun 拉起 app 时会带 ELECTROBUN_LAUNCHER_PID；缺了退回 ppid。
  *  拿 PID 按平台解析 exe 路径（win32 用 PowerShell CIM，darwin 用 ps，linux 读 /proc）。
  *  任何一步不确定都返回 null——调用方逐级兜底（进程锚 → import.meta 链）。 */
@@ -330,14 +339,19 @@ export function resolveLauncherExecutablePath(
       8_000,
     )
     const line = out.status === 0 ? out.stdout.split(/\r?\n/).find((candidate) => candidate.trim() !== '') : undefined
-    return line === undefined || line.trim() === '' ? null : line.trim()
+    const candidate = line === undefined || line.trim() === '' ? null : line.trim()
+    return candidate !== null && looksLikeLauncherExecutable(candidate) ? candidate : null
   }
   if (platform === 'darwin') {
     const out = run(['/bin/ps', '-p', pid, '-o', 'comm='], 4_000)
     const line = out.status === 0 ? out.stdout.split('\n').find((candidate) => candidate.trim() !== '') : undefined
-    return line === undefined || line.trim() === '' ? null : line.trim()
+    const candidate = line === undefined || line.trim() === '' ? null : line.trim()
+    return candidate !== null && looksLikeLauncherExecutable(candidate) ? candidate : null
   }
-  if (platform === 'linux') return readlink(`/proc/${pid}/exe`)
+  if (platform === 'linux') {
+    const target = readlink(`/proc/${pid}/exe`)
+    return target !== null && looksLikeLauncherExecutable(target) ? target : null
+  }
   return null
 }
 

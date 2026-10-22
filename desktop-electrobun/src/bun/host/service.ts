@@ -90,6 +90,8 @@ export interface ServiceOptions {
   platform?: NodeJS.Platform
   /** 页面请求关窗（`close_current_window` / `exit_window_instance`） */
   onCloseWindow?: () => void
+  /** #244：页面请求退出本实例（`exit_window_instance`）＝关窗 + 停本 profile 的 dsh 与服务面。 */
+  onExitInstance?: () => Promise<void>
   clientVersion: string
   /** 这个服务面负责哪个 profile（多窗口下每 profile 一份；缺省按 DSH_PROFILE > 设置 > 默认） */
   profile?: string
@@ -1347,6 +1349,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       bootPayload: () => bootPayload,
       showContextMenu: options.onContextMenu,
       closeWindow: options.onCloseWindow,
+      exitInstance: options.onExitInstance,
       playSound: (name) => notifier.previewSound(name),
       playSystemSound: () => {
         const command = systemDefaultSoundCommand(options.platform ?? process.platform)

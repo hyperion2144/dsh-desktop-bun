@@ -17,11 +17,11 @@ describe('多窗口纯逻辑', () => {
     expect(planWindowOpen('web', [])).toBe('create')
   })
 
-  test('主窗关窗回托盘，其余窗口只销毁 UI（实例继续跑）', () => {
-    expect(closeAction('desktop', 'desktop')).toBe('hide-to-tray')
-    expect(closeAction('web', 'desktop')).toBe('destroy')
-    expect(closeAction('desktop', 'web')).toBe('destroy')
-  })
+    test('关闭一律隐藏回托盘（#244）：主窗副窗同语义，退出走侧边栏/托盘', () => {
+        expect(closeAction('desktop', 'desktop')).toBe('hide-to-tray')
+        expect(closeAction('web', 'desktop')).toBe('hide-to-tray')
+        expect(closeAction('desktop', 'web')).toBe('hide-to-tray')
+    })
 
   test('第一个窗口用记下来的几何（原对象不许被改）', () => {
     const frame = { x: 10, y: 20, width: 800, height: 600 }

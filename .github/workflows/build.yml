@@ -226,6 +226,7 @@ jobs:
           # 内置树随包断言：Windows 是两段式（安装位 = launcher + payload 归档，app\dsh
           # 要等首次启动自解压才物化），所以放到 SHELL-READY 之后断言（见下方）。
           $smokeHome = Join-Path $env:RUNNER_TEMP 'dsh-smoke-home'
+           New-Item -ItemType Directory -Force -Path $smokeHome | Out-Null
           $log = Join-Path $env:RUNNER_TEMP 'smoke-out.log'
           $env:DSH_HOME = $smokeHome
           $env:DSH_SHELL_PROFILE_MODE = 'fresh'
@@ -233,7 +234,8 @@ jobs:
           $env:DSH_SHELL_PAGE_PORT = '6451'
           $env:DSH_DESKTOP_PORT = '6452'
           $env:DSH_MOBILE_LANE_PORT = '6453'
-          $env:DSH_DESKTOP_AUTO_QUIT = '20000'
+           # Windows CI 机器慢：DSH worker 冷启动实测 >20s，AUTO_QUIT 得等它就绪完再退
+           $env:DSH_DESKTOP_AUTO_QUIT = '120000'
           $env:DSH_DESKTOP_NO_SINGLETON = '1'
           # launcher 自己知道怎么引导自己的载荷（macOS 实测裸跑即可），不用替它拼 main.js 参数
           # 提速：runner 的 Defender 实时扫描会把 31k 文件的解压拖到分钟级
@@ -259,6 +261,10 @@ jobs:
           $mainJs = Join-Path $payloadRes 'main.js'
           if (-not (Test-Path $mainJs)) { throw ("安装树里没有 main.js：{0}" -f $mainJs) }
           Write-Host ("冒烟：bun = {0}" -f $bunExe.FullName)
+          # 主进程拉壳要 launcher 路径：绕过 launcher 的冒烟里 ppid 是 pwsh（CI 实抓：探测把
+          # pwsh 当 launcher，spawn pwsh 当壳 → watchdog 死循环）。显式声明走第一优先 env。
+          $appExe = Get-ChildItem $appRoot.FullName -Filter 'launcher.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -ne $appExe) { $env:DSH_SHELL_LAUNCHER = $appExe.FullName; Write-Host ("冒烟：DSH_SHELL_LAUNCHER = {0}" -f $appExe.FullName) }
           $log2 = Join-Path $env:RUNNER_TEMP 'smoke-payload.log'
           Write-Host ("冒烟：直接拉起包内载荷：{0} {1}" -f $bunExe, $mainJs)
           Start-Process -FilePath $bunExe -ArgumentList "`"$mainJs`"" -WorkingDirectory $payloadRes -RedirectStandardOutput $log2 -RedirectStandardError ($log2 + '.err')
@@ -272,6 +278,8 @@ jobs:
           if (-not $ready) {
             Write-Host '--- stdout ---'; Get-Content $log2 -ErrorAction SilentlyContinue | Select-Object -First 30
             Write-Host '--- stderr ---'; Get-Content ($log2 + '.err') -ErrorAction SilentlyContinue | Select-Object -First 30
+            Write-Host '--- shell-relay.log（壳 stdout/stderr 尾巴） ---'; Get-Content (Join-Path $smokeHome 'shell-relay.log') -ErrorAction SilentlyContinue | Select-Object -Last 40
+            Write-Host '--- shell.log（壳 tee 落盘） ---'; Get-Content (Join-Path $smokeHome 'shell.log') -ErrorAction SilentlyContinue | Select-Object -Last 40
             throw '600 秒内未拿到 SHELL-READY（直接拉起包内载荷）'
           }
           (Get-Content $log -Raw | Select-String -Pattern 'SHELL-READY.*').Matches.Value | Write-Host
