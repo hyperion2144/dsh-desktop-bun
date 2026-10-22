@@ -294,7 +294,7 @@ describe('parseTrayAction', () => {
   })
 
     describe('#241 profile 管理（本地+远程统一条目）', () => {
-        test('远程条目渲染：head 带「· 远程」，动作全禁用（#246 接入前不摆假入口）', () => {
+        test('远程条目渲染：head 带「· 远程」；打开可用、无「退出」（远程 dsh 不归本桌面停）', () => {
             const items = trayMenu(
                 baseState({
                     profileRows: [
@@ -304,9 +304,10 @@ describe('parseTrayAction', () => {
             )
             const sub = (findItem(items, 'profile 管理')?.submenu ?? [])[0] as NormalItem
             expect(sub.label).toBe('dsh.example.cn · 远程')
-            const actions = (sub.submenu ?? []).filter((item): item is NormalItem => isNormal(item))
-            expect(actions.length > 0).toBe(true)
-            expect(actions.every((item) => item.enabled === false)).toBe(true)
+            const labels = (sub.submenu ?? []).filter((item): item is NormalItem => isNormal(item)).map((item) => item.label)
+            // #246：通路已接，打开/显隐可用；重启只在窗口开着时出现；退出永远不摆。
+            expect(labels[0]).toBe('在新窗口打开 dsh.example.cn')
+            expect(labels).not.toContain('退出（停止实例）')
         })
 
         test('开着窗的本地条目四动作：聚焦/隐藏/重启/退出，restart·toggle 动作可解析', () => {

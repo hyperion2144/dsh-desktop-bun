@@ -373,15 +373,14 @@ export function trayMenu(state: TrayState): TrayMenuItem[] {
     const head = row.running
       ? `${row.focused ? '● ' : ''}${name}${portPart}${remotePart}（${row.focused ? '聚焦中' : '运行中'}）`
       : `${name}${remotePart}`
-    // #241 每条目四动作。远程通路 #246 接入前先禁用——不摆假入口是本文件的既定口径，
-    // 点了没反应比没有更糟。
+    // #241 每条目四动作；#246 远程条目解锁 打开/显隐/重启（窗口重建），退出仅本地
+    // （远程 dsh 不归本桌面停）——不摆假入口是本文件的既定口径。
     const sub: TrayMenuItem[] = [
       {
         type: 'normal',
         label: row.open ? '聚焦窗口' : `在新窗口打开 ${name}`,
         action: windowAction(row.profile),
         checked: row.focused,
-        enabled: !isRemote,
       },
     ]
     if (row.open) {
@@ -391,12 +390,15 @@ export function trayMenu(state: TrayState): TrayMenuItem[] {
         action: `${TRAY_MENU_ACTIONS.toggleProfileWindow}${row.profile}`,
       })
     }
-    if (!isRemote && (row.open || row.running)) {
+    if (row.open || row.running) {
+      // #246：远程条目重启 = 窗口销毁重建（数据面重连）；本地照旧。
       sub.push({
         type: 'normal',
         label: '重启',
         action: `${TRAY_MENU_ACTIONS.restartProfile}${row.profile}`,
       })
+    }
+    if (!isRemote && (row.open || row.running)) {
       // #215：退过的实例（没开窗也没在跑）不摆「退出」——服务面已是终态对象，点了走不通。
       sub.push({ type: 'divider' })
       sub.push({

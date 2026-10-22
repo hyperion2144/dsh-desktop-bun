@@ -59,6 +59,8 @@ import { attachProfileOpRpc } from './commands/profile-op-rpc.ts'
 import type { UpdateNoticeCheckResult } from './commands/update-notice-check.ts'
 import { confirmModalScript } from './windows/input-modal.ts'
 import { navRulesFor } from '../shared/net/nav-rules.ts'
+import { normalizeRemoteUrl, remoteDisplay, remoteOrigin } from '../shared/net/remote.ts'
+import { remoteProfileAddress, remoteProfileId } from '../shared/app/remote-profile.ts'
 import {
   defaultWindowFrame,
   readWindowFrame,
@@ -240,6 +242,7 @@ const sessions = createProfileSessions({
   instanceProfile,
   createService: (profile) => startService(serviceOptionsFor(profile)),
   createWindow: (profile, svc) => createProfileWindow(profile, svc),
+  createRemoteWindow: (profile) => createRemoteWindow(profile),
   closePolicy: (profile, win) => performClosePolicy(win, profile),
   isQuitting: () => quitting,
   onQuitRequested: () => void shutdown(),
@@ -462,17 +465,21 @@ function trayState(): TrayState {
             focused: sessions.focused()?.profile === profile,
           }
         }),
-        // #241/#6：远程 dsh 地址以独立条目进「profile 管理」；远程通路（开窗/重启）在
-        // #246 接入前先只读展示，菜单侧会把动作禁用。
-        ...settings.remoteList.map((addr) => ({
-          profile: `remote:${addr}`,
-          kind: 'remote' as const,
-          open: false,
-          hidden: false,
-          running: false,
-          port: null,
-          focused: false,
-        })),
+        // #241/#6：远程 dsh 地址以独立条目进「profile 管理」；#246 通路已接：开窗/显隐/重启（窗口重建）。
+        ...settings.remoteList.map((addr) => {
+          const id = remoteProfileId(addr)
+          const sessionState = sessions.get(id)?.state()
+          const windowOpen = sessionState?.windowOpen ?? false
+          return {
+            profile: id,
+            kind: 'remote' as const,
+            open: windowOpen,
+            hidden: windowOpen && !sessions.inFront(id),
+            running: false,
+            port: null,
+            focused: sessions.focused()?.profile === id,
+          }
+        }),
       ],
     hostRunning: uiService().state.hostPid > 0,
     // #117：服务面先于 DSH 存在，所以托盘在 DSH 没起来/起不来时照样拿得到真相，
@@ -760,6 +767,49 @@ async function createProfileWindow(profile: string, svc: ShellService): Promise<
   console.log(`[shell] 建窗：${windowKey(profile)}（${svc.state.pageUrl}）`)
   // 启动恢复最大化（D3/#73）、dom-ready/focus/blur/will-close/close/resize/move 的
   // 事件接线与 per-profile 状态，全部在 profile-session.ts（C1，#179）。
+  return win
+}
+/**
+ * #246：远程条目窗口。数据面（dsh 页面与其 /api）直接打远程地址；chrome 桥回本桌面——
+ * preload 的 RPC origin 注本桌面服务面，页面的桌面 chrome（侧边栏/标题栏命令）经官方 RPC
+ * 落到本桌面壳，重启等命令由壳按 remote: 身份处理。导航白名单只放远程 origin。
+ */
+async function createRemoteWindow(profile: string): Promise<BrowserWindow> {
+  const addr = remoteProfileAddress(profile)
+  const normalized = addr === null ? null : normalizeRemoteUrl(addr)
+  if (normalized === null) throw new Error(`远程条目地址无效：${profile}`)
+  const boot = uiService()
+  const index = sessions.openProfiles().length
+  const frame = index === 0 ? restoreWindowFrame(profile) : offsetFrame(restoreWindowFrame(profile), index)
+  const grant = views.issue('shell', profile, windowKey(profile))
+  // 三键目标窗：闭包面（构造前声明；官方 RPC 请求到达时 win 已赋值）。与本地窗同款。
+  let win: BrowserWindow
+  const rpcWindow = {
+    minimize: () => win.minimize(),
+    isMaximized: () => win.isMaximized(),
+    unmaximize: () => win.unmaximize(),
+    maximize: () => win.maximize(),
+    close: () => {
+      // 关闭走与本地窗同一套策略（主窗隐藏回托盘，其余销毁）。
+      const action = performClosePolicy(win, profile)
+      if (action === 'close') win.close()
+      else if (action === 'quit') void shutdown()
+    },
+    getFrame: () => win.getFrame(),
+  }
+  // chrome 桥指回本桌面 boot 服务面的 router：远程页面的桌面 chrome 由本桌面壳接管（#246）。
+  const shellRpcHandle = await attachShellRpc({ router: () => boot.rpcRouter(), grant, window: rpcWindow, workArea: workAreaForFrame })
+  win = new BrowserWindow({
+    navigationRules: navRulesFor({ origin: remoteOrigin(normalized) }),
+    title: `${APP_NAME} · ${remoteDisplay(normalized)}`,
+    url: normalized,
+    renderer,
+    preload: bootPreloadScript(locale, platform, boot.state.origin, grant.token),
+    rpc: shellRpcHandle.rpc,
+    titleBarStyle: 'hiddenInset',
+    frame,
+  })
+  console.log(`[shell] 建远程窗：${windowKey(profile)}（${normalized}）`)
   return win
 }
 
