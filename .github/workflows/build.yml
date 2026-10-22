@@ -278,6 +278,8 @@ jobs:
           if (-not $ready) {
             Write-Host '--- stdout ---'; Get-Content $log2 -ErrorAction SilentlyContinue | Select-Object -First 30
             Write-Host '--- stderr ---'; Get-Content ($log2 + '.err') -ErrorAction SilentlyContinue | Select-Object -First 30
+            Write-Host '--- shell-relay.log（壳 stdout/stderr 尾巴） ---'; Get-Content (Join-Path $smokeHome 'shell-relay.log') -ErrorAction SilentlyContinue | Select-Object -Last 40
+            Write-Host '--- shell.log（壳 tee 落盘） ---'; Get-Content (Join-Path $smokeHome 'shell.log') -ErrorAction SilentlyContinue | Select-Object -Last 40
             throw '600 秒内未拿到 SHELL-READY（直接拉起包内载荷）'
           }
           (Get-Content $log -Raw | Select-String -Pattern 'SHELL-READY.*').Matches.Value | Write-Host
