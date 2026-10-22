@@ -10,6 +10,7 @@ import { installApplicationMenu } from './windows/menu.ts'
 import { deriveMaximized, toggleWindowMaximize, windowMaxState, type WindowMaxState } from './windows/window-max.ts'
 import { pickWorkArea } from './windows/screen-work-area.ts'
 import { installShellConsoleTee, resolveShellLogFile } from './platform/shell-log.ts'
+import { runDaemon } from './daemon/run.ts'
 import { bootPreloadScript } from './preload.ts'
 import { attachShellRpc } from './commands/rpc-bridge.ts'
 import { startService, type ServiceOptions, type ShellService } from './host/service.ts'
@@ -131,7 +132,10 @@ if (build.defaultRenderer !== expectedDefaultRenderer) {
   console.warn(`[shell] defaultRenderer=${build.defaultRenderer} 与平台期望 ${expectedDefaultRenderer} 不符；建窗时显式传 renderer 兜住`)
 }
 
-const noWindow = process.env.DSH_SHELL_NO_WINDOW === '1'
+// #240 守护进程模式：不建任何窗口，只建托盘空转（生命周期编排入口）。
+// prototype 阶段复用 noWindow 全套跳窗语义 + 托盘放行；正式形态在 #242 落地。
+const daemonMode = process.env.DSH_SHELL_DAEMON === '1'
+const noWindow = process.env.DSH_SHELL_NO_WINDOW === '1' || daemonMode
 /** 壳平台名：与旧壳 body[data-dsh-desktop-platform] 契约同名。 */
 const platform = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
 // macOS 的 Cmd+C/Cmd+V 由 NSMenu 的选择器驱动（见 menu.ts），不装菜单就没有系统剪贴板快捷键。
@@ -1389,8 +1393,9 @@ const pushStage = (): void => {
  * 换一版再试、能退出。
  */
 const startupTray = (): void => {
-  // 无窗口模式（CI/黑盒）不建托盘——那里没有窗口可隐藏，托盘只会碍事
-  if (noWindow) return
+  // 无窗口模式（CI/黑盒）不建托盘——那里没有窗口可隐藏，托盘只会碍事；
+  // 守护进程例外：托盘就是守护的全部 UI（#240）。
+  if (noWindow && !daemonMode) return
   const image = trayImagePath()
   shellLog.debug(`托盘图标：${image ?? '（未找到）'}`)
   if (image === null) {
@@ -1524,11 +1529,26 @@ splash = startupSplash()
 // 窗口类默认改写让主窗/后续弹窗不再走系统白框回退；失败只记日志不拖累启动。
 if (!noWindow) applyWindowsIcon(shellLog, windowIconCandidates(dirname(process.execPath)))
 startupTray()
+if (daemonMode) {
+  // #240/#242 守护骨架：角色锁 → profile 注册表 → 控制通道（壳拉起等 #243 接线）。
+  // 让位（已有守护）即退；就位则继续走下面的空转收尾（dshStarted=false 跳过 DSH，窗口被 noWindow 跳过）。
+  const daemon = await runDaemon({
+    appSupport: appSupportDir(),
+    launcherExe: resolveLauncherForRelaunch().launcherExe,
+    shellLogFile: join(dirname(resolveShellLogFile(process.env)), 'shell-relay.log'),
+    onLog: shellLog,
+  })
+  if (daemon.role === 'yielded') process.exit(0)
+  void daemon
+}
 
 // DSH。就这一步失败也**不退出**：托盘已经在了，状态行摆着原因，
 // 用户能换一个运行时版本再试，也能从托盘退出（旧行为是报错→30 秒→自己退掉，等于把自救入口没收走）。
 let dshStarted = true
-try {
+if (daemonMode) {
+  // #240 daemon prototype：守护不跑 DSH worker（服务面留壳内给托盘/设置；DSH 归 profile 壳，#242/#243 落地）。
+  dshStarted = false
+} else try {
   await bootService.ensureRunning()
 } catch (error) {
   dshStarted = false
