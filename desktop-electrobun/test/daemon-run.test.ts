@@ -211,6 +211,43 @@ describe('runDaemon：重启与 watchdog', () => {
                         rmSync(dir, { recursive: true, force: true })
                 }
         })
+
+        test('#247 退出矩阵：exit + exitIntent=quit ⇒ 主进程跟随退出（stop+exit），不再重拉', async () => {
+                const dir = mkdtempSync(join(tmpdir(), 'daemon-run-'))
+                const fake = fakeSpawn([111])
+                const gate = countedSleep(3)
+                const exits: number[] = []
+                try {
+                        const handle = await runDaemon(
+                                baseOptions(dir, {
+                                        isAlive: () => true,
+                                        sleepImpl: gate.sleep,
+                                        spawnShellImpl: fake.spawn,
+                                        killShellImpl: async () => ({ dead: true, via: 'SIGTERM' }),
+                                        processExitImpl: (code) => exits.push(code),
+                                }),
+                        )
+                                try {
+                                        // quit 会让主进程当场 stop 控制通道：连接被强断（ECONNRESET）正是预期，
+                                        // 包一层——只有「请求发出去了」这一个要求。
+                                        await postEvent(handle.control!.origin, {
+                                                type: 'exit',
+                                                profile: 'desktop',
+                                                pid: 111,
+                                                exitIntent: 'quit',
+                                        }).catch(() => { })
+                                        await settleUntil(() => exits.length > 0)
+                                        expect(exits).toEqual([0])
+                                        // 不重拉：全退口径，fake.calls 停在 boot 那一次。
+                                        expect(fake.calls).toHaveLength(1)
+                                } finally {
+                                        // quit 已让主进程收摊，stop 兜底不抛。
+                                        await handle.stop().catch(() => { })
+                                }
+                        } finally {
+                                rmSync(dir, { recursive: true, force: true })
+                }
+        })
 })
 
 describe('runDaemon：activate（再点图标）', () => {

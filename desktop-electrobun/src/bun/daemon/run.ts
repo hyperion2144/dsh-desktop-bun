@@ -41,6 +41,8 @@ export interface RunDaemonOptions {
   spawnShellImpl?: typeof spawnShell
   /** 注入杀壳（重拉收割/stop 测试用）；缺省真 TERM→KILL 梯次 */
   killShellImpl?: typeof killShell
+  /** 注入进程退出（quit 意图测试用）；缺省真 process.exit */
+  processExitImpl?: (code: number) => void
   /**
    * 壳侧 CEF 身份覆盖（#243 冒烟实抓：同 identifier ⇒ CEF ProcessSingleton 互斥）。
    * 空缺省不透传（行为同旧版：与主进程共用目录——升级包 patch 未就位时的降级面）。
@@ -71,6 +73,7 @@ export async function runDaemon(options: RunDaemonOptions): Promise<DaemonHandle
   const watchdogIntervalMs = options.watchdogIntervalMs ?? 2_000
   const doSpawn = options.spawnShellImpl ?? spawnShell
   const doKill = options.killShellImpl ?? killShell
+  const processExit = options.processExitImpl ?? ((code: number) => process.exit(code))
   const lockFile = daemonInstanceFile(options.appSupport)
   const profile = options.defaultProfile ?? 'desktop'
   let shellPid: number | null = null
@@ -128,11 +131,20 @@ export async function runDaemon(options: RunDaemonOptions): Promise<DaemonHandle
     onEvent: async (event) => {
 
       if (event.type !== 'exit') return
-      if (event.exitIntent !== 'restart') return
-      // 壳请求重启：它已自行退出（reportExit('restart') 后自杀），主进程立即重拉。
-      const entry = registry.get(event.profile)
-      log?.info(`壳请求重启（pid=${String(event.pid)}）→ 重拉`)
-      await spawnShellNow(entry?.openProfiles ?? undefined)
+      if (event.exitIntent === 'restart') {
+        // 壳请求重启：它已自行退出（reportExit('restart') 后自杀），主进程立即重拉。
+        const entry = registry.get(event.profile)
+        log?.info(`壳请求重启（pid=${String(event.pid)}）→ 重拉`)
+        await spawnShellNow(entry?.openProfiles ?? undefined)
+        return
+      }
+      if (event.exitIntent === 'quit') {
+        // #247 退出矩阵：win/linux 的「退出应用」连主进程一起退（macOS 不发 quit，留守值守
+        // 等下一次激活）。壳已自行退出，这里补一次收割兑底再收摊。
+        log?.info(`壳请求退出（pid=${String(event.pid)}）→ 主进程跟随退出`)
+        await stop({ killShell: true })
+        processExit(0)
+      }
     },
     onActivate: async () => {
       // 再点图标的激活意图：壳没跑才拉；壳活着幂等不动（窗口聚焦归壳自己，#243 拍板）。
@@ -180,7 +192,7 @@ export async function runDaemon(options: RunDaemonOptions): Promise<DaemonHandle
   const stop = async (stopOptions?: { killShell?: boolean }): Promise<void> => {
     stopped = true
     if (stopOptions?.killShell === true && shellPid !== null && shellPid !== process.pid) {
-      await killShell({ pid: shellPid, isAlive })
+      await doKill({ pid: shellPid, isAlive })
     }
     control.stop()
     releaseDaemonRole(lockFile, process.pid)

@@ -14,6 +14,8 @@ import { deriveMaximized, toggleWindowMaximize, windowMaxState, type WindowMaxSt
 import { pickWorkArea } from './windows/screen-work-area.ts'
 import { installShellConsoleTee, resolveShellLogFile } from './platform/shell-log.ts'
 import { createShellReporter } from './daemon/shell-reporter.ts'
+import { SHELL_RESTORE_PROFILES_ENV } from './daemon/control.ts'
+import { isRemoteProfile } from '../shared/app/remote-profile.ts'
 import { bootPreloadScript } from './preload.ts'
 import { attachShellRpc } from './commands/rpc-bridge.ts'
 import { startService, type ServiceOptions, type ShellService } from './host/service.ts'
@@ -824,6 +826,59 @@ async function openProfileWindow(profile: string): Promise<void> {
 let restartingShell = false
 
 /**
+ * #247：重启界面的立窗段（restartDsh 与单 profile 重建共用）——立一面 splash、
+ * 记阶段，dom-ready 后补推。冷启动的 splash 早已收掉；这里重新立一面。
+ */
+function raiseRestartSplash(): void {
+  splash = new BrowserWindow({
+    title: APP_NAME,
+    html: splashHtml(readShellTheme(dshHome(), instanceProfile), platform),
+    renderer,
+    titleBarStyle: 'hiddenInset',
+    // #164：win32/linux 多一条标题带，窗高相应加一段（darwin 有系统红绿灯，不加）。
+    frame: {
+      width: SPLASH_WIDTH,
+      height: dialogTitlebarFrameHeight(SPLASH_HEIGHT, platform),
+    },
+  })
+  splashReady = false
+  lastStage = 'instance'
+  splash.on('dom-ready', () => {
+    splashReady = true
+    pushStage()
+  })
+}
+
+/**
+ * #247：托盘单 profile「重启」——带 splash 的壳内重建（不再只是无界面 stop+open）。
+ * 本地：停服务面 → 共享重启界面 → 全新拉起 → 新窗就绪撤界面；
+ * 远程（#246）：无服务面可停，窗口销毁重建即数据面重连，不立界面。
+ */
+async function restartProfileWithSplash(profile: string): Promise<void> {
+  if (quitting) return
+  if (isRemoteProfile(profile)) {
+    await sessions.stop(profile)
+    await openProfileWindow(profile)
+    return
+  }
+  const showSplash = !noWindow && !restartingShell
+  if (showSplash) raiseRestartSplash()
+  await sessions.stop(profile)
+  await openProfileWindow(profile)
+  // 重建完成：没有别的重建在排队就收掉界面（新主窗 dom-ready 也会收，这里是其它 profile 的兜底）。
+  if (showSplash) {
+    try {
+      splash?.close()
+    } catch (error) {
+      console.warn(`[shell] 启动界面关闭失败（单 profile 重建路径）：${String(error)}`)
+    }
+    splash = null
+    splashReady = false
+  }
+  refreshTray()
+}
+
+/**
  * #60 + #79：DSH 侧的「重启 dsh 服务」入口——面板按钮、托盘切运行时都走这一条。
  * 语义（维护者 2026-10-14 拍板）：DSH 侧等效「退出应用再启动」——宿主+伴生进程树整树灭确认后全新拉起；
  * 桌面壳本体（托盘/进程）不退出。有窗口时：关窗 → 重启界面（复用冷启动 splash 通道，
@@ -841,27 +896,9 @@ async function restartDsh(): Promise<void> {
     const reopenProfiles = sessions.openProfiles()
     const showSplash = !noWindow && reopenProfiles.length > 0
     console.log(`[shell] 完整重启：DSH 树级重启 ${String(serviceCount)} 份服务面（壳与托盘保持不动）`)
-    // ---- 阶段〇：关窗 → 重启界面（splash 复用冷启动通道：onStage/pushStage 写同一组模块变量）----
+    // ---- 阶段〇：关窗 → 重启界面（raiseRestartSplash：冷启动通道复用，onStage/pushStage 同一套）----
     if (showSplash) {
-      splash = new BrowserWindow({
-        title: APP_NAME,
-        html: splashHtml(readShellTheme(dshHome(), instanceProfile), platform),
-        renderer,
-        titleBarStyle: 'hiddenInset',
-        // #164：win32/linux 多一条标题带，窗高相应加一段（darwin 有系统红绿灯，不加）。
-        frame: {
-          width: SPLASH_WIDTH,
-          height: dialogTitlebarFrameHeight(SPLASH_HEIGHT, platform),
-        },
-      })
-      // 冷启动的 splash 早已收掉（主窗 dom-ready 收尾）；这里重新立一面。dom-ready 前不能推 JS
-      //（原生层 FATAL，见启动段注释），先记阶段，dom-ready 后补推。
-      splashReady = false
-      lastStage = 'instance'
-      splash.on('dom-ready', () => {
-        splashReady = true
-        pushStage()
-      })
+      raiseRestartSplash()
       // 关窗绕过关窗策略（回托盘/退进程的判断是给用户手关用的；重启关窗是壳自己的动作）——
       // 置位/关窗/等一拍/复位的时序收口在 profile-session.ts（C1，#179）
       await sessions.closeWindowsForRestart(reopenProfiles)
@@ -1166,9 +1203,10 @@ function onTrayAction(action: TrayAction): void {
       if (action.profile !== undefined) void stopProfileFromTray(action.profile)
       return
     case 'restart-profile': {
-      // #241：托盘「重启」= 退出实例再打开（带 splash 的壳内重建是 #247 的升级项）。
+      // #247：单 profile 重建升级成带 splash（共享 restartDsh 的重启界面通道）；
+      // 远程条目仍走 #246 的窗口销毁重建（无服务面可停）。
       const profile = action.profile
-      if (profile !== undefined) void stopProfileFromTray(profile).then(() => openProfileWindow(profile))
+      if (profile !== undefined) void restartProfileWithSplash(profile)
       return
     }
     case 'toggle-profile-window':
@@ -1639,6 +1677,25 @@ if (!noWindow) {
   // 标题栏形态与旧壳对齐：macOS 保留原生红绿灯并叠在内容上（旧壳 TitleBarStyle::Overlay），
   // Windows/Linux 隐藏原生标题栏，caption 行与窗口按钮由插件 client 自绘（旧壳 decorations:false）。
   if (!startupBlocked) await sessions.attachWindow(instanceProfile, bootService)
+  // #247「先就绪先开」：重启应用/崩溃自愈后主进程塞来的恢复清单（spawn.ts shellDaemonEnv 写入）。
+  // 启动 profile 的窗口上面已接好；其余逐份拉起（服务面就绪一份开一份窗，不攒批次）。
+  // 失败不挡启动——托盘里还能手动开。
+  const restoreList = (process.env[SHELL_RESTORE_PROFILES_ENV] ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '' && entry !== instanceProfile)
+  if (restoreList.length > 0) {
+    console.log(`[shell] 恢复上一次开着的窗口：${restoreList.join('、')}`)
+    void (async () => {
+      for (const profile of restoreList) {
+        try {
+          await openProfileWindow(profile)
+        } catch (error) {
+          console.error(`[shell] 恢复窗口失败（${profile}）：${String(error)}`)
+        }
+      }
+    })()
+  }
   // 右键菜单里我们自己那几项（原生 role 由系统处理，不会回到这里）；
 
 /**
@@ -1729,8 +1786,9 @@ async function shutdown(): Promise<void> {
   if (stopping) return
   stopping = true
   quitting = true
-  // #243：退出前上报（尽力而为）——普通退出无意图，主进程不重拉（macOS 后台语义留守）。
-  shellReporter.reportExit()
+  // #243/#247：退出前上报（尽力而为）。macOS 不带意图：主进程留守值守（后台语义，等下一次激活）；
+  // win/linux 带 quit：主进程跟随退出（全退口径，防 watchdog 回拉）。
+  shellReporter.reportExit(platform === 'darwin' ? undefined : 'quit')
   // 托盘先摘：否则退出过程中它还会响菜单（点了就是另一个 shutdown）
   tray?.destroy()
   tray = null

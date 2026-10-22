@@ -28,8 +28,8 @@ export interface ShellEvent {
   exitIntent?: ShellExitIntent
 }
 
-/** 壳退出意图（exit 专属）：restart = 壳自杀由守护重拉；缺省 = 普通退出。 */
-export type ShellExitIntent = 'restart'
+/** 壳退出意图（exit 专属）：restart = 壳自杀由守护重拉；quit = 连主进程一起退（win/linux 全退口径，#247）；缺省 = 普通退出。 */
+export type ShellExitIntent = 'restart' | 'quit'
 
 /** 守护 → 壳的进程级 env（窗口控制不跨进程——壳自己管窗口，#243 拍板）。 */
 export const SHELL_RESTORE_PROFILES_ENV = 'DSH_SHELL_RESTORE_PROFILES'
@@ -81,7 +81,7 @@ export function parseShellEvent(text: string): ShellEvent | null {
           ? raw.openProfiles.filter((p): p is string => typeof p === 'string' && p !== '')
           : undefined,
         exitCode: typeof raw.exitCode === 'number' ? raw.exitCode : null,
-        exitIntent: raw.exitIntent === 'restart' ? 'restart' : undefined,
+        exitIntent: raw.exitIntent === 'restart' || raw.exitIntent === 'quit' ? raw.exitIntent : undefined,
       }
     } catch {
       return null
