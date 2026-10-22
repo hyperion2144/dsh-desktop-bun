@@ -226,6 +226,7 @@ jobs:
           # 内置树随包断言：Windows 是两段式（安装位 = launcher + payload 归档，app\dsh
           # 要等首次启动自解压才物化），所以放到 SHELL-READY 之后断言（见下方）。
           $smokeHome = Join-Path $env:RUNNER_TEMP 'dsh-smoke-home'
+           New-Item -ItemType Directory -Force -Path $smokeHome | Out-Null
           $log = Join-Path $env:RUNNER_TEMP 'smoke-out.log'
           $env:DSH_HOME = $smokeHome
           $env:DSH_SHELL_PROFILE_MODE = 'fresh'
@@ -233,7 +234,8 @@ jobs:
           $env:DSH_SHELL_PAGE_PORT = '6451'
           $env:DSH_DESKTOP_PORT = '6452'
           $env:DSH_MOBILE_LANE_PORT = '6453'
-          $env:DSH_DESKTOP_AUTO_QUIT = '20000'
+           # Windows CI 机器慢：DSH worker 冷启动实测 >20s，AUTO_QUIT 得等它就绪完再退
+           $env:DSH_DESKTOP_AUTO_QUIT = '120000'
           $env:DSH_DESKTOP_NO_SINGLETON = '1'
           # launcher 自己知道怎么引导自己的载荷（macOS 实测裸跑即可），不用替它拼 main.js 参数
           # 提速：runner 的 Defender 实时扫描会把 31k 文件的解压拖到分钟级
